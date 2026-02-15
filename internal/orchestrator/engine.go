@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -80,17 +79,20 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 		close(results)
 	}()
 
-	var lastErr error
+	var attempts []AttemptError
 	for res := range results {
 		if res.err == nil {
 			cancel() // Cancel other requests
 			return res.response, nil
 		}
-		lastErr = res.err
+		attempts = append(attempts, AttemptError{
+			Client: res.client,
+			Err:    res.err,
+		})
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
+	if len(attempts) > 0 {
+		return nil, &AllClientsFailedError{Attempts: attempts}
 	}
 	return nil, types.ErrNoClientsAvailable
 }
@@ -136,7 +138,10 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("innertube error: %d", resp.StatusCode)
+		return nil, &HTTPStatusError{
+			Client:     profile.Name,
+			StatusCode: resp.StatusCode,
+		}
 	}
 
 	// Read body for potential debugging
@@ -153,8 +158,11 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 
 	// Playability Check
 	if !playerResp.PlayabilityStatus.IsOK() && !playerResp.PlayabilityStatus.IsLive() {
-		// Log detailed error reason if available
-		return nil, fmt.Errorf("unplayable: %s. Reason: %s", playerResp.PlayabilityStatus.Status, playerResp.PlayabilityStatus.Reason)
+		return nil, &PlayabilityError{
+			Client: profile.Name,
+			Status: playerResp.PlayabilityStatus.Status,
+			Reason: playerResp.PlayabilityStatus.Reason,
+		}
 	}
 
 	return &playerResp, nil

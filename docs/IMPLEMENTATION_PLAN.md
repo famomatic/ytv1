@@ -13,27 +13,27 @@
 - `[x]` Public package-first API skeleton exists (`client.New/GetVideo/GetFormats/ResolveStreamURL`)
 - `[x]` Build is green (`go test ./...`)
 - `[x]` PlayerJS fetch settings are externally configurable (base URL / UA / headers with fallback)
-- `[-]` Internal error -> public error mapping is wired, but still string-based in part
-- `[ ]` Binary outputs excluded from VCS by default (`ytv1.exe` still needs ignore rule)
+- `[x]` Internal error -> public error mapping is wired with typed orchestrator errors
+- `[x]` Binary outputs excluded from VCS by default (`ytv1.exe` ignored and untracked)
 
 ### Feature Completeness vs yt-dlp
 
-- `[ ]` yt-dlp-level client matrix and priority behavior
+- `[-]` yt-dlp-level client matrix and priority behavior (baseline order expanded)
 - `[ ]` yt-dlp-level fallback policy by playability state (age gate, auth required, etc.)
-- `[ ]` Signature (`s`) decipher implementation
-- `[ ]` `n` challenge solve for stream URLs
+- `[x]` Signature (`s`) decipher implementation (initial)
+- `[x]` `n` challenge solve for stream URLs (initial)
 - `[ ]` Manifest (`dash/hls`) `n` challenge handling
 - `[ ]` PO Token policy/flow implementation
-- `[ ]` Stream URL resolver fully wired (no placeholder path)
+- `[x]` Stream URL resolver fully wired (initial path)
 
 ### Immediate Next Tasks (Execution Order)
 
-1. `[ ]` Add `.gitignore` rule for `ytv1.exe` (and common build outputs).
-2. `[ ]` Remove string-heuristic error mapping; introduce typed orchestration errors.
-3. `[ ]` Carry `playerURL`/challenge context from orchestrator to `ResolveStreamURL`.
-4. `[ ]` Implement real `playerjs.DecipherSignature` and `DecipherN` (initial version from legacy refs).
-5. `[ ]` Wire `ResolveStreamURL` to use playerjs + challenge path instead of returning `ErrChallengeNotSolved`.
-6. `[ ]` Expand selector/registry toward yt-dlp baseline clients and ordering.
+1. `[x]` Add `.gitignore` rule for `ytv1.exe` (and common build outputs).
+2. `[x]` Remove string-heuristic error mapping; introduce typed orchestration errors.
+3. `[x]` Carry `playerURL`/challenge context from orchestrator to `ResolveStreamURL`.
+4. `[x]` Implement real `playerjs.DecipherSignature` and `DecipherN` (initial version from legacy refs).
+5. `[x]` Wire `ResolveStreamURL` to use playerjs + challenge path instead of returning `ErrChallengeNotSolved`.
+6. `[-]` Expand selector/registry toward yt-dlp baseline clients and ordering (`ClientOverrides` wiring + baseline order expansion done; yt-dlp parity pending).
 
 ## 1. Positioning
 
@@ -195,8 +195,8 @@ Typed errors (package-level):
 
 1. `[x]` Make repository build green (`go test ./...`).
 2. `[x]` Remove unused imports in `internal/playerjs/*`.
-3. `[-]` Ensure selector/client config consistency (API key and fallback behavior).
-4. `[ ]` Keep binary out of VCS (`ytv1.exe` in `.gitignore`).
+3. `[x]` Ensure selector/client config consistency (API key and fallback behavior).
+4. `[x]` Keep binary out of VCS (`ytv1.exe` in `.gitignore`).
 
 ## 10. Definition of Done (v1)
 

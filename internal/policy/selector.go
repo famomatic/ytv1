@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"strings"
+
 	"github.com/mjmst/ytv1/internal/innertube"
 )
 
@@ -11,12 +13,14 @@ type Selector interface {
 }
 
 type defaultSelector struct {
-	registry innertube.Registry
+	registry    innertube.Registry
+	clientOrder []string
 }
 
-func NewSelector(registry innertube.Registry) Selector {
+func NewSelector(registry innertube.Registry, clientOrder []string) Selector {
 	return &defaultSelector{
-		registry: registry,
+		registry:    registry,
+		clientOrder: clientOrder,
 	}
 }
 
@@ -25,22 +29,43 @@ func (s *defaultSelector) Registry() innertube.Registry {
 }
 
 func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
-	// Default strategy: Try Android, iOS, Web, and TV.
-	// In the future, this can be smarter (e.g. check if video is age-gated, music, etc.)
-	
-	clients := []string{
-		"android",
-		"ios",
-		"web",
-		// "tv", // TV client often requires different handling, maybe add later as fallback
+	clients := s.clientOrder
+	if len(clients) == 0 {
+		// Default strategy: try app clients first, then web variants as fallbacks.
+		clients = []string{
+			"android",
+			"ios",
+			"web",
+			"web_embedded",
+			"tv",
+		}
 	}
 
 	var profiles []innertube.ClientProfile
+	seen := make(map[string]struct{}, len(clients))
 	for _, name := range clients {
-		if p, ok := s.registry.Get(name); ok {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		if p, ok := s.registry.Get(normalized); ok {
 			profiles = append(profiles, p)
 		}
 	}
-	
+
+	// If overrides were provided but all invalid, fall back to defaults.
+	if len(profiles) == 0 && len(s.clientOrder) > 0 {
+		defaults := []string{"android", "ios", "web", "web_embedded", "tv"}
+		for _, name := range defaults {
+			if p, ok := s.registry.Get(name); ok {
+				profiles = append(profiles, p)
+			}
+		}
+	}
+
 	return profiles
 }

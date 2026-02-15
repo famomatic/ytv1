@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +19,7 @@ const (
 
 type Resolver interface {
 	GetPlayerJS(ctx context.Context, playerID string) (string, error)
+	GetPlayerURL(ctx context.Context, videoID string) (string, error)
 }
 
 type defaultResolver struct {
@@ -33,6 +36,7 @@ type ResolverConfig struct {
 }
 
 const defaultPlayerJSUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+var playerURLPattern = regexp.MustCompile(`(/s/player/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]*/base\.js)`)
 
 func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolver {
 	resolverConfig := ResolverConfig{}
@@ -96,4 +100,54 @@ func (r *defaultResolver) GetPlayerJS(ctx context.Context, playerURL string) (st
 	return body, nil
 }
 
-// Decipher logic will go into a separate file or struct, but Resolver fetches the code.
+func (r *defaultResolver) GetPlayerURL(ctx context.Context, videoID string) (string, error) {
+	baseURL := r.config.BaseURL
+	if baseURL == "" {
+		baseURL = "https://www.youtube.com"
+	}
+
+	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/watch")
+	if err != nil {
+		return "", fmt.Errorf("failed to build watch url: %w", err)
+	}
+	q := u.Query()
+	q.Set("v", videoID)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	ua := r.config.UserAgent
+	if ua == "" {
+		ua = defaultPlayerJSUserAgent
+	}
+	req.Header.Set("User-Agent", ua)
+	for k, values := range r.config.Headers {
+		for _, v := range values {
+			req.Header.Add(k, v)
+		}
+	}
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch watch page: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("bad status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read body: %w", err)
+	}
+
+	m := playerURLPattern.FindSubmatch(body)
+	if len(m) < 2 {
+		return "", fmt.Errorf("player url not found")
+	}
+	return string(m[1]), nil
+}

@@ -33,6 +33,10 @@ type Config struct {
 
 	// PlayerJSHeaders are additional headers for player JS fetches.
 	PlayerJSHeaders http.Header
+
+	// ClientOverrides sets Innertube client trial order (e.g. "web", "ios", "android").
+	// If empty, package defaults are used.
+	ClientOverrides []string
 }
 
 func (c Config) ToInnerTubeConfig() innertube.Config {
@@ -44,5 +48,6 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 		PlayerJSBaseURL: c.PlayerJSBaseURL,
 		PlayerJSUserAgent: c.PlayerJSUserAgent,
 		PlayerJSHeaders: c.PlayerJSHeaders,
+		ClientOverrides: c.ClientOverrides,
 	}
 }

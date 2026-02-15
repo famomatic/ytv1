@@ -1,0 +1,51 @@
+package orchestrator
+
+import (
+	"fmt"
+	"strings"
+)
+
+// AttemptError captures one client attempt failure.
+type AttemptError struct {
+	Client string
+	Err    error
+}
+
+// AllClientsFailedError is returned when no client attempt succeeded.
+type AllClientsFailedError struct {
+	Attempts []AttemptError
+}
+
+func (e *AllClientsFailedError) Error() string {
+	if len(e.Attempts) == 0 {
+		return "all clients failed"
+	}
+	return fmt.Sprintf("all clients failed: %d attempt(s)", len(e.Attempts))
+}
+
+// HTTPStatusError indicates non-200 Innertube response.
+type HTTPStatusError struct {
+	Client     string
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("innertube http status=%d client=%s", e.StatusCode, e.Client)
+}
+
+// PlayabilityError indicates an unplayable player response.
+type PlayabilityError struct {
+	Client string
+	Status string
+	Reason string
+}
+
+func (e *PlayabilityError) Error() string {
+	return fmt.Sprintf("unplayable status=%s client=%s reason=%s", e.Status, e.Client, e.Reason)
+}
+
+func (e *PlayabilityError) RequiresLogin() bool {
+	s := strings.ToUpper(e.Status + " " + e.Reason)
+	return strings.Contains(s, "LOGIN") || strings.Contains(s, "SIGN IN")
+}
+

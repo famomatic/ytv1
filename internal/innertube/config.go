@@ -19,4 +19,5 @@ type Config struct {
 	PlayerJSBaseURL string
 	PlayerJSUserAgent string
 	PlayerJSHeaders http.Header
+	ClientOverrides []string
 }

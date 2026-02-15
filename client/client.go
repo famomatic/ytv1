@@ -5,7 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
+	"net/url"
+	"sync"
 
 	"github.com/mjmst/ytv1/internal/formats"
 	"github.com/mjmst/ytv1/internal/innertube"
@@ -20,6 +21,13 @@ type Client struct {
 	config Config
 	engine *orchestrator.Engine
 	playerJSResolver playerjs.Resolver
+	sessionsMu sync.RWMutex
+	sessions   map[string]videoSession
+}
+
+type videoSession struct {
+	Response  *innertube.PlayerResponse
+	PlayerURL string
 }
 
 // New creates a new YouTube client.
@@ -34,8 +42,8 @@ func NewClient(config Config) *Client {
 	}
 
 	registry := innertube.NewRegistry()
-	selector := policy.NewSelector(registry)
 	innerCfg := config.ToInnerTubeConfig()
+	selector := policy.NewSelector(registry, innerCfg.ClientOverrides)
 	engine := orchestrator.NewEngine(selector, innerCfg)
 	jsResolver := playerjs.NewResolver(
 		config.HTTPClient,
@@ -51,6 +59,7 @@ func NewClient(config Config) *Client {
 		config: config,
 		engine: engine,
 		playerJSResolver: jsResolver,
+		sessions: make(map[string]videoSession),
 	}
 }
 
@@ -81,6 +90,14 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		Formats: outFormats,
 	}
 
+	playerURL, _ := c.playerJSResolver.GetPlayerURL(ctx, videoID)
+	c.sessionsMu.Lock()
+	c.sessions[videoID] = videoSession{
+		Response:  resp,
+		PlayerURL: playerURL,
+	}
+	c.sessionsMu.Unlock()
+
 	return info, nil
 }
 
@@ -98,22 +115,83 @@ func (c *Client) GetFormats(ctx context.Context, input string) ([]FormatInfo, er
 
 // ResolveStreamURL resolves a direct playable URL for a specific itag.
 func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int) (string, error) {
-	formats, err := c.GetFormats(ctx, videoID)
+	videoID, err := normalizeVideoID(videoID)
 	if err != nil {
 		return "", err
 	}
 
-	for _, f := range formats {
-		if f.Itag != itag {
-			continue
+	session, ok := c.getSession(videoID)
+	if !ok {
+		if _, err := c.GetVideo(ctx, videoID); err != nil {
+			return "", err
 		}
-		if f.URL == "" {
+		session, ok = c.getSession(videoID)
+		if !ok {
 			return "", ErrChallengeNotSolved
 		}
-		return f.URL, nil
 	}
 
-	return "", fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, itag)
+	raw, found := findRawFormat(session.Response, itag)
+	if !found {
+		return "", fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, itag)
+	}
+
+	if raw.URL != "" {
+		return raw.URL, nil
+	}
+
+	cipher := raw.SignatureCipher
+	if cipher == "" {
+		cipher = raw.Cipher
+	}
+	if cipher == "" || session.PlayerURL == "" {
+		return "", ErrChallengeNotSolved
+	}
+
+	params, err := url.ParseQuery(cipher)
+	if err != nil {
+		return "", ErrChallengeNotSolved
+	}
+	rawURL := params.Get("url")
+	if rawURL == "" {
+		return "", ErrChallengeNotSolved
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", ErrChallengeNotSolved
+	}
+
+	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, session.PlayerURL)
+	if err != nil {
+		return "", ErrChallengeNotSolved
+	}
+	decipherer := playerjs.NewDecipherer(jsBody)
+
+	if s := params.Get("s"); s != "" {
+		decSig, err := decipherer.DecipherSignature(s)
+		if err != nil {
+			return "", ErrChallengeNotSolved
+		}
+		sp := params.Get("sp")
+		if sp == "" {
+			sp = "signature"
+		}
+		q := u.Query()
+		q.Set(sp, decSig)
+		u.RawQuery = q.Encode()
+	}
+
+	q := u.Query()
+	if n := q.Get("n"); n != "" {
+		decN, err := decipherer.DecipherN(n)
+		if err != nil {
+			return "", ErrChallengeNotSolved
+		}
+		q.Set("n", decN)
+		u.RawQuery = q.Encode()
+	}
+
+	return u.String(), nil
 }
 
 func toFormatInfo(f formats.Format) FormatInfo {
@@ -161,15 +239,52 @@ func mapError(err error) error {
 		return ErrUnavailable
 	}
 
-	msg := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(msg, "unplayable"):
-		if strings.Contains(msg, "login") || strings.Contains(msg, "sign in") {
+	var playabilityErr *orchestrator.PlayabilityError
+	if errors.As(err, &playabilityErr) {
+		if playabilityErr.RequiresLogin() {
 			return ErrLoginRequired
 		}
 		return ErrUnavailable
-	case strings.Contains(msg, "innertube error"):
+	}
+
+	var allFailedErr *orchestrator.AllClientsFailedError
+	if errors.As(err, &allFailedErr) {
+		for _, attempt := range allFailedErr.Attempts {
+			if errors.As(attempt.Err, &playabilityErr) && playabilityErr.RequiresLogin() {
+				return ErrLoginRequired
+			}
+		}
 		return ErrAllClientsFailed
 	}
+
+	var httpStatusErr *orchestrator.HTTPStatusError
+	if errors.As(err, &httpStatusErr) {
+		return ErrAllClientsFailed
+	}
+
 	return err
+}
+
+func (c *Client) getSession(videoID string) (videoSession, bool) {
+	c.sessionsMu.RLock()
+	defer c.sessionsMu.RUnlock()
+	s, ok := c.sessions[videoID]
+	return s, ok
+}
+
+func findRawFormat(resp *innertube.PlayerResponse, itag int) (innertube.Format, bool) {
+	if resp == nil {
+		return innertube.Format{}, false
+	}
+	for _, f := range resp.StreamingData.Formats {
+		if f.Itag == itag {
+			return f, true
+		}
+	}
+	for _, f := range resp.StreamingData.AdaptiveFormats {
+		if f.Itag == itag {
+			return f, true
+		}
+	}
+	return innertube.Format{}, false
 }
