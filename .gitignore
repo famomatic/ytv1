@@ -4,5 +4,5 @@ ytv1*.exe
 *.mp4
 *.m4a
 /scripts/
-/internal/playerjs/testdata/
+#/internal/playerjs/testdata/
 /*.json
