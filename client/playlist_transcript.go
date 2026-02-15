@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -76,7 +77,8 @@ func (c *Client) GetTranscript(ctx context.Context, input string, languageCode s
 	}, nil
 }
 
-// GetPlaylist fetches and parses playlist metadata/items from playlist page initial data.
+// GetPlaylist fetches and parses playlist metadata/items from playlist page initial data
+// and continuation requests.
 func (c *Client) GetPlaylist(ctx context.Context, input string) (*PlaylistInfo, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
 	defer cancel()
@@ -90,6 +92,8 @@ func (c *Client) GetPlaylist(ctx context.Context, input string) (*PlaylistInfo, 
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", innertube.WebClient.UserAgent)
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	applyRequestHeaders(req, c.config.RequestHeaders)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
@@ -117,7 +121,99 @@ func (c *Client) GetPlaylist(ctx context.Context, input string) (*PlaylistInfo, 
 		Title: findPlaylistTitle(root),
 		Items: findPlaylistItems(root),
 	}
+
+	pendingContinuations := findContinuationTokens(root)
+	visitorData := findVisitorData(root)
+	seenContinuations := make(map[string]struct{}, len(pendingContinuations))
+
+	for len(pendingContinuations) > 0 {
+		continuation := strings.TrimSpace(pendingContinuations[0])
+		pendingContinuations = pendingContinuations[1:]
+		if continuation == "" {
+			continue
+		}
+		if _, seen := seenContinuations[continuation]; seen {
+			continue
+		}
+		seenContinuations[continuation] = struct{}{}
+
+		browseResp, err := c.browse(ctx, continuation, visitorData)
+		if err != nil {
+			// Fail gracefully on continuation error and continue remaining candidates.
+			fmt.Printf("Warning: failed to fetch continuation: %v\n", err)
+			continue
+		}
+
+		newItems, nextTokens := parseBrowseResponse(browseResp)
+		info.Items = append(info.Items, newItems...)
+		for _, token := range nextTokens {
+			token = strings.TrimSpace(token)
+			if token == "" {
+				continue
+			}
+			if _, seen := seenContinuations[token]; seen {
+				continue
+			}
+			pendingContinuations = append(pendingContinuations, token)
+		}
+	}
+
 	return info, nil
+}
+
+func (c *Client) browse(ctx context.Context, continuation string, visitorData string) (*innertube.BrowseResponse, error) {
+	clientProfile := innertube.WebClient
+	req := innertube.NewBrowseRequest(clientProfile, "", continuation, innertube.PlayerRequestOptions{
+		VisitorData: visitorData,
+	})
+	body, err := innertube.MarshalRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	apiURL := "https://" + clientProfile.Host + "/youtubei/v1/browse?key=" + clientProfile.APIKey
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", clientProfile.UserAgent)
+	httpReq.Header.Set("Origin", "https://"+clientProfile.Host)
+
+	// Add global request headers
+	applyRequestHeaders(httpReq, c.config.RequestHeaders)
+
+	resp, err := c.httpClient().Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("browse failed: status=%d", resp.StatusCode)
+	}
+
+	var browseResp innertube.BrowseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&browseResp); err != nil {
+		return nil, err
+	}
+	return &browseResp, nil
+}
+
+func findVisitorData(root any) string {
+	var token string
+	walkAny(root, func(m map[string]any) {
+		if token != "" {
+			return
+		}
+		// Look for responseContext -> visitorData
+		if rc, ok := m["responseContext"].(map[string]any); ok {
+			if v, ok := rc["visitorData"].(string); ok {
+				token = v
+			}
+		}
+	})
+	return token
 }
 
 func (c *Client) httpClient() *http.Client {
@@ -380,4 +476,115 @@ func getTextField(v any) string {
 		}
 	}
 	return strings.Join(parts, "")
+}
+
+
+func findContinuationTokens(root any) []string {
+	tokens := make([]string, 0, 2)
+	seen := make(map[string]struct{})
+	appendToken := func(token string) {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return
+		}
+		if _, exists := seen[token]; exists {
+			return
+		}
+		seen[token] = struct{}{}
+		tokens = append(tokens, token)
+	}
+	walkAny(root, func(m map[string]any) {
+		if cc, ok := m["continuationCommand"].(map[string]any); ok {
+			appendToken(getStringFromMap(cc, "token"))
+		}
+		if ncd, ok := m["nextContinuationData"].(map[string]any); ok {
+			appendToken(getStringFromMap(ncd, "continuation"))
+		}
+		if rcd, ok := m["reloadContinuationData"].(map[string]any); ok {
+			appendToken(getStringFromMap(rcd, "continuation"))
+		}
+	})
+	return tokens
+}
+
+func parseBrowseResponse(resp *innertube.BrowseResponse) ([]PlaylistItem, []string) {
+	var items []PlaylistItem
+	nextTokens := make([]string, 0, 2)
+	seenTokens := make(map[string]struct{})
+	appendToken := func(token string) {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return
+		}
+		if _, exists := seenTokens[token]; exists {
+			return
+		}
+		seenTokens[token] = struct{}{}
+		nextTokens = append(nextTokens, token)
+	}
+
+	// Helper to extract items from a list of ContinuationItems
+	extractFromItems := func(cItems []innertube.ContinuationItem) {
+		for _, item := range cItems {
+			if item.PlaylistVideoRenderer != nil {
+				v := item.PlaylistVideoRenderer
+				items = append(items, PlaylistItem{
+					VideoID:         v.VideoID,
+					Title:           captionName(v.Title),
+					Author:          captionName(v.ShortBylineText),
+					DurationSeconds: captionName(v.LengthText),
+				})
+			}
+			if item.ContinuationItemRenderer != nil {
+				appendToken(item.ContinuationItemRenderer.ContinuationEndpoint.ContinuationCommand.Token)
+			}
+		}
+	}
+
+	for _, action := range resp.OnResponseReceivedActions {
+		if action.AppendContinuationItemsAction != nil {
+			extractFromItems(action.AppendContinuationItemsAction.ContinuationItems)
+		}
+		if action.ReloadContinuationItemsCommand != nil {
+			extractFromItems(action.ReloadContinuationItemsCommand.ContinuationItems)
+		}
+	}
+	for _, endpoint := range resp.OnResponseReceivedEndpoints {
+		if endpoint.AppendContinuationItemsAction != nil {
+			extractFromItems(endpoint.AppendContinuationItemsAction.ContinuationItems)
+		}
+		if endpoint.ReloadContinuationItemsCommand != nil {
+			extractFromItems(endpoint.ReloadContinuationItemsCommand.ContinuationItems)
+		}
+	}
+	// Also check contents -> twoColumnBrowseResultsRenderer -> tabs -> tabRenderer -> content -> sectionListRenderer -> contents -> itemSectionRenderer -> contents
+	// But usually continuation returns actions.
+	
+	// If no actions, check if it's a reloaded browse response (rare for continuation but possible)
+	if len(resp.OnResponseReceivedActions) == 0 && len(resp.OnResponseReceivedEndpoints) == 0 && resp.Contents.TwoColumnBrowseResultsRenderer != nil {
+		for _, tab := range resp.Contents.TwoColumnBrowseResultsRenderer.Tabs {
+			if tab.TabRenderer != nil && tab.TabRenderer.Content != nil && tab.TabRenderer.Content.SectionListRenderer != nil {
+				for _, section := range tab.TabRenderer.Content.SectionListRenderer.Contents {
+					if section.ItemSectionRenderer != nil {
+						for _, item := range section.ItemSectionRenderer.Contents {
+							if item.PlaylistVideoRenderer != nil {
+								v := item.PlaylistVideoRenderer
+								items = append(items, PlaylistItem{
+									VideoID:         v.VideoID,
+									Title:           captionName(v.Title),
+									Author:          captionName(v.ShortBylineText),
+									DurationSeconds: captionName(v.LengthText),
+								})
+							}
+						}
+					}
+					if section.ContinuationItemRenderer != nil {
+						appendToken(section.ContinuationItemRenderer.ContinuationEndpoint.ContinuationCommand.Token)
+					}
+				}
+			}
+		}
+	}
+
+	return items, nextTokens
 }

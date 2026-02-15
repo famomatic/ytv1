@@ -48,6 +48,10 @@
 11. `[x]` Keep explicit override investigation open:
    - Reproduce `-clients android_vr,web,web_safari` -> `login required`.
    - Capture per-client attempt diagnostics and decide fallback insertion policy for override mode.
+12. `[x]` Harden playlist continuation token selection:
+   - Avoid stopping at 100 items when non-playlist continuation tokens are present.
+   - Follow valid continuation chain(s) until exhausted.
+   - Add regression test for mixed valid/invalid continuation tokens.
 
 ### Implementation Logic (Gap Closure)
 

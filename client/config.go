@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -78,6 +79,16 @@ type Config struct {
 
 	// DownloadTransport configures retry/backoff behavior for stream downloads.
 	DownloadTransport DownloadTransportConfig
+
+	// Muxer handles optional video+audio merging in Download(options.Merge=true).
+	// If nil, merge operations will warn and fallback to pre-muxed formats.
+	Muxer Muxer
+}
+
+// Muxer defines the interface for media muxing operations.
+type Muxer interface {
+	Available() bool
+	Merge(ctx context.Context, videoPath, audioPath, outputPath string) error
 }
 
 // DownloadTransportConfig controls retry/backoff behavior for direct stream downloads.

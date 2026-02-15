@@ -12,7 +12,8 @@ const (
 	SelectionModeBest         SelectionMode = "best"
 	SelectionModeMP4AV        SelectionMode = "mp4av"
 	SelectionModeMP4VideoOnly SelectionMode = "mp4videoonly"
-	SelectionModeAudioOnly    SelectionMode = "audioonly"
+	SelectionModeVideoOnly    SelectionMode = "videoonly" // Any container (webm/mp4)
+	SelectionModeAudioOnly    SelectionMode = "audioonly" // Any container (webm/m4a/mp3 via transcoding)
 	SelectionModeMP3          SelectionMode = "mp3"
 )
 
@@ -24,6 +25,8 @@ func normalizeSelectionMode(mode SelectionMode) SelectionMode {
 		return SelectionModeMP4AV
 	case SelectionModeMP4VideoOnly:
 		return SelectionModeMP4VideoOnly
+	case SelectionModeVideoOnly:
+		return SelectionModeVideoOnly
 	case SelectionModeAudioOnly:
 		return SelectionModeAudioOnly
 	case SelectionModeMP3:
@@ -73,6 +76,8 @@ func matchesSelectionMode(f FormatInfo, mode SelectionMode) bool {
 		return container == "mp4" && f.HasAudio && f.HasVideo
 	case SelectionModeMP4VideoOnly:
 		return container == "mp4" && f.HasVideo && !f.HasAudio
+	case SelectionModeVideoOnly:
+		return f.HasVideo && !f.HasAudio
 	case SelectionModeAudioOnly, SelectionModeMP3:
 		return f.HasAudio && !f.HasVideo
 	default:
@@ -88,6 +93,11 @@ func betterForMode(a, b FormatInfo, mode SelectionMode) bool {
 			[]int{b.Bitrate, boolScore(b.Ciphered), -b.Itag},
 		)
 	case SelectionModeMP4AV, SelectionModeMP4VideoOnly:
+		return compareKeys(
+			[]int{a.Height, a.Width, a.FPS, a.Bitrate, boolScore(a.Ciphered), -a.Itag},
+			[]int{b.Height, b.Width, b.FPS, b.Bitrate, boolScore(b.Ciphered), -b.Itag},
+		)
+	case SelectionModeVideoOnly:
 		return compareKeys(
 			[]int{a.Height, a.Width, a.FPS, a.Bitrate, boolScore(a.Ciphered), -a.Itag},
 			[]int{b.Height, b.Width, b.FPS, b.Bitrate, boolScore(b.Ciphered), -b.Itag},

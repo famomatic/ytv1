@@ -12,6 +12,18 @@ type PlayerRequest struct {
 	ServiceIntegrityDimensions *ServiceIntegrityDimensions `json:"serviceIntegrityDimensions,omitempty"`
 }
 
+type BrowseRequest struct {
+	Context       Context `json:"context"`
+	BrowseID      string  `json:"browseId,omitempty"`
+	Continuation  string  `json:"continuation,omitempty"`
+	Params        string  `json:"params,omitempty"`
+	CurrentUrl    string  `json:"currentUrl,omitempty"`
+	IsAudioOnly   bool    `json:"isAudioOnly,omitempty"`
+	TunerSetting  string  `json:"tunerSetting,omitempty"`
+	ContentCheckOk bool   `json:"contentCheckOk,omitempty"`
+	RacyCheckOk    bool   `json:"racyCheckOk,omitempty"`
+}
+
 type Context struct {
 	Client     ClientInfo     `json:"client"`
 	User       UserContext    `json:"user,omitempty"`
@@ -110,6 +122,35 @@ func NewPlayerRequest(profile ClientProfile, videoID string, opts ...PlayerReque
 		}
 	}
 
+	return req
+}
+
+func NewBrowseRequest(profile ClientProfile, browseID string, continuation string, opts ...PlayerRequestOptions) *BrowseRequest {
+	var options PlayerRequestOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	clientInfo := ClientInfo{
+		ClientName:       profile.Name,
+		ClientVersion:    profile.Version,
+		UserAgent:        profile.UserAgent,
+		AcceptLanguage:   "en",
+		VisitorData:      options.VisitorData,
+		TimeZone:         "UTC",
+		UtcOffsetMinutes: 0,
+	}
+	applyClientContextDefaults(&clientInfo, profile)
+
+	req := &BrowseRequest{
+		Context: Context{
+			Client: clientInfo,
+			Request: RequestContext{
+				UseSsl: true,
+			},
+		},
+		BrowseID:     browseID,
+		Continuation: continuation,
+	}
 	return req
 }
 

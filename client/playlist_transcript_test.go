@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -132,6 +133,104 @@ func TestGetPlaylist(t *testing.T) {
 	}
 }
 
+func TestGetPlaylist_ContinuationSkipsInvalidToken(t *testing.T) {
+	html := `<html><script>var ytInitialData = {"responseContext":{"visitorData":"visitor"},"metadata":{"playlistMetadataRenderer":{"title":"My Playlist"}},"contents":[{"playlistVideoRenderer":{"videoId":"aaaaaaaaaaa","title":{"simpleText":"one"},"shortBylineText":{"runs":[{"text":"author1"}]},"lengthText":{"simpleText":"1:00"}}},{"playlistVideoRenderer":{"videoId":"bbbbbbbbbbb","title":{"runs":[{"text":"two"}]},"shortBylineText":{"runs":[{"text":"author2"}]},"lengthText":{"simpleText":"2:00"}}},{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"bad-token"}}}},{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"good-token-1"}}}}]};</script></html>`
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && r.URL.Path == "/playlist" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(html)),
+				}, nil
+			}
+			if r.Method == http.MethodPost && r.URL.Path == "/youtubei/v1/browse" {
+				var reqBody struct {
+					Continuation string `json:"continuation"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+					t.Fatalf("decode browse request: %v", err)
+				}
+				switch reqBody.Continuation {
+				case "bad-token":
+					return jsonResponse(t, map[string]any{
+						"onResponseReceivedActions": []any{
+							map[string]any{
+								"appendContinuationItemsAction": map[string]any{
+									"continuationItems": []any{},
+								},
+							},
+						},
+					}), nil
+				case "good-token-1":
+					return jsonResponse(t, map[string]any{
+						"onResponseReceivedActions": []any{
+							map[string]any{
+								"appendContinuationItemsAction": map[string]any{
+									"continuationItems": []any{
+										map[string]any{
+											"playlistVideoRenderer": map[string]any{
+												"videoId":         "ccccccccccc",
+												"title":           map[string]any{"simpleText": "three"},
+												"shortBylineText": map[string]any{"runs": []any{map[string]any{"text": "author3"}}},
+												"lengthText":      map[string]any{"simpleText": "3:00"},
+											},
+										},
+										map[string]any{
+											"continuationItemRenderer": map[string]any{
+												"continuationEndpoint": map[string]any{
+													"continuationCommand": map[string]any{
+														"token": "good-token-2",
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					}), nil
+				case "good-token-2":
+					return jsonResponse(t, map[string]any{
+						"onResponseReceivedActions": []any{
+							map[string]any{
+								"appendContinuationItemsAction": map[string]any{
+									"continuationItems": []any{
+										map[string]any{
+											"playlistVideoRenderer": map[string]any{
+												"videoId":         "ddddddddddd",
+												"title":           map[string]any{"simpleText": "four"},
+												"shortBylineText": map[string]any{"runs": []any{map[string]any{"text": "author4"}}},
+												"lengthText":      map[string]any{"simpleText": "4:00"},
+											},
+										},
+									},
+								},
+							},
+						},
+					}), nil
+				default:
+					t.Fatalf("unexpected continuation token: %q", reqBody.Continuation)
+				}
+			}
+			t.Fatalf("unexpected request: %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+
+	c := &Client{config: Config{HTTPClient: httpClient}}
+	got, err := c.GetPlaylist(context.Background(), "https://www.youtube.com/playlist?list=PL1234567890")
+	if err != nil {
+		t.Fatalf("GetPlaylist() error = %v", err)
+	}
+	if len(got.Items) != 4 {
+		t.Fatalf("items len=%d, want 4", len(got.Items))
+	}
+	if got.Items[2].VideoID != "ccccccccccc" || got.Items[3].VideoID != "ddddddddddd" {
+		t.Fatalf("unexpected continuation items: %+v", got.Items)
+	}
+}
+
 func TestExtractPlaylistID(t *testing.T) {
 	id, err := ExtractPlaylistID("https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PLabc123")
 	if err != nil {
@@ -139,5 +238,42 @@ func TestExtractPlaylistID(t *testing.T) {
 	}
 	if id != "PLabc123" {
 		t.Fatalf("ExtractPlaylistID()=%q, want %q", id, "PLabc123")
+	}
+}
+
+func TestFindContinuationTokens_Variants(t *testing.T) {
+	root := map[string]any{
+		"a": map[string]any{
+			"continuationCommand": map[string]any{"token": "tok-a"},
+		},
+		"b": map[string]any{
+			"nextContinuationData": map[string]any{"continuation": "tok-b"},
+		},
+		"c": map[string]any{
+			"reloadContinuationData": map[string]any{"continuation": "tok-c"},
+		},
+		"d": map[string]any{
+			"continuationCommand": map[string]any{"token": "tok-a"},
+		},
+	}
+	got := findContinuationTokens(root)
+	if len(got) != 3 {
+		t.Fatalf("tokens len=%d, want 3 (got=%v)", len(got), got)
+	}
+	if got[0] != "tok-a" || got[1] != "tok-b" || got[2] != "tok-c" {
+		t.Fatalf("unexpected token order: %v", got)
+	}
+}
+
+func jsonResponse(t *testing.T, payload any) *http.Response {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal json response: %v", err)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(raw)),
 	}
 }

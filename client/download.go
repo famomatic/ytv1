@@ -20,6 +20,7 @@ type DownloadOptions struct {
 	Mode       SelectionMode
 	OutputPath string
 	Resume     bool
+	MergeOutput bool
 }
 
 // DownloadResult describes a completed file download.
@@ -59,6 +60,24 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	}
 	if len(filteredFormats) > 0 {
 		formats = filteredFormats
+	}
+
+	// Handle Muxing if requested and available
+	if options.MergeOutput && mode == SelectionModeBest && c.config.Muxer != nil && c.config.Muxer.Available() {
+		// Select best video-only
+		videoFmt, vOk := selectDownloadFormat(formats, DownloadOptions{Mode: SelectionModeVideoOnly})
+		// Select best audio-only
+		audioFmt, aOk := selectDownloadFormat(formats, DownloadOptions{Mode: SelectionModeAudioOnly})
+
+		if vOk && aOk {
+			// Resolution check: Is separate video+audio actually better than pre-muxed?
+			// Usually yes for 1080p+.
+			// But if the best video-only is same quality as best pre-muxed, we might not need to merge?
+			// yt-dlp always merges if possible for consistency.
+			
+			// We proceed with merge.
+			return c.downloadAndMerge(ctx, videoID, videoFmt, audioFmt, options)
+		}
 	}
 
 	chosen, ok := selectDownloadFormat(formats, options)
@@ -116,6 +135,60 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		Itag:       chosen.Itag,
 		OutputPath: outputPath,
 		Bytes:      written,
+	}, nil
+}
+
+func (c *Client) downloadAndMerge(ctx context.Context, videoID string, videoFmt, audioFmt FormatInfo, options DownloadOptions) (*DownloadResult, error) {
+	// Determine output path logic
+	outputPath := options.OutputPath
+	if outputPath == "" {
+		// Default to mp4 if merging, or match video container?
+		// Usually mp4 is safe.
+		outputPath = fmt.Sprintf("%s-%d+%d.mp4", videoID, videoFmt.Itag, audioFmt.Itag)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
+		return nil, err
+	}
+
+	// Temp paths
+	videoPath := fmt.Sprintf("%s.video.tmp", outputPath)
+	audioPath := fmt.Sprintf("%s.audio.tmp", outputPath)
+	defer func() {
+		// Cleanup in case of error (success cleanup handled by muxer)
+		_ = os.Remove(videoPath)
+		_ = os.Remove(audioPath)
+	}()
+
+	// Download Video
+	vURL, err := c.ResolveStreamURL(ctx, videoID, videoFmt.Itag)
+	if err != nil {
+		return nil, fmt.Errorf("resolve video failed: %w", err)
+	}
+	vBytes, err := downloadURLToPath(ctx, c.config.HTTPClient, vURL, videoPath, options.Resume, c.config.DownloadTransport)
+	if err != nil {
+		return nil, fmt.Errorf("download video failed: %w", err)
+	}
+
+	// Download Audio
+	aURL, err := c.ResolveStreamURL(ctx, videoID, audioFmt.Itag)
+	if err != nil {
+		return nil, fmt.Errorf("resolve audio failed: %w", err)
+	}
+	_, err = downloadURLToPath(ctx, c.config.HTTPClient, aURL, audioPath, options.Resume, c.config.DownloadTransport)
+	if err != nil {
+		return nil, fmt.Errorf("download audio failed: %w", err)
+	}
+
+	// Merge
+	if err := c.config.Muxer.Merge(ctx, videoPath, audioPath, outputPath); err != nil {
+		return nil, err
+	}
+
+	return &DownloadResult{
+		VideoID:    videoID,
+		Itag:       videoFmt.Itag, // Primary itag
+		OutputPath: outputPath,
+		Bytes:      vBytes, // Approximate (only video bytes?), logic decision.
 	}, nil
 }
 

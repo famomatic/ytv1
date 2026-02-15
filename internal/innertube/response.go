@@ -9,6 +9,91 @@ type PlayerResponse struct {
 	Captions          Captions          `json:"captions"`
 }
 
+type BrowseResponse struct {
+	Contents                    Contents                    `json:"contents"`
+	OnResponseReceivedActions   []OnResponseReceivedAction  `json:"onResponseReceivedActions"`
+	OnResponseReceivedEndpoints []OnResponseReceivedEndpoint `json:"onResponseReceivedEndpoints"`
+}
+
+type OnResponseReceivedAction struct {
+	AppendContinuationItemsAction *AppendContinuationItemsAction `json:"appendContinuationItemsAction"`
+	ReloadContinuationItemsCommand *ReloadContinuationItemsCommand `json:"reloadContinuationItemsCommand"`
+}
+
+type OnResponseReceivedEndpoint struct {
+	AppendContinuationItemsAction *AppendContinuationItemsAction `json:"appendContinuationItemsAction"`
+	ReloadContinuationItemsCommand *ReloadContinuationItemsCommand `json:"reloadContinuationItemsCommand"`
+}
+
+type AppendContinuationItemsAction struct {
+	ContinuationItems []ContinuationItem `json:"continuationItems"`
+}
+
+type ReloadContinuationItemsCommand struct {
+	ContinuationItems []ContinuationItem `json:"continuationItems"`
+}
+
+type Contents struct {
+	TwoColumnBrowseResultsRenderer *TwoColumnBrowseResultsRenderer `json:"twoColumnBrowseResultsRenderer"`
+}
+
+type TwoColumnBrowseResultsRenderer struct {
+	Tabs []Tab `json:"tabs"`
+}
+
+type Tab struct {
+	TabRenderer *TabRenderer `json:"tabRenderer"`
+}
+
+type TabRenderer struct {
+	Content *TabContent `json:"content"`
+}
+
+type TabContent struct {
+	SectionListRenderer *SectionListRenderer `json:"sectionListRenderer"`
+}
+
+type SectionListRenderer struct {
+	Contents []SectionListContent `json:"contents"`
+}
+
+type SectionListContent struct {
+	ItemSectionRenderer *ItemSectionRenderer `json:"itemSectionRenderer"`
+	ContinuationItemRenderer *ContinuationItemRenderer `json:"continuationItemRenderer"`
+}
+
+type ItemSectionRenderer struct {
+	Contents []ItemSectionContent `json:"contents"`
+}
+
+type ItemSectionContent struct {
+	PlaylistVideoRenderer *PlaylistVideoRenderer `json:"playlistVideoRenderer"`
+}
+
+type ContinuationItem struct {
+	ContinuationItemRenderer *ContinuationItemRenderer `json:"continuationItemRenderer"`
+	PlaylistVideoRenderer    *PlaylistVideoRenderer    `json:"playlistVideoRenderer"`
+}
+
+type ContinuationItemRenderer struct {
+	ContinuationEndpoint ContinuationEndpoint `json:"continuationEndpoint"`
+}
+
+type ContinuationEndpoint struct {
+	ContinuationCommand ContinuationCommand `json:"continuationCommand"`
+}
+
+type ContinuationCommand struct {
+	Token string `json:"token"`
+}
+
+type PlaylistVideoRenderer struct {
+	VideoID    string     `json:"videoId"`
+	Title      LangText   `json:"title"`
+	ShortBylineText LangText `json:"shortBylineText"`
+	LengthText LangText   `json:"lengthText"`
+}
+
 type PlayabilityStatus struct {
 	Status            string             `json:"status"`
 	Reason            string             `json:"reason"`

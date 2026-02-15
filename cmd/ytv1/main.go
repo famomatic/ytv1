@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/famomatic/ytv1/client"
+	"github.com/famomatic/ytv1/internal/muxer"
 	"github.com/famomatic/ytv1/internal/playerjs"
 )
 
 func main() {
 	var (
-		videoID         = flag.String("v", "", "YouTube Video ID")
+		videoID         = flag.String("v", "", "YouTube Video ID or Playlist ID")
 		proxy           = flag.String("proxy", "", "Proxy URL")
 		download        = flag.Bool("download", false, "Download selected stream to file")
 		itag            = flag.Int("itag", 0, "Target itag for download (default: mode-based)")
@@ -27,18 +28,23 @@ func main() {
 		overrideAppend  = flag.Bool("override-append-fallback", false, "When -clients is set, keep fallback auto-append enabled")
 		visitorData     = flag.String("visitor-data", "", "VISITOR_INFO1_LIVE value override")
 		playerJSURLOnly = flag.Bool("playerjs", false, "Print player base.js URL only")
+		listFormats     = flag.Bool("F", false, "List available formats")
+		merge           = flag.Bool("merge", true, "Auto-merge video+audio if ffmpeg is available (default true)")
+		ffmpegPath      = flag.String("ffmpeg-location", "", "Path to ffmpeg binary")
 	)
 	flag.Parse()
 
 	if *videoID == "" {
-		fmt.Println("Usage: ytv1 -v <video_id> [-playerjs]")
+		fmt.Println("Usage: ytv1 -v <video_id|playlist_id> [options]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
 	httpClient := http.DefaultClient
-
+	
+	// ... (playerJS logic omitted for brevity, keeping existing)
 	if *playerJSURLOnly {
+		// ... existing logic ...
 		resolver := playerjs.NewResolver(httpClient, playerjs.NewMemoryCache())
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -59,6 +65,7 @@ func main() {
 		ProxyURL:    *proxy,
 		HTTPClient:  httpClient,
 		VisitorData: *visitorData,
+		Muxer:       muxer.NewFFmpegMuxer(*ffmpegPath),
 	}
 	if trimmed := strings.TrimSpace(*clients); trimmed != "" {
 		cfg.ClientOverrides = splitCSV(trimmed)
@@ -69,15 +76,61 @@ func main() {
 	}
 	c := client.New(cfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute) // Increased timeout for playlist/large downloads
 	defer cancel()
+
+	// Check if playlist
+	if playlistID, err := client.ExtractPlaylistID(*videoID); err == nil && playlistID != "" {
+		fmt.Printf("Fetching playlist: %s\n", playlistID)
+		playlist, err := c.GetPlaylist(ctx, *videoID)
+		if err != nil {
+			log.Fatalf("Error fetching playlist: %v", err)
+		}
+		fmt.Printf("Playlist: %s (%d videos)\n", playlist.Title, len(playlist.Items))
+		
+		if *download {
+			for i, item := range playlist.Items {
+				fmt.Printf("[%d/%d] Downloading %s (%s)...\n", i+1, len(playlist.Items), item.Title, item.VideoID)
+				_, err := c.Download(ctx, item.VideoID, client.DownloadOptions{
+					Itag:        *itag,
+					Mode:        client.SelectionMode(*mode),
+					MergeOutput: *merge,
+				})
+				if err != nil {
+					fmt.Printf("Failed to download %s: %v\n", item.VideoID, err)
+				}
+			}
+		} else {
+			// List items
+			for i, item := range playlist.Items {
+				fmt.Printf("%3d. %s (%s) [%s]\n", i+1, item.Title, item.VideoID, item.DurationSeconds)
+			}
+		}
+		return
+	}
+
+	if *listFormats {
+		info, err := c.GetVideo(ctx, *videoID)
+		if err != nil {
+			log.Fatalf("Error fetching video info: %v", err)
+		}
+		fmt.Printf("Title: %s\n", info.Title)
+		fmt.Println("ID | Ext | Resolution | FPS | Bitrate | Size | Proto | Codec")
+		fmt.Println("---|-----|------------|-----|---------|------|-------|------")
+		for _, f := range info.Formats {
+			fmt.Printf("%3d|%4s|%4dx%-4d|%3d|%6dk|%6s|%5s|%s\n",
+				f.Itag, mimeExt(f.MimeType), f.Width, f.Height, f.FPS, f.Bitrate/1000, "-", f.Protocol, f.MimeType)
+		}
+		return
+	}
 
 	if *download {
 		fmt.Printf("Downloading video ID: %s...\n", *videoID)
 		result, err := c.Download(ctx, *videoID, client.DownloadOptions{
-			Itag:       *itag,
-			Mode:       client.SelectionMode(*mode),
-			OutputPath: *outputPath,
+			Itag:        *itag,
+			Mode:        client.SelectionMode(*mode),
+			OutputPath:  *outputPath,
+			MergeOutput: *merge,
 		})
 		if err != nil {
 			if *overrideDiag {
@@ -89,6 +142,7 @@ func main() {
 		return
 	}
 
+	// Default: Fetch Info
 	fmt.Printf("Fetching info for video ID: %s...\n", *videoID)
 	info, err := c.GetVideo(ctx, *videoID)
 	if err != nil {
@@ -100,6 +154,7 @@ func main() {
 
 	fmt.Printf("Title: %s\n", info.Title)
 	fmt.Printf("Found %d formats:\n", len(info.Formats))
+	// ... existing print ...
 
 	for _, f := range info.Formats {
 		fmt.Printf("[%d] %s (%dx%d) %d kbps - %s\n",
@@ -139,4 +194,13 @@ func printAttemptDiagnostics(err error) {
 		}
 		fmt.Println()
 	}
+}
+
+func mimeExt(mimeType string) string {
+	parts := strings.Split(mimeType, "/")
+	if len(parts) < 2 {
+		return "?"
+	}
+	sub := strings.Split(parts[1], ";")[0]
+	return sub
 }

@@ -1,6 +1,8 @@
-/legacy
-ytv1.exe
+/legacy/
+ytv1*.exe
 *.test
 *.mp4
 *.m4a
-/scripts
+/scripts/
+/internal/playerjs/testdata/
+/*.json
