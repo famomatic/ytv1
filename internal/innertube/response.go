@@ -6,13 +6,101 @@ type PlayerResponse struct {
 	StreamingData     StreamingData     `json:"streamingData"`
 	VideoDetails      VideoDetails      `json:"videoDetails"`
 	Microformat       Microformat       `json:"microformat"`
+	Captions          Captions          `json:"captions"`
+}
+
+type BrowseResponse struct {
+	Contents                    Contents                     `json:"contents"`
+	OnResponseReceivedActions   []OnResponseReceivedAction   `json:"onResponseReceivedActions"`
+	OnResponseReceivedEndpoints []OnResponseReceivedEndpoint `json:"onResponseReceivedEndpoints"`
+}
+
+type OnResponseReceivedAction struct {
+	AppendContinuationItemsAction  *AppendContinuationItemsAction  `json:"appendContinuationItemsAction"`
+	ReloadContinuationItemsCommand *ReloadContinuationItemsCommand `json:"reloadContinuationItemsCommand"`
+}
+
+type OnResponseReceivedEndpoint struct {
+	AppendContinuationItemsAction  *AppendContinuationItemsAction  `json:"appendContinuationItemsAction"`
+	ReloadContinuationItemsCommand *ReloadContinuationItemsCommand `json:"reloadContinuationItemsCommand"`
+}
+
+type AppendContinuationItemsAction struct {
+	ContinuationItems []ContinuationItem `json:"continuationItems"`
+}
+
+type ReloadContinuationItemsCommand struct {
+	ContinuationItems []ContinuationItem `json:"continuationItems"`
+}
+
+type Contents struct {
+	TwoColumnBrowseResultsRenderer *TwoColumnBrowseResultsRenderer `json:"twoColumnBrowseResultsRenderer"`
+}
+
+type TwoColumnBrowseResultsRenderer struct {
+	Tabs []Tab `json:"tabs"`
+}
+
+type Tab struct {
+	TabRenderer *TabRenderer `json:"tabRenderer"`
+}
+
+type TabRenderer struct {
+	Content *TabContent `json:"content"`
+}
+
+type TabContent struct {
+	SectionListRenderer *SectionListRenderer `json:"sectionListRenderer"`
+}
+
+type SectionListRenderer struct {
+	Contents []SectionListContent `json:"contents"`
+}
+
+type SectionListContent struct {
+	ItemSectionRenderer      *ItemSectionRenderer      `json:"itemSectionRenderer"`
+	ContinuationItemRenderer *ContinuationItemRenderer `json:"continuationItemRenderer"`
+}
+
+type ItemSectionRenderer struct {
+	Contents []ItemSectionContent `json:"contents"`
+}
+
+type ItemSectionContent struct {
+	PlaylistVideoRenderer *PlaylistVideoRenderer `json:"playlistVideoRenderer"`
+}
+
+type ContinuationItem struct {
+	ContinuationItemRenderer *ContinuationItemRenderer `json:"continuationItemRenderer"`
+	PlaylistVideoRenderer    *PlaylistVideoRenderer    `json:"playlistVideoRenderer"`
+}
+
+type ContinuationItemRenderer struct {
+	ContinuationEndpoint ContinuationEndpoint `json:"continuationEndpoint"`
+}
+
+type ContinuationEndpoint struct {
+	ContinuationCommand ContinuationCommand `json:"continuationCommand"`
+}
+
+type ContinuationCommand struct {
+	Token string `json:"token"`
+}
+
+type PlaylistVideoRenderer struct {
+	VideoID         string   `json:"videoId"`
+	Title           LangText `json:"title"`
+	ShortBylineText LangText `json:"shortBylineText"`
+	LengthText      LangText `json:"lengthText"`
 }
 
 type PlayabilityStatus struct {
-	Status          string `json:"status"`
-	Reason          string `json:"reason"`
-	PlayableInEmbed bool   `json:"playableInEmbed"`
+	Status            string             `json:"status"`
+	Reason            string             `json:"reason"`
+	Subreason         string             `json:"subreason"`
+	PlayableInEmbed   bool               `json:"playableInEmbed"`
 	LiveStreamability *LiveStreamability `json:"liveStreamability"`
+	ErrorScreen       *ErrorScreen       `json:"errorScreen"`
 }
 
 func (p *PlayabilityStatus) IsOK() bool {
@@ -28,10 +116,18 @@ type LiveStreamability struct {
 }
 
 type LiveStreamabilityRenderer struct {
-	VideoId string `json:"videoId"`
+	VideoId     string `json:"videoId"`
 	PollDelayMs string `json:"pollDelayMs"`
 }
 
+type ErrorScreen struct {
+	PlayerErrorMessageRenderer *PlayerErrorMessageRenderer `json:"playerErrorMessageRenderer"`
+}
+
+type PlayerErrorMessageRenderer struct {
+	Reason    LangText `json:"reason"`
+	Subreason LangText `json:"subreason"`
+}
 
 type StreamingData struct {
 	ExpiresInSeconds string   `json:"expiresInSeconds"`
@@ -48,6 +144,7 @@ type Format struct {
 	Bitrate          int    `json:"bitrate"`
 	Width            int    `json:"width"`
 	Height           int    `json:"height"`
+	FPS              int    `json:"fps"`
 	InitRange        *Range `json:"initRange"`
 	IndexRange       *Range `json:"indexRange"`
 	LastModified     string `json:"lastModified"`
@@ -70,21 +167,21 @@ type Range struct {
 }
 
 type VideoDetails struct {
-	VideoID          string   `json:"videoId"`
-	Title            string   `json:"title"`
-	LengthSeconds    string   `json:"lengthSeconds"`
-	Keywords         []string `json:"keywords"`
-	ChannelID        string   `json:"channelId"`
-	IsOwnerViewing   bool     `json:"isOwnerViewing"`
-	ShortDescription string   `json:"shortDescription"`
-	IsCrawlable      bool     `json:"isCrawlable"`
-	Thumbnail        ThumbnailDetails `json:"thumbnail"`
-	AllowRatings     bool     `json:"allowRatings"`
-	ViewCount        string   `json:"viewCount"`
-	Author           string   `json:"author"`
-	IsPrivate        bool     `json:"isPrivate"`
-	IsUnpluggedCorpus bool    `json:"isUnpluggedCorpus"`
-	IsLiveContent    bool     `json:"isLiveContent"`
+	VideoID           string           `json:"videoId"`
+	Title             string           `json:"title"`
+	LengthSeconds     string           `json:"lengthSeconds"`
+	Keywords          []string         `json:"keywords"`
+	ChannelID         string           `json:"channelId"`
+	IsOwnerViewing    bool             `json:"isOwnerViewing"`
+	ShortDescription  string           `json:"shortDescription"`
+	IsCrawlable       bool             `json:"isCrawlable"`
+	Thumbnail         ThumbnailDetails `json:"thumbnail"`
+	AllowRatings      bool             `json:"allowRatings"`
+	ViewCount         string           `json:"viewCount"`
+	Author            string           `json:"author"`
+	IsPrivate         bool             `json:"isPrivate"`
+	IsUnpluggedCorpus bool             `json:"isUnpluggedCorpus"`
+	IsLiveContent     bool             `json:"isLiveContent"`
 }
 
 type ThumbnailDetails struct {
@@ -129,4 +226,29 @@ type Embed struct {
 
 type SimpleText struct {
 	SimpleText string `json:"simpleText"`
+}
+
+type Captions struct {
+	PlayerCaptionsTracklistRenderer PlayerCaptionsTracklistRenderer `json:"playerCaptionsTracklistRenderer"`
+}
+
+type PlayerCaptionsTracklistRenderer struct {
+	CaptionTracks []CaptionTrack `json:"captionTracks"`
+}
+
+type CaptionTrack struct {
+	BaseURL      string   `json:"baseUrl"`
+	Name         LangText `json:"name"`
+	VssID        string   `json:"vssId"`
+	LanguageCode string   `json:"languageCode"`
+	Kind         string   `json:"kind,omitempty"`
+}
+
+type LangText struct {
+	SimpleText string    `json:"simpleText"`
+	Runs       []TextRun `json:"runs"`
+}
+
+type TextRun struct {
+	Text string `json:"text"`
 }

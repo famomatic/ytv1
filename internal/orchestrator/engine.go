@@ -4,27 +4,35 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"strings"
 	"sync"
+	"time"
 
-	"github.com/mjmst/ytv1/internal/innertube"
-	"github.com/mjmst/ytv1/internal/policy"
-	"github.com/mjmst/ytv1/internal/types"
+	"github.com/famomatic/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/policy"
+	"github.com/famomatic/ytv1/internal/types"
 )
 
 // Engine is the main orchestrator for video extraction.
 type Engine struct {
-	selector policy.Selector
-	config   innertube.Config
+	selector       policy.Selector
+	config         innertube.Config
+	apiKeyResolver *innertube.APIKeyResolver
 }
 
 func NewEngine(selector policy.Selector, config innertube.Config) *Engine {
-	return &Engine{
+	engine := &Engine{
 		selector: selector,
 		config:   config,
 	}
+	if config.EnableDynamicAPIKeyResolution {
+		engine.apiKeyResolver = innertube.NewAPIKeyResolver(config.HTTPClient)
+	}
+	return engine
 }
 
 type extractionResult struct {
@@ -36,9 +44,41 @@ type extractionResult struct {
 // GetVideoInfo fetches video info using the configured policy and clients.
 // It implements the "Racing" extraction proposal.
 func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.PlayerResponse, error) {
+	ctx, cancel := withRequestTimeout(ctx, e.config.RequestTimeout)
+	defer cancel()
+
 	clients := e.selector.Select(videoID)
+	if !e.config.DisableFallbackClients {
+		clients = e.withFallbackClients(clients)
+	}
 	if len(clients) == 0 {
 		return nil, types.ErrNoClientsAvailable
+	}
+
+	primary, fallback := splitClientPhases(clients)
+
+	resp, attempts := e.tryPhase(ctx, videoID, primary)
+	if resp != nil {
+		return resp, nil
+	}
+
+	if len(fallback) > 0 && shouldRunFallbackPhase(attempts) {
+		fallbackResp, fallbackAttempts := e.tryPhase(ctx, videoID, fallback)
+		if fallbackResp != nil {
+			return fallbackResp, nil
+		}
+		attempts = append(attempts, fallbackAttempts...)
+	}
+
+	if len(attempts) > 0 {
+		return nil, &AllClientsFailedError{Attempts: attempts}
+	}
+	return nil, types.ErrNoClientsAvailable
+}
+
+func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertube.ClientProfile) (*innertube.PlayerResponse, []AttemptError) {
+	if len(clients) == 0 {
+		return nil, nil
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -51,19 +91,23 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 		wg.Add(1)
 		go func(p innertube.ClientProfile) {
 			defer wg.Done()
-			
-			// Check for context cancellation before starting
+
 			if ctx.Err() != nil {
 				return
 			}
 
-			// TODO: Inject PO Token if required
-			// TODO: Use specific HTTP client / Proxy from config
-
-			req := innertube.NewPlayerRequest(p, videoID)
-			
+			req := innertube.NewPlayerRequest(p, videoID, innertube.PlayerRequestOptions{
+				VisitorData: e.config.VisitorData,
+			})
+			if err := e.applyPoToken(ctx, req, p); err != nil {
+				select {
+				case results <- extractionResult{response: nil, err: err, client: p.Name}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			resp, err := e.fetch(ctx, req, p)
-			
+
 			select {
 			case results <- extractionResult{response: resp, err: err, client: p.Name}:
 			case <-ctx.Done():
@@ -71,38 +115,210 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 		}(profile)
 	}
 
-	// Wait for first success or all failures
-	// This is a simplified version. A more robust one handles "all failed" properly.
-	
-	// Closer for the results channel
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	var lastErr error
+	var attempts []AttemptError
 	for res := range results {
 		if res.err == nil {
-			cancel() // Cancel other requests
-			return res.response, nil
+			cancel()
+			return res.response, attempts
 		}
-		lastErr = res.err
+		attempts = append(attempts, AttemptError{
+			Client: res.client,
+			Err:    res.err,
+		})
+	}
+	return nil, attempts
+}
+
+func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innertube.ClientProfile {
+	if len(clients) == 0 {
+		return clients
+	}
+	registry := e.selector.Registry()
+	if registry == nil {
+		return clients
+	}
+	out := append([]innertube.ClientProfile(nil), clients...)
+	seenFallback := map[string]struct{}{}
+	for _, c := range out {
+		if isFallbackClient(c) {
+			seenFallback[strings.ToUpper(strings.TrimSpace(c.Name))] = struct{}{}
+		}
+	}
+	appendIfMissing := func(alias string) {
+		p, ok := registry.Get(alias)
+		if !ok {
+			return
+		}
+		name := strings.ToUpper(strings.TrimSpace(p.Name))
+		if _, exists := seenFallback[name]; exists {
+			return
+		}
+		out = append(out, p)
+		seenFallback[name] = struct{}{}
+	}
+	appendIfMissing("web_embedded")
+	appendIfMissing("tv")
+	return out
+}
+
+func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) error {
+	requiredProtocols := make([]innertube.VideoStreamingProtocol, 0, 3)
+	recommendedExists := false
+	for _, protocol := range []innertube.VideoStreamingProtocol{
+		innertube.StreamingProtocolHTTPS,
+		innertube.StreamingProtocolDASH,
+		innertube.StreamingProtocolHLS,
+	} {
+		p := effectivePoTokenFetchPolicy(profile, protocol, e.config.PoTokenFetchPolicy)
+		switch p {
+		case innertube.PoTokenFetchPolicyRequired:
+			requiredProtocols = append(requiredProtocols, protocol)
+		case innertube.PoTokenFetchPolicyRecommended:
+			recommendedExists = true
+		}
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
+	if len(requiredProtocols) == 0 && !recommendedExists {
+		return nil
 	}
-	return nil, types.ErrNoClientsAvailable
+
+	if e.config.PoTokenProvider == nil {
+		if len(requiredProtocols) > 0 {
+			return &PoTokenRequiredError{
+				Client:            profile.Name,
+				Cause:             "provider missing (required by policy)",
+				Policy:            innertube.PoTokenFetchPolicyRequired,
+				Protocols:         append([]innertube.VideoStreamingProtocol(nil), requiredProtocols...),
+				ProviderAvailable: false,
+			}
+		}
+		return nil
+	}
+
+	token, err := e.config.PoTokenProvider.GetToken(ctx, profile.Name)
+	if err != nil {
+		if len(requiredProtocols) > 0 {
+			return &PoTokenRequiredError{
+				Client:            profile.Name,
+				Cause:             "provider error: " + err.Error(),
+				Policy:            innertube.PoTokenFetchPolicyRequired,
+				Protocols:         append([]innertube.VideoStreamingProtocol(nil), requiredProtocols...),
+				ProviderAvailable: true,
+			}
+		}
+		return nil
+	}
+	if token == "" {
+		if len(requiredProtocols) > 0 {
+			return &PoTokenRequiredError{
+				Client:            profile.Name,
+				Cause:             "empty token from provider",
+				Policy:            innertube.PoTokenFetchPolicyRequired,
+				Protocols:         append([]innertube.VideoStreamingProtocol(nil), requiredProtocols...),
+				ProviderAvailable: true,
+			}
+		}
+		return nil
+	}
+	req.SetPoToken(token)
+	return nil
+}
+
+func requiresPoToken(profile innertube.ClientProfile, protocol innertube.VideoStreamingProtocol) bool {
+	policy, ok := profile.PoTokenPolicy[protocol]
+	if !ok {
+		return false
+	}
+	return policy.Required
+}
+
+func recommendsPoToken(profile innertube.ClientProfile, protocol innertube.VideoStreamingProtocol) bool {
+	policy, ok := profile.PoTokenPolicy[protocol]
+	if !ok {
+		return false
+	}
+	return policy.Recommended
+}
+
+func effectivePoTokenFetchPolicy(
+	profile innertube.ClientProfile,
+	protocol innertube.VideoStreamingProtocol,
+	overrides map[innertube.VideoStreamingProtocol]innertube.PoTokenFetchPolicy,
+) innertube.PoTokenFetchPolicy {
+	if overrides != nil {
+		if override, ok := overrides[protocol]; ok {
+			return normalizePoTokenFetchPolicy(override)
+		}
+	}
+
+	// Keep request stage non-blocking by default for compatibility.
+	// Strict behavior can be enabled via overrides.
+	if requiresPoToken(profile, protocol) || recommendsPoToken(profile, protocol) {
+		return innertube.PoTokenFetchPolicyRecommended
+	}
+	return innertube.PoTokenFetchPolicyNever
+}
+
+func normalizePoTokenFetchPolicy(p innertube.PoTokenFetchPolicy) innertube.PoTokenFetchPolicy {
+	switch strings.ToLower(strings.TrimSpace(string(p))) {
+	case string(innertube.PoTokenFetchPolicyRequired):
+		return innertube.PoTokenFetchPolicyRequired
+	case string(innertube.PoTokenFetchPolicyRecommended):
+		return innertube.PoTokenFetchPolicyRecommended
+	case string(innertube.PoTokenFetchPolicyNever):
+		return innertube.PoTokenFetchPolicyNever
+	default:
+		return innertube.PoTokenFetchPolicyRecommended
+	}
+}
+
+func splitClientPhases(clients []innertube.ClientProfile) ([]innertube.ClientProfile, []innertube.ClientProfile) {
+	var primary []innertube.ClientProfile
+	var fallback []innertube.ClientProfile
+	for _, c := range clients {
+		if isFallbackClient(c) {
+			fallback = append(fallback, c)
+			continue
+		}
+		primary = append(primary, c)
+	}
+	return primary, fallback
+}
+
+func isFallbackClient(c innertube.ClientProfile) bool {
+	name := strings.ToUpper(strings.TrimSpace(c.Name))
+	return name == "WEB_EMBEDDED_PLAYER" || name == "TVHTML5"
+}
+
+func shouldRunFallbackPhase(attempts []AttemptError) bool {
+	for _, attempt := range attempts {
+		var pErr *PlayabilityError
+		if !errors.As(attempt.Err, &pErr) {
+			var poErr *PoTokenRequiredError
+			if errors.As(attempt.Err, &poErr) {
+				return true
+			}
+			continue
+		}
+		// Keep fallback targeted to known playability gating classes.
+		if pErr.RequiresLogin() || pErr.IsAgeRestricted() || pErr.IsGeoRestricted() || pErr.IsUnavailable() {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) (*innertube.PlayerResponse, error) {
 	// Construct URL
-	url := "https://" + profile.Host + "/youtubei/v1/player?key=" + profile.APIKey
-	if profile.APIKey == "" {
-		// Default API key for Web if not present (simplified)
-		// Usually profiles have keys. If not, we might need a default or extract from JS.
-		// For now, let's assume valid profiles or use a known default.
-		url = "https://" + profile.Host + "/youtubei/v1/player"
+	apiKey := e.resolveAPIKey(ctx, profile)
+	url := "https://" + profile.Host + "/youtubei/v1/player"
+	if apiKey != "" {
+		url += "?key=" + neturl.QueryEscape(apiKey)
 	}
 
 	// Marshaling request
@@ -111,7 +327,7 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 		return nil, err
 	}
 
-    // Create Request
+	// Create Request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -128,7 +344,46 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 		}
 	}
 
-	// Execute
+	// Add global request headers last so caller can override defaults.
+	for k, values := range e.config.RequestHeaders {
+		for _, val := range values {
+			httpReq.Header.Add(k, val)
+		}
+	}
+
+	metaCfg := normalizeMetadataTransportConfig(e.config.MetadataTransport)
+	var lastErr error
+	for attempt := 0; attempt <= metaCfg.MaxRetries; attempt++ {
+		playerResp, err := e.fetchOnce(ctx, httpReq, profile)
+		if err == nil {
+			return playerResp, nil
+		}
+		lastErr = err
+		if !isRetryableMetadataError(err, metaCfg) || attempt == metaCfg.MaxRetries {
+			return nil, err
+		}
+		if err := waitMetadataBackoff(ctx, metaCfg.backoffFor(attempt)); err != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func (e *Engine) resolveAPIKey(ctx context.Context, profile innertube.ClientProfile) string {
+	if e.apiKeyResolver == nil {
+		return profile.APIKey
+	}
+	key, err := e.apiKeyResolver.Resolve(ctx, profile)
+	if err != nil {
+		return profile.APIKey
+	}
+	return key
+}
+
+func (e *Engine) fetchOnce(ctx context.Context, template *http.Request, profile innertube.ClientProfile) (*innertube.PlayerResponse, error) {
+	httpReq := template.Clone(ctx)
+	httpReq.Body, _ = template.GetBody()
+
 	resp, err := e.config.HTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, err
@@ -136,26 +391,189 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("innertube error: %d", resp.StatusCode)
+		return nil, &HTTPStatusError{
+			Client:     profile.Name,
+			StatusCode: resp.StatusCode,
+		}
 	}
 
-	// Read body for potential debugging
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse Response
 	var playerResp innertube.PlayerResponse
 	if err := json.Unmarshal(respBody, &playerResp); err != nil {
 		return nil, err
 	}
 
-	// Playability Check
 	if !playerResp.PlayabilityStatus.IsOK() && !playerResp.PlayabilityStatus.IsLive() {
-		// Log detailed error reason if available
-		return nil, fmt.Errorf("unplayable: %s. Reason: %s", playerResp.PlayabilityStatus.Status, playerResp.PlayabilityStatus.Reason)
+		detail := extractPlayabilityDetail(&playerResp)
+		return nil, &PlayabilityError{
+			Client: profile.Name,
+			Status: playerResp.PlayabilityStatus.Status,
+			Reason: playerResp.PlayabilityStatus.Reason,
+			Detail: detail,
+		}
 	}
-
 	return &playerResp, nil
+}
+
+func extractPlayabilityDetail(resp *innertube.PlayerResponse) PlayabilityDetail {
+	if resp == nil {
+		return PlayabilityDetail{}
+	}
+	status := strings.ToUpper(strings.TrimSpace(resp.PlayabilityStatus.Status))
+	reason := firstNonEmpty(
+		resp.PlayabilityStatus.Reason,
+		resp.PlayabilityStatus.Subreason,
+		errorScreenReason(resp.PlayabilityStatus.ErrorScreen),
+	)
+	subreason := firstNonEmpty(
+		resp.PlayabilityStatus.Subreason,
+		errorScreenSubreason(resp.PlayabilityStatus.ErrorScreen),
+	)
+	text := strings.ToUpper(strings.TrimSpace(status + " " + reason + " " + subreason))
+	countries := append([]string(nil), resp.Microformat.PlayerMicroformatRenderer.AvailableCountries...)
+	return PlayabilityDetail{
+		Subreason:          subreason,
+		AvailableCountries: countries,
+		GeoRestricted:      strings.Contains(text, "COUNTRY") || strings.Contains(text, "REGION") || strings.Contains(text, "LOCATION"),
+		LoginRequired:      strings.Contains(text, "LOGIN") || strings.Contains(text, "SIGN IN"),
+		AgeRestricted:      strings.Contains(text, "AGE"),
+		Unavailable:        strings.Contains(text, "UNAVAILABLE") || strings.Contains(text, "PRIVATE") || strings.Contains(text, "DELETED"),
+		DRMProtected:       strings.Contains(text, "DRM"),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func errorScreenReason(es *innertube.ErrorScreen) string {
+	if es == nil || es.PlayerErrorMessageRenderer == nil {
+		return ""
+	}
+	return langTextToString(es.PlayerErrorMessageRenderer.Reason)
+}
+
+func errorScreenSubreason(es *innertube.ErrorScreen) string {
+	if es == nil || es.PlayerErrorMessageRenderer == nil {
+		return ""
+	}
+	return langTextToString(es.PlayerErrorMessageRenderer.Subreason)
+}
+
+func langTextToString(v innertube.LangText) string {
+	if strings.TrimSpace(v.SimpleText) != "" {
+		return strings.TrimSpace(v.SimpleText)
+	}
+	if len(v.Runs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(v.Runs))
+	for _, run := range v.Runs {
+		if text := strings.TrimSpace(run.Text); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+type effectiveMetadataTransportConfig struct {
+	MaxRetries       int
+	InitialBackoff   time.Duration
+	MaxBackoff       time.Duration
+	RetryStatusCodes []int
+}
+
+func normalizeMetadataTransportConfig(cfg innertube.MetadataTransportConfig) effectiveMetadataTransportConfig {
+	maxRetries := cfg.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	initialBackoff := cfg.InitialBackoff
+	if initialBackoff <= 0 {
+		initialBackoff = 250 * time.Millisecond
+	}
+	maxBackoff := cfg.MaxBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = 2 * time.Second
+	}
+	statusCodes := cfg.RetryStatusCodes
+	if len(statusCodes) == 0 {
+		statusCodes = []int{
+			http.StatusTooManyRequests,
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		}
+	}
+	return effectiveMetadataTransportConfig{
+		MaxRetries:       maxRetries,
+		InitialBackoff:   initialBackoff,
+		MaxBackoff:       maxBackoff,
+		RetryStatusCodes: statusCodes,
+	}
+}
+
+func (c effectiveMetadataTransportConfig) backoffFor(attempt int) time.Duration {
+	backoff := c.InitialBackoff
+	for i := 0; i < attempt; i++ {
+		backoff *= 2
+		if backoff > c.MaxBackoff {
+			return c.MaxBackoff
+		}
+	}
+	return backoff
+}
+
+func isRetryableMetadataError(err error, cfg effectiveMetadataTransportConfig) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var httpErr *HTTPStatusError
+	if errors.As(err, &httpErr) {
+		for _, code := range cfg.RetryStatusCodes {
+			if httpErr.StatusCode == code {
+				return true
+			}
+		}
+		return false
+	}
+	var playErr *PlayabilityError
+	if errors.As(err, &playErr) {
+		return false
+	}
+	return true
+}
+
+func waitMetadataBackoff(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func withRequestTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }

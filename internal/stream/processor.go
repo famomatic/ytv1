@@ -3,7 +3,7 @@ package stream
 import (
 	"context"
 
-	"github.com/mjmst/ytv1/internal/challenge"
+	"github.com/famomatic/ytv1/internal/challenge"
 )
 
 type SourceFormat struct {

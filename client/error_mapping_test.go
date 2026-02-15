@@ -1,0 +1,172 @@
+package client
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/famomatic/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/orchestrator"
+)
+
+func TestMapErrorPlayabilityAgeRestricted(t *testing.T) {
+	err := &orchestrator.PlayabilityError{
+		Client: "WEB",
+		Status: "LOGIN_REQUIRED",
+		Reason: "This video may be inappropriate for some users.",
+	}
+	got := mapError(err)
+	if !errors.Is(got, ErrLoginRequired) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrLoginRequired)
+	}
+	var detail *LoginRequiredDetailError
+	if !errors.As(got, &detail) {
+		t.Fatalf("mapError() should expose LoginRequiredDetailError")
+	}
+	if len(detail.Attempts) != 1 || detail.Attempts[0].Stage != "playability" {
+		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
+	}
+}
+
+func TestMapErrorAllClientsFailedUnavailable(t *testing.T) {
+	err := &orchestrator.AllClientsFailedError{
+		Attempts: []orchestrator.AttemptError{
+			{
+				Client: "WEB",
+				Err: &orchestrator.PlayabilityError{
+					Client: "WEB",
+					Status: "UNPLAYABLE",
+					Reason: "The uploader has not made this video available in your country",
+				},
+			},
+		},
+	}
+	if got := mapError(err); !errors.Is(got, ErrUnavailable) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrUnavailable)
+	}
+	var detail *UnavailableDetailError
+	if !errors.As(mapError(err), &detail) {
+		t.Fatalf("mapError() should expose UnavailableDetailError")
+	}
+	if len(detail.Attempts) != 1 || !detail.Attempts[0].GeoRestricted {
+		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
+	}
+}
+
+func TestMapErrorAllClientsFailedLogin(t *testing.T) {
+	err := &orchestrator.AllClientsFailedError{
+		Attempts: []orchestrator.AttemptError{
+			{
+				Client: "IOS",
+				Err: &orchestrator.PlayabilityError{
+					Client: "IOS",
+					Status: "LOGIN_REQUIRED",
+					Reason: "Sign in to confirm your age",
+				},
+			},
+		},
+	}
+	if got := mapError(err); !errors.Is(got, ErrLoginRequired) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrLoginRequired)
+	}
+}
+
+func TestMapErrorMixedFailureMatrixPrefersLogin(t *testing.T) {
+	err := &orchestrator.AllClientsFailedError{
+		Attempts: []orchestrator.AttemptError{
+			{
+				Client: "WEB",
+				Err: &orchestrator.PoTokenRequiredError{
+					Client: "WEB",
+					Cause:  "provider not configured",
+				},
+			},
+			{
+				Client: "MWEB",
+				Err: &orchestrator.HTTPStatusError{
+					Client:     "MWEB",
+					StatusCode: 502,
+				},
+			},
+			{
+				Client: "IOS",
+				Err: &orchestrator.PlayabilityError{
+					Client: "IOS",
+					Status: "LOGIN_REQUIRED",
+					Reason: "Sign in to confirm your age",
+				},
+			},
+		},
+	}
+	got := mapError(err)
+	if !errors.Is(got, ErrLoginRequired) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrLoginRequired)
+	}
+	var detail *LoginRequiredDetailError
+	if !errors.As(got, &detail) {
+		t.Fatalf("mapError() should expose LoginRequiredDetailError")
+	}
+	if len(detail.Attempts) != 3 {
+		t.Fatalf("expected 3 attempts, got %d", len(detail.Attempts))
+	}
+}
+
+func TestMapErrorPoTokenRequiredFallsBackToAllClientsFailed(t *testing.T) {
+	err := &orchestrator.PoTokenRequiredError{
+		Client: "WEB",
+		Cause:  "provider not configured",
+		Policy: innertube.PoTokenFetchPolicyRequired,
+		Protocols: []innertube.VideoStreamingProtocol{
+			innertube.StreamingProtocolHTTPS,
+			innertube.StreamingProtocolDASH,
+		},
+		ProviderAvailable: false,
+	}
+	if got := mapError(err); !errors.Is(got, ErrAllClientsFailed) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrAllClientsFailed)
+	}
+	var detail *AllClientsFailedDetailError
+	if !errors.As(mapError(err), &detail) {
+		t.Fatalf("mapError() should expose AllClientsFailedDetailError")
+	}
+	if len(detail.Attempts) != 1 || detail.Attempts[0].Stage != "pot" {
+		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
+	}
+	if detail.Attempts[0].POTPolicy != string(innertube.PoTokenFetchPolicyRequired) {
+		t.Fatalf("unexpected pot policy: %+v", detail.Attempts[0])
+	}
+	if len(detail.Attempts[0].POTProtocols) != 2 {
+		t.Fatalf("unexpected pot protocols: %+v", detail.Attempts[0].POTProtocols)
+	}
+}
+
+func TestMapErrorPlayabilityTypedFieldsPropagated(t *testing.T) {
+	err := &orchestrator.PlayabilityError{
+		Client: "WEB",
+		Status: "UNPLAYABLE",
+		Reason: "Video unavailable",
+		Detail: orchestrator.PlayabilityDetail{
+			Subreason:          "DRM protected",
+			AvailableCountries: []string{"US", "KR"},
+			DRMProtected:       true,
+			Unavailable:        true,
+		},
+	}
+	got := mapError(err)
+	if !errors.Is(got, ErrUnavailable) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrUnavailable)
+	}
+	var detail *UnavailableDetailError
+	if !errors.As(got, &detail) {
+		t.Fatalf("mapError() should expose UnavailableDetailError")
+	}
+	if len(detail.Attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(detail.Attempts))
+	}
+	attempt := detail.Attempts[0]
+	if !attempt.DRMProtected || attempt.PlayabilitySubreason != "DRM protected" {
+		t.Fatalf("expected drm detail, got %+v", attempt)
+	}
+	if len(attempt.AvailableCountries) != 2 {
+		t.Fatalf("available countries count = %d, want 2", len(attempt.AvailableCountries))
+	}
+}

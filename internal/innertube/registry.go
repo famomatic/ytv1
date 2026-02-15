@@ -12,10 +12,15 @@ func NewRegistry() Registry {
 	return &defaultRegistry{
 		clients: map[string]ClientProfile{
 			"web":          WebClient,
+			"web_safari":   WebSafariClient,
 			"web_embedded": WebEmbeddedClient,
+			"web_embedded_player": WebEmbeddedClient,
+			"mweb":         MWebClient,
 			"android":      AndroidClient,
+			"android_vr":   AndroidVRClient,
 			"ios":          iOSClient,
 			"tv":           TVClient,
+			"tvhtml5":      TVClient,
 		},
 	}
 }

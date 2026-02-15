@@ -6,6 +6,7 @@ import "net/http"
 type VideoStreamingProtocol string
 
 const (
+	StreamingProtocolUnknown VideoStreamingProtocol = "unknown"
 	StreamingProtocolHTTPS VideoStreamingProtocol = "https"
 	StreamingProtocolDASH  VideoStreamingProtocol = "dash"
 	StreamingProtocolHLS   VideoStreamingProtocol = "hls"
@@ -19,6 +20,15 @@ type PoTokenPolicy struct {
 	NotRequiredWithPlayerToken bool
 }
 
+// PoTokenFetchPolicy controls how strictly POT fetching is enforced.
+type PoTokenFetchPolicy string
+
+const (
+	PoTokenFetchPolicyRequired    PoTokenFetchPolicy = "required"
+	PoTokenFetchPolicyRecommended PoTokenFetchPolicy = "recommended"
+	PoTokenFetchPolicyNever       PoTokenFetchPolicy = "never"
+)
+
 type ClientProfile struct {
 	Name            string
 	Version         string
@@ -31,7 +41,7 @@ type ClientProfile struct {
 	Host            string
 	Headers         http.Header
 	Screen          string // e.g. "EMBED"
-	
+
 	// PoTokenPolicy map keyed by protocol (https, dash, hls).
 	PoTokenPolicy map[VideoStreamingProtocol]PoTokenPolicy
 }
