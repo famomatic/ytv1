@@ -59,15 +59,24 @@ const (
 )
 
 var (
-	nFunctionNameRegexp = regexp.MustCompile("\\.get\\(\"n\"\\)\\)&&\\(b=([a-zA-Z0-9$]{0,3})\\[(\\d+)\\](.+)\\|\\|([a-zA-Z0-9]{0,3})")
+	nFunctionNameRegexps = []*regexp.Regexp{
+		// Original kkdai pattern kept for compatibility with existing fixtures.
+		regexp.MustCompile(`\.get\("n"\)\)&&\(b=([a-zA-Z0-9$]{0,3})\[(\d+)\](.+)\|\|([a-zA-Z0-9]{0,3})`),
+		// Legacy pattern: b=XY[0](b)||ZZ
+		regexp.MustCompile(`\.get\("n"\)\)\s*&&\s*\(b=([a-zA-Z0-9$]{1,})\[(\d+)\]\([a-zA-Z0-9$]{1,}\).+\|\|([a-zA-Z0-9$]{1,})`),
+		// Newer pattern: b=XY(b)
+		regexp.MustCompile(`\.get\("n"\)\)\s*&&\s*\(b=([a-zA-Z0-9$]{1,})\([a-zA-Z0-9$]{1,}\)`),
+		// Some variants use optional chaining / looser spacing.
+		regexp.MustCompile(`\.get\("n"\).*?&&.*?([a-zA-Z0-9$]{1,})\([a-zA-Z0-9$]{1,}\)`),
+	}
 	actionsObjRegexp    = regexp.MustCompile(fmt.Sprintf(
-		"var (%s)=\\{((?:(?:%s%s|%s%s|%s%s),?\\n?)+)\\};",
+		"(?:var|let|const)\\s+(%s)=\\{((?:(?:%s%s|%s%s|%s%s),?\\n?)+)\\}\\s*;?",
 		jsVarStr, jsVarStr, swapStr, jsVarStr, spliceStr, jsVarStr, reverseStr))
 	actionsFuncRegexp = regexp.MustCompile(fmt.Sprintf(
 		"function(?: %s)?\\(a\\)\\{"+
-			"a=a\\.split\\(\"\"\\);\\s*"+
+			"a=a\\.split\\([^\\)]*\\);\\s*"+
 			"((?:(?:a=)?%s\\.%s\\(a,\\d+\\);)+)"+
-			"return a\\.join\\(\"\"\\)"+
+			"return a\\.join\\([^\\)]*\\)"+
 			"\\}", jsVarStr, jsVarStr, jsVarStr))
 	reverseRegexp = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, reverseStr))
 	spliceRegexp  = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, spliceStr))
@@ -124,25 +133,42 @@ func (d *Decipherer) parseDecipherOps() ([]DecipherOperation, error) {
 }
 
 func (d *Decipherer) getNFunction() (string, error) {
-	nameResult := nFunctionNameRegexp.FindSubmatch(d.jsBody)
-	if len(nameResult) == 0 {
-		return "", errors.New("unable to extract n-function name")
-	}
+	for _, re := range nFunctionNameRegexps {
+		nameResult := re.FindSubmatch(d.jsBody)
+		if len(nameResult) == 0 {
+			continue
+		}
 
-	var name string
-	if idx, _ := strconv.Atoi(string(nameResult[2])); idx == 0 {
-		name = string(nameResult[4])
-	} else {
-		name = string(nameResult[1])
+		switch len(nameResult) {
+		case 5:
+			// Original pattern with explicit fallback symbol in group 4.
+			if idx, err := strconv.Atoi(string(nameResult[2])); err == nil && idx == 0 {
+				return d.extractFunction(string(nameResult[4]))
+			}
+			return d.extractFunction(string(nameResult[1]))
+		case 4:
+			// Legacy pattern with indexed function and fallback symbol.
+			if idx, err := strconv.Atoi(string(nameResult[2])); err == nil && idx == 0 {
+				return d.extractFunction(string(nameResult[3]))
+			}
+			return d.extractFunction(string(nameResult[1]))
+		default:
+			// Direct call pattern.
+			return d.extractFunction(string(nameResult[1]))
+		}
 	}
-	return d.extractFunction(name)
+	return "", errors.New("unable to extract n-function name")
 }
 
 func (d *Decipherer) extractFunction(name string) (string, error) {
 	def := []byte(name + "=function(")
 	start := bytes.Index(d.jsBody, def)
 	if start < 1 {
-		return "", fmt.Errorf("unable to extract n-function body")
+		def = []byte("function " + name + "(")
+		start = bytes.Index(d.jsBody, def)
+		if start < 1 {
+			return "", fmt.Errorf("unable to extract n-function body")
+		}
 	}
 
 	pos := start + bytes.IndexByte(d.jsBody[start:], '{') + 1

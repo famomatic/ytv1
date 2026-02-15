@@ -5,27 +5,51 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mjmst/ytv1/client"
+	"github.com/mjmst/ytv1/internal/playerjs"
 )
 
 func main() {
 	var (
 		videoID = flag.String("v", "", "YouTube Video ID")
 		proxy   = flag.String("proxy", "", "Proxy URL")
+		playerJSURLOnly = flag.Bool("playerjs", false, "Print player base.js URL only")
 	)
 	flag.Parse()
 
 	if *videoID == "" {
-		fmt.Println("Usage: ytv1 -v <video_id>")
+		fmt.Println("Usage: ytv1 -v <video_id> [-playerjs]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
+	httpClient := http.DefaultClient
+
+	if *playerJSURLOnly {
+		resolver := playerjs.NewResolver(httpClient, playerjs.NewMemoryCache())
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		playerPath, err := resolver.GetPlayerURL(ctx, *videoID)
+		if err != nil {
+			log.Fatalf("Error resolving player URL: %v", err)
+		}
+		if strings.HasPrefix(playerPath, "http://") || strings.HasPrefix(playerPath, "https://") {
+			fmt.Println(playerPath)
+			return
+		}
+		fmt.Println("https://www.youtube.com" + playerPath)
+		return
+	}
+
 	cfg := client.Config{
 		ProxyURL: *proxy,
+		HTTPClient: httpClient,
 	}
 	c := client.New(cfg)
 

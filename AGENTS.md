@@ -47,6 +47,8 @@ Port behavior, not code structure.
 5. Keep package API stable unless plan explicitly schedules an API break.
 6. Keep CLI thin; do not move extraction logic into `cmd/ytv1`.
 7. Keep `go test ./...` green after each logical change set.
+8. Do not create or start tasks that are not in `docs/IMPLEMENTATION_PLAN.md` unless the user explicitly instructs it.
+9. Do not skip ahead to new tasks while existing in-progress/pending task order is unresolved; finish or explicitly update status first.
 
 ## Progress Tracking Policy
 

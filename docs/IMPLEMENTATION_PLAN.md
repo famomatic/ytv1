@@ -10,14 +10,14 @@
 
 ### Immediate Next Tasks (Execution Order)
 
-1. `[ ]` Add `orchestrator` unit tests for mixed-failure matrix (HTTP error + playability + PO token failure) and expected public error mapping.
-2. `[ ]` Add `client.ResolveStreamURL` tests covering `s` only, `n` only, `s+n`, and malformed cipher query.
-3. `[ ]` Add manifest fetch integration path: consume rewritten `DashManifestURL`/`HLSManifestURL` with `internal/formats/dash.go` and `internal/formats/hls.go`.
-4. `[ ]` Improve PO token policy handling by protocol (`https`, `dash`, `hls`) and add protocol-specific tests.
-5. `[ ]` Strengthen `playerjs` decipher test fixtures with at least one realistic base.js sample snapshot.
-6. `[ ]` Add `client.GetVideo`/`GetFormats` package tests using mocked Innertube responses (OK, LOGIN_REQUIRED, UNPLAYABLE).
-7. `[ ]` Document public package usage for library consumers in `README.md` (config, error handling, stream URL resolution).
-8. `[ ]` Add a minimal regression checklist section to this plan for every YouTube breakage patch cycle.
+1. `[x]` Add `orchestrator` unit tests for mixed-failure matrix (HTTP error + playability + PO token failure) and expected public error mapping.
+2. `[x]` Add `client.ResolveStreamURL` tests covering `s` only, `n` only, `s+n`, and malformed cipher query.
+3. `[x]` Add manifest fetch integration path: consume rewritten `DashManifestURL`/`HLSManifestURL` with `internal/formats/dash.go` and `internal/formats/hls.go`.
+4. `[x]` Improve PO token policy handling by protocol (`https`, `dash`, `hls`) and add protocol-specific tests.
+5. `[x]` Strengthen `playerjs` decipher test fixtures with at least one realistic base.js sample snapshot.
+6. `[x]` Add `client.GetVideo`/`GetFormats` package tests using mocked Innertube responses (OK, LOGIN_REQUIRED, UNPLAYABLE).
+7. `[x]` Document public package usage for library consumers in `README.md` (config, error handling, stream URL resolution).
+8. `[x]` Add a minimal regression checklist section to this plan for every YouTube breakage patch cycle.
 
 ## 1. Positioning
 
@@ -200,3 +200,16 @@ Before starting any substantial change and after finishing it:
 2. Move completed items from `Immediate Next Tasks` to done state.
 3. Add newly discovered work items with `[ ]`.
 4. Keep this file as the single source of truth for execution order.
+
+## 12. Regression Checklist
+
+Run this checklist for every YouTube breakage patch cycle:
+
+1. Confirm `go test ./...` is green before patch.
+2. Reproduce breakage with one known sample ID and store exact failing behavior.
+3. Verify player URL extraction still returns `/s/player/.../base.js`.
+4. Validate `s` decipher path with fixture and one live sample.
+5. Validate `n` decipher path for direct URL and manifest URL.
+6. Validate fallback behavior for `LOGIN_REQUIRED` and `UNPLAYABLE`.
+7. Validate PO token path: provider configured and missing-provider failure cases.
+8. Run `go test ./...` after patch and update plan status markers.

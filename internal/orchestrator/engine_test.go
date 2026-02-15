@@ -215,3 +215,92 @@ func TestEngineReturnsPoTokenRequiredErrorWhenProviderFails(t *testing.T) {
 		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
 	}
 }
+
+func TestEngineMixedFailureMatrixIncludesHTTPPlayabilityAndPoToken(t *testing.T) {
+	web := innertube.WebClient            // required po token -> missing provider => po token failure
+	mweb := innertube.MWebClient          // playability failure from response
+	embedded := innertube.WebEmbeddedClient // fallback phase -> http failure
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		switch {
+		case strings.Contains(payload, `"clientName":"MWEB"`):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"Blocked in your country"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		case strings.Contains(payload, `"clientName":"WEB_EMBEDDED_PLAYER"`):
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(bytes.NewBufferString(`gateway error`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected request payload: %s", payload)
+			return nil, nil
+		}
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web, mweb, embedded}},
+		innertube.Config{HTTPClient: &http.Client{Transport: tr}},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+
+	var allErr *AllClientsFailedError
+	if !errors.As(err, &allErr) {
+		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	}
+	if len(allErr.Attempts) < 3 {
+		t.Fatalf("expected at least 3 attempts, got %d", len(allErr.Attempts))
+	}
+
+	var hasHTTP, hasPlayability, hasPoToken bool
+	for _, attempt := range allErr.Attempts {
+		var httpErr *HTTPStatusError
+		if errors.As(attempt.Err, &httpErr) {
+			hasHTTP = true
+		}
+		var playabilityErr *PlayabilityError
+		if errors.As(attempt.Err, &playabilityErr) {
+			hasPlayability = true
+		}
+		var poErr *PoTokenRequiredError
+		if errors.As(attempt.Err, &poErr) {
+			hasPoToken = true
+		}
+	}
+	if !hasHTTP || !hasPlayability || !hasPoToken {
+		t.Fatalf("expected mixed failures (http=%v playability=%v poToken=%v)", hasHTTP, hasPlayability, hasPoToken)
+	}
+}
+
+func TestPoTokenPolicyByProtocol(t *testing.T) {
+	web := innertube.WebClient
+	if !requiresPoToken(web, innertube.StreamingProtocolHTTPS) {
+		t.Fatalf("web https should require po token")
+	}
+	if !requiresPoToken(web, innertube.StreamingProtocolDASH) {
+		t.Fatalf("web dash should require po token")
+	}
+	if requiresPoToken(web, innertube.StreamingProtocolHLS) {
+		t.Fatalf("web hls should not require po token")
+	}
+	if !recommendsPoToken(web, innertube.StreamingProtocolHLS) {
+		t.Fatalf("web hls should recommend po token")
+	}
+
+	mweb := innertube.MWebClient
+	if requiresPoToken(mweb, innertube.StreamingProtocolHTTPS) {
+		t.Fatalf("mweb https should not require po token without policy entry")
+	}
+	if recommendsPoToken(mweb, innertube.StreamingProtocolHTTPS) {
+		t.Fatalf("mweb https should not recommend po token without policy entry")
+	}
+}

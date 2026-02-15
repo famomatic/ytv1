@@ -34,6 +34,10 @@ type Config struct {
 	// PlayerJSHeaders are additional headers for player JS fetches.
 	PlayerJSHeaders http.Header
 
+	// PlayerJSPreferredLocale controls canonical locale for player JS fetch path.
+	// Default is "en_US". Fetch falls back to the original watch-page locale path.
+	PlayerJSPreferredLocale string
+
 	// ClientOverrides sets Innertube client trial order (e.g. "web", "ios", "android").
 	// If empty, package defaults are used.
 	ClientOverrides []string
@@ -41,13 +45,14 @@ type Config struct {
 
 func (c Config) ToInnerTubeConfig() innertube.Config {
 	return innertube.Config{
-		HTTPClient: c.HTTPClient,
-		ProxyURL: c.ProxyURL,
-		PoTokenProvider: c.PoTokenProvider,
-		VisitorData: c.VisitorData,
-		PlayerJSBaseURL: c.PlayerJSBaseURL,
-		PlayerJSUserAgent: c.PlayerJSUserAgent,
-		PlayerJSHeaders: c.PlayerJSHeaders,
-		ClientOverrides: c.ClientOverrides,
+		HTTPClient:              c.HTTPClient,
+		ProxyURL:                c.ProxyURL,
+		PoTokenProvider:         c.PoTokenProvider,
+		VisitorData:             c.VisitorData,
+		PlayerJSBaseURL:         c.PlayerJSBaseURL,
+		PlayerJSUserAgent:       c.PlayerJSUserAgent,
+		PlayerJSHeaders:         c.PlayerJSHeaders,
+		PlayerJSPreferredLocale: c.PlayerJSPreferredLocale,
+		ClientOverrides:         c.ClientOverrides,
 	}
 }

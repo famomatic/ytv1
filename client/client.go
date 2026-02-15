@@ -18,11 +18,11 @@ import (
 
 // Client is the high-level YouTube client.
 type Client struct {
-	config Config
-	engine *orchestrator.Engine
+	config           Config
+	engine           *orchestrator.Engine
 	playerJSResolver playerjs.Resolver
-	sessionsMu sync.RWMutex
-	sessions   map[string]videoSession
+	sessionsMu       sync.RWMutex
+	sessions         map[string]videoSession
 }
 
 type videoSession struct {
@@ -49,17 +49,18 @@ func NewClient(config Config) *Client {
 		config.HTTPClient,
 		playerjs.NewMemoryCache(),
 		playerjs.ResolverConfig{
-			BaseURL: innerCfg.PlayerJSBaseURL,
-			UserAgent: innerCfg.PlayerJSUserAgent,
-			Headers: innerCfg.PlayerJSHeaders,
+			BaseURL:         innerCfg.PlayerJSBaseURL,
+			UserAgent:       innerCfg.PlayerJSUserAgent,
+			Headers:         innerCfg.PlayerJSHeaders,
+			PreferredLocale: innerCfg.PlayerJSPreferredLocale,
 		},
 	)
 
 	return &Client{
-		config: config,
-		engine: engine,
+		config:           config,
+		engine:           engine,
 		playerJSResolver: jsResolver,
-		sessions: make(map[string]videoSession),
+		sessions:         make(map[string]videoSession),
 	}
 }
 
@@ -84,10 +85,10 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 	}
 
 	info := &VideoInfo{
-		ID:      resp.VideoDetails.VideoID,
-		Title:   resp.VideoDetails.Title,
-		Author:  resp.VideoDetails.Author,
-		Formats: outFormats,
+		ID:              resp.VideoDetails.VideoID,
+		Title:           resp.VideoDetails.Title,
+		Author:          resp.VideoDetails.Author,
+		Formats:         outFormats,
 		DashManifestURL: resp.StreamingData.DashManifestURL,
 		HLSManifestURL:  resp.StreamingData.HlsManifestURL,
 	}
@@ -115,6 +116,40 @@ func (c *Client) GetFormats(ctx context.Context, input string) ([]FormatInfo, er
 		return nil, ErrNoPlayableFormats
 	}
 	return v.Formats, nil
+}
+
+// FetchDASHManifest fetches DASH manifest content for the given video ID/URL.
+func (c *Client) FetchDASHManifest(ctx context.Context, input string) (string, error) {
+	session, videoID, err := c.ensureSession(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	manifestURL := c.resolveManifestURL(ctx, session.Response.StreamingData.DashManifestURL, session.PlayerURL)
+	if manifestURL == "" {
+		return "", fmt.Errorf("%w: dash manifest unavailable for video=%s", ErrNoPlayableFormats, videoID)
+	}
+	manifest, err := formats.FetchDASHManifest(ctx, c.config.HTTPClient, manifestURL)
+	if err != nil {
+		return "", err
+	}
+	return manifest.RawContent, nil
+}
+
+// FetchHLSManifest fetches HLS manifest content for the given video ID/URL.
+func (c *Client) FetchHLSManifest(ctx context.Context, input string) (string, error) {
+	session, videoID, err := c.ensureSession(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	manifestURL := c.resolveManifestURL(ctx, session.Response.StreamingData.HlsManifestURL, session.PlayerURL)
+	if manifestURL == "" {
+		return "", fmt.Errorf("%w: hls manifest unavailable for video=%s", ErrNoPlayableFormats, videoID)
+	}
+	manifest, err := formats.FetchHLSManifest(ctx, c.config.HTTPClient, manifestURL)
+	if err != nil {
+		return "", err
+	}
+	return manifest.RawContent, nil
 }
 
 // ResolveStreamURL resolves a direct playable URL for a specific itag.
@@ -202,18 +237,18 @@ func toFormatInfo(f formats.Format) FormatInfo {
 	hasVideo := f.Width > 0 || f.Height > 0
 	hasAudio := f.AudioChannels > 0 || f.AudioSampleRate > 0
 	return FormatInfo{
-		Itag:        f.Itag,
-		URL:         f.URL,
-		MimeType:    f.MimeType,
-		HasAudio:    hasAudio,
-		HasVideo:    hasVideo,
-		Bitrate:     f.Bitrate,
-		Width:       f.Width,
-		Height:      f.Height,
-		FPS:         f.FPS,
-		Ciphered:    f.URL == "",
-		Quality:     f.Quality,
-		QualityLabel:f.QualityLabel,
+		Itag:         f.Itag,
+		URL:          f.URL,
+		MimeType:     f.MimeType,
+		HasAudio:     hasAudio,
+		HasVideo:     hasVideo,
+		Bitrate:      f.Bitrate,
+		Width:        f.Width,
+		Height:       f.Height,
+		FPS:          f.FPS,
+		Ciphered:     f.URL == "",
+		Quality:      f.Quality,
+		QualityLabel: f.QualityLabel,
 	}
 }
 
@@ -291,6 +326,25 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 	defer c.sessionsMu.RUnlock()
 	s, ok := c.sessions[videoID]
 	return s, ok
+}
+
+func (c *Client) ensureSession(ctx context.Context, input string) (videoSession, string, error) {
+	videoID, err := normalizeVideoID(input)
+	if err != nil {
+		return videoSession{}, "", err
+	}
+	session, ok := c.getSession(videoID)
+	if ok {
+		return session, videoID, nil
+	}
+	if _, err := c.GetVideo(ctx, videoID); err != nil {
+		return videoSession{}, "", err
+	}
+	session, ok = c.getSession(videoID)
+	if !ok {
+		return videoSession{}, "", ErrChallengeNotSolved
+	}
+	return session, videoID, nil
 }
 
 func findRawFormat(resp *innertube.PlayerResponse, itag int) (innertube.Format, bool) {

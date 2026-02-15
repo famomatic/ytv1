@@ -13,8 +13,8 @@ import (
 type Variant string
 
 const (
-    VariantMain Variant = "main"
-    VariantTV   Variant = "tv"
+	VariantMain Variant = "main"
+	VariantTV   Variant = "tv"
 )
 
 type Resolver interface {
@@ -23,20 +23,26 @@ type Resolver interface {
 }
 
 type defaultResolver struct {
-	client  *http.Client
-	cache   Cache
-	config  ResolverConfig
+	client *http.Client
+	cache  Cache
+	config ResolverConfig
 }
 
 // ResolverConfig contains externally tunable settings for player JS fetches.
 type ResolverConfig struct {
-	BaseURL  string
-	UserAgent string
-	Headers  http.Header
+	BaseURL         string
+	UserAgent       string
+	Headers         http.Header
+	PreferredLocale string
 }
 
 const defaultPlayerJSUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+const defaultPlayerJSLocale = "en_US"
+
 var playerURLPattern = regexp.MustCompile(`(/s/player/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]*/base\.js)`)
+var playerPathPattern = regexp.MustCompile(`^/s/player/([A-Za-z0-9_-]+)/(.+)$`)
+var localePathPattern = regexp.MustCompile(`(?i)(player(?:_[a-z0-9]+)?\.vflset)/[a-z]{2,3}_[a-z]{2,3}/base\.js$`)
+var nonAlnumPattern = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 
 func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolver {
 	resolverConfig := ResolverConfig{}
@@ -54,20 +60,47 @@ func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolv
 // For now, let's assume we get the full URL.
 
 func (r *defaultResolver) GetPlayerJS(ctx context.Context, playerURL string) (string, error) {
-	if body, ok := r.cache.Get(playerURL); ok {
+	normalizedPath := r.normalizePlayerPath(playerURL)
+	cacheKey := r.playerCacheKey(normalizedPath)
+	if body, ok := r.cache.Get(cacheKey); ok {
 		return body, nil
 	}
 
-	baseURL := r.config.BaseURL
-	if baseURL == "" {
-		baseURL = "https://www.youtube.com"
+	candidates := []string{normalizedPath}
+	if playerURL != normalizedPath {
+		candidates = append(candidates, playerURL)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(baseURL, "/")+playerURL, nil)
+	var lastErr error
+	for _, candidate := range candidates {
+		body, err := r.fetchPlayerJS(ctx, candidate)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		r.cache.Set(cacheKey, body)
+		return body, nil
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", fmt.Errorf("failed to fetch player JS")
+}
+
+func (r *defaultResolver) fetchPlayerJS(ctx context.Context, playerURL string) (string, error) {
+	urlToFetch := playerURL
+	if !strings.HasPrefix(urlToFetch, "http://") && !strings.HasPrefix(urlToFetch, "https://") {
+		baseURL := r.config.BaseURL
+		if baseURL == "" {
+			baseURL = "https://www.youtube.com"
+		}
+		urlToFetch = strings.TrimRight(baseURL, "/") + playerURL
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", urlToFetch, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-
 	ua := r.config.UserAgent
 	if ua == "" {
 		ua = defaultPlayerJSUserAgent
@@ -94,10 +127,7 @@ func (r *defaultResolver) GetPlayerJS(ctx context.Context, playerURL string) (st
 		return "", fmt.Errorf("failed to read body: %w", err)
 	}
 
-	body := string(bodyBytes)
-	r.cache.Set(playerURL, body)
-
-	return body, nil
+	return string(bodyBytes), nil
 }
 
 func (r *defaultResolver) GetPlayerURL(ctx context.Context, videoID string) (string, error) {
@@ -150,4 +180,29 @@ func (r *defaultResolver) GetPlayerURL(ctx context.Context, videoID string) (str
 		return "", fmt.Errorf("player url not found")
 	}
 	return string(m[1]), nil
+}
+
+func (r *defaultResolver) normalizePlayerPath(playerURL string) string {
+	u, err := url.Parse(playerURL)
+	if err == nil && u.Path != "" {
+		playerURL = u.Path
+	}
+	locale := r.config.PreferredLocale
+	if locale == "" {
+		locale = defaultPlayerJSLocale
+	}
+	if localePathPattern.MatchString(playerURL) {
+		return localePathPattern.ReplaceAllString(playerURL, "${1}/"+locale+"/base.js")
+	}
+	return playerURL
+}
+
+func (r *defaultResolver) playerCacheKey(playerPath string) string {
+	m := playerPathPattern.FindStringSubmatch(playerPath)
+	if len(m) < 3 {
+		return playerPath
+	}
+	playerID := m[1]
+	variant := nonAlnumPattern.ReplaceAllString(m[2], "_")
+	return playerID + ":" + variant
 }

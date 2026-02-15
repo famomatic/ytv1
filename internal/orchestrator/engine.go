@@ -147,6 +147,22 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 	return nil
 }
 
+func requiresPoToken(profile innertube.ClientProfile, protocol innertube.VideoStreamingProtocol) bool {
+	policy, ok := profile.PoTokenPolicy[protocol]
+	if !ok {
+		return false
+	}
+	return policy.Required
+}
+
+func recommendsPoToken(profile innertube.ClientProfile, protocol innertube.VideoStreamingProtocol) bool {
+	policy, ok := profile.PoTokenPolicy[protocol]
+	if !ok {
+		return false
+	}
+	return policy.Recommended
+}
+
 func splitClientPhases(clients []innertube.ClientProfile) ([]innertube.ClientProfile, []innertube.ClientProfile) {
 	var primary []innertube.ClientProfile
 	var fallback []innertube.ClientProfile
