@@ -46,6 +46,30 @@ This keeps diagnostics observable without coupling library internals to CLI outp
 - it may format lifecycle events for humans (`--verbose`),
 - it must not re-implement extraction/challenge logic.
 
+## yt-dlp Source Map
+
+Primary mapping baseline:
+
+- `D:\yt-dlp\yt_dlp\extractor\youtube\_video.py`
+  - `_extract_player_responses` -> `internal/orchestrator/engine.go`, `client/client.go`
+  - `_extract_formats_and_subtitles` -> `internal/formats/*`, `client/client.go`
+  - challenge collection/solve flow (`n`/`sig`) -> `client/challenge_cache.go`, `internal/playerjs/*`, `internal/challenge/*`
+  - PO token fetch/injection flow -> `internal/challenge/*`, `internal/innertube/*`, `client/client.go`
+- `D:\yt-dlp\yt_dlp\extractor\youtube\_base.py`
+  - Innertube client defaults/context/header generation -> `internal/innertube/*`, `internal/policy/*`
+  - visitor/session/cookie-derived request shaping -> `client/request_helpers.go`, `internal/innertube/*`
+  - ytcfg/api-key/watch-page data extraction -> `internal/playerjs/*`, `internal/innertube/*`
+- `D:\yt-dlp\yt_dlp\extractor\youtube\jsc\*`
+  - provider-style JS challenge solving -> `internal/playerjs/*`, `internal/challenge/*`
+  - bulk solve and provider fallback semantics -> `client/challenge_cache.go`
+- `D:\yt-dlp\yt_dlp\extractor\youtube\pot\*`
+  - PO token context/policy/provider/cache abstraction -> `internal/challenge/*`, `internal/innertube/*`
+- `D:\yt-dlp\yt_dlp\downloader\http.py`, `fragment.py`, `common.py`
+  - HTTP header propagation/range-resume/chunked-retry -> `client/download.go`
+  - fragmented transport internals -> `internal/downloader/*`
+
+Gap focus (runtime): extraction path reaches playable candidates, but default DSYF download still returns `403`; this indicates remaining parity work in policy/header/token/transport coupling.
+
 ## References
 
 - `legacy/kkdai-youtube`

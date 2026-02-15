@@ -15,4 +15,5 @@ type FormatInfo struct {
 	Ciphered     bool
 	Quality      string
 	QualityLabel string
+	SourceClient string
 }

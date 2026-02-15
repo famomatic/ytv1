@@ -7,6 +7,7 @@ type PlayerResponse struct {
 	VideoDetails      VideoDetails      `json:"videoDetails"`
 	Microformat       Microformat       `json:"microformat"`
 	Captions          Captions          `json:"captions"`
+	SourceClient      string            `json:"-"`
 }
 
 type BrowseResponse struct {

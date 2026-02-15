@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -197,8 +198,9 @@ func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.For
 
 	c.emitDownloadEvent("download", "start", videoID, outputPath, fmt.Sprintf("itag=%d", f.Itag))
 	if err := c.downloadStream(ctx, videoID, streamURL, outputPath, f); err != nil {
-		c.emitDownloadEvent("download", "failure", videoID, outputPath, err.Error())
-		return nil, err
+		attempt := downloadAttemptFromFormatAndURL(f, streamURL, err)
+		c.emitDownloadEvent("download", "failure", videoID, outputPath, formatDownloadFailureDetail(attempt))
+		return nil, wrapDownloadFailure(err, attempt)
 	}
 	c.emitDownloadEvent("download", "complete", videoID, outputPath, fmt.Sprintf("bytes=%d", getFileSize(outputPath)))
 
@@ -254,8 +256,9 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	c.emitDownloadEvent("download", "destination", videoID, videoPath, fmt.Sprintf("itag=%d", vidF.Itag))
 	c.emitDownloadEvent("download", "start", videoID, videoPath, fmt.Sprintf("itag=%d", vidF.Itag))
 	if err := c.downloadStream(ctx, videoID, vURL, videoPath, vidF); err != nil {
-		c.emitDownloadEvent("download", "failure", videoID, videoPath, err.Error())
-		return nil, err
+		attempt := downloadAttemptFromFormatAndURL(vidF, vURL, err)
+		c.emitDownloadEvent("download", "failure", videoID, videoPath, formatDownloadFailureDetail(attempt))
+		return nil, wrapDownloadFailure(err, attempt)
 	}
 	c.emitDownloadEvent("download", "complete", videoID, videoPath, fmt.Sprintf("bytes=%d", getFileSize(videoPath)))
 	defer c.cleanupIntermediateFile(videoID, videoPath, keepIntermediates)
@@ -268,8 +271,9 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	c.emitDownloadEvent("download", "destination", videoID, audioPath, fmt.Sprintf("itag=%d", audF.Itag))
 	c.emitDownloadEvent("download", "start", videoID, audioPath, fmt.Sprintf("itag=%d", audF.Itag))
 	if err := c.downloadStream(ctx, videoID, aURL, audioPath, audF); err != nil {
-		c.emitDownloadEvent("download", "failure", videoID, audioPath, err.Error())
-		return nil, err
+		attempt := downloadAttemptFromFormatAndURL(audF, aURL, err)
+		c.emitDownloadEvent("download", "failure", videoID, audioPath, formatDownloadFailureDetail(attempt))
+		return nil, wrapDownloadFailure(err, attempt)
 	}
 	c.emitDownloadEvent("download", "complete", videoID, audioPath, fmt.Sprintf("bytes=%d", getFileSize(audioPath)))
 	defer c.cleanupIntermediateFile(videoID, audioPath, keepIntermediates)
@@ -980,4 +984,67 @@ func (c *Client) emitDownloadEvent(stage, phase, videoID, path, detail string) {
 		Path:    path,
 		Detail:  detail,
 	})
+}
+
+func wrapDownloadFailure(err error, attempt AttemptDetail) error {
+	if err == nil {
+		return nil
+	}
+	return errors.Join(err, &DownloadFailureDetailError{
+		Attempts: []AttemptDetail{attempt},
+	})
+}
+
+func formatDownloadFailureDetail(attempt AttemptDetail) string {
+	parts := []string{attempt.Reason}
+	if attempt.HTTPStatus != 0 {
+		parts = append(parts, fmt.Sprintf("http=%d", attempt.HTTPStatus))
+	}
+	if attempt.Protocol != "" {
+		parts = append(parts, "proto="+attempt.Protocol)
+	}
+	if attempt.Itag != 0 {
+		parts = append(parts, fmt.Sprintf("itag=%d", attempt.Itag))
+	}
+	if attempt.URLHost != "" {
+		parts = append(parts, "host="+attempt.URLHost)
+	}
+	if attempt.URLHasN {
+		parts = append(parts, "has_n=true")
+	}
+	if attempt.URLHasPOT {
+		parts = append(parts, "has_pot=true")
+	}
+	if attempt.URLHasSignature {
+		parts = append(parts, "has_sig=true")
+	}
+	if attempt.Client != "" {
+		parts = append(parts, "client="+attempt.Client)
+	}
+	return strings.Join(parts, " ")
+}
+
+func downloadAttemptFromFormatAndURL(f types.FormatInfo, rawURL string, err error) AttemptDetail {
+	d := AttemptDetail{
+		Client:   f.SourceClient,
+		Stage:    "download",
+		Reason:   err.Error(),
+		Itag:     f.Itag,
+		Protocol: strings.TrimSpace(f.Protocol),
+	}
+	if d.Protocol == "" {
+		d.Protocol = "unknown"
+	}
+	if u, parseErr := url.Parse(rawURL); parseErr == nil {
+		d.URLHost = u.Host
+		q := u.Query()
+		d.URLHasN = q.Get("n") != ""
+		d.URLHasPOT = q.Get("pot") != "" || strings.Contains(u.Path, "/pot/")
+		d.URLHasSignature = q.Get("sig") != "" || q.Get("signature") != "" || q.Get("lsig") != ""
+	}
+	var statusErr *downloadHTTPStatusError
+	if errors.As(err, &statusErr) {
+		d.HTTPStatus = statusErr.StatusCode
+	}
+	return d
 }

@@ -36,9 +36,11 @@
 - `2026-02-16`
 
 ### 1.2 Verified Runtime State
-- `ytv1 DSYFmhjDbvs` currently fails at media download stage with `403`.
-- Extraction succeeds far enough to obtain player responses and select streams.
-- Current gap is not "basic extraction"; it is deep parity in request policy and dependent runtime behaviors.
+- `ytv1 DSYFmhjDbvs` currently fails in player-response stage before stream selection.
+- Current observed failure classes are mixed playability outcomes:
+  - `android_vr` / `tv`: `LOGIN_REQUIRED` ("Sign in to confirm you’re not a bot")
+  - `web` / `web_safari` / `web_embedded`: `UNPLAYABLE` ("Video unavailable")
+- Current gap is now earlier than downloader transport; request identity/session/context parity remains primary blocker.
 
 ### 1.3 Reference Baseline Used For Rebuild
 - Runtime binary folder exists: `C:\yt-dlp`.
@@ -53,9 +55,9 @@
   7. `D:\yt-dlp\yt_dlp\downloader\common.py`
 
 ### 1.4 Immediate Next Tasks (Strict Order)
-1. `[-]` R0. Rebaseline and failure observability hardening
-2. `[ ]` R1. yt-dlp YouTube source-map parity (function-level)
-3. `[ ]` R2. Innertube client/profile parity port
+1. `[x]` R0. Rebaseline and failure observability hardening
+2. `[x]` R1. yt-dlp YouTube source-map parity (function-level)
+3. `[-]` R2. Innertube client/profile parity port
 4. `[ ]` R3. API header/session/auth parity port
 5. `[ ]` R4. Player response pipeline parity (`ytcfg`, player URL, `sts`, context)
 6. `[ ]` R5. PO Token framework parity (policy + provider/cache + URL injection)
@@ -82,7 +84,7 @@
 ## 3. Execution Tracks
 
 ### R0. Rebaseline and Failure Observability
-- Status: `[-]`
+- Status: `[x]`
 - Goal: Freeze current failure signatures before deeper porting.
 - Work:
   1. Capture structured stage logs for extraction + download attempts for DSYF.
@@ -97,7 +99,7 @@
   - DSYF failure path produces deterministic, typed diagnostics suitable for root-cause triage.
 
 ### R1. yt-dlp YouTube Source-Map Parity
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Build explicit mapping from yt-dlp functions to ytv1 modules before additional code movement.
 - Work:
   1. Map `_video.py` extraction flow to `client` + `internal/orchestrator`.
@@ -111,7 +113,7 @@
   - No major yt-dlp dependency path is left unmapped.
 
 ### R2. Innertube Client/Profile Parity Port
-- Status: `[ ]`
+- Status: `[-]`
 - Goal: Align client matrix and fallback behavior with yt-dlp practical defaults.
 - Work:
   1. Port effective default client order and auth/non-auth variants.
@@ -277,3 +279,7 @@ Global migration is considered complete only when all are true:
 ## 6. Change Log (Plan)
 
 - `2026-02-16`: Rebuilt plan from scratch based on deep source review of `D:\yt-dlp\yt_dlp\extractor\youtube/*`, `jsc/*`, `pot/*`, and downloader transport modules, with DSYF 403 runtime failure as primary migration gate.
+- `2026-02-16`: Completed R0 (download failure typed diagnostics, source-client propagation, protocol/host/url-policy metadata in runtime and CLI diagnostics); moved R1 to in-progress.
+- `2026-02-16`: Completed R1 source-map parity documentation (`docs/ARCHITECTURE.md`) with yt-dlp function-to-module mapping across extractor/jsc/pot/downloader paths.
+- `2026-02-16`: Started R2 implementation: added client alias ID propagation (`web` vs `web_safari`) for deterministic diagnostics, aligned default selector order to yt-dlp baseline (`android_vr`, `web`, `web_safari`) with authenticated variant (`tv_downgraded`, `web`, `web_safari`), and added client capability metadata fields.
+- `2026-02-16`: Added initial R3 header parity subset in Innertube requests (`X-YouTube-Client-Name`, `X-YouTube-Client-Version`, `X-Goog-Visitor-Id`, `X-Origin`) with orchestrator tests.

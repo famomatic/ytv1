@@ -9,6 +9,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -90,10 +91,11 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	var wg sync.WaitGroup
 
 	for idx, profile := range clients {
-		e.emitExtractionEvent("player_api_json", "start", profile.Name, "")
+		e.emitExtractionEvent("player_api_json", "start", profileIDOrName(profile), "")
 		wg.Add(1)
 		go func(order int, p innertube.ClientProfile) {
 			defer wg.Done()
+			clientLabel := profileIDOrName(p)
 
 			if ctx.Err() != nil {
 				return
@@ -104,7 +106,7 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			})
 			if err := e.applyPoToken(ctx, req, p); err != nil {
 				select {
-				case results <- extractionResult{response: nil, err: err, client: p.Name, order: order}:
+				case results <- extractionResult{response: nil, err: err, client: clientLabel, order: order}:
 				case <-ctx.Done():
 				}
 				return
@@ -112,7 +114,7 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			resp, err := e.fetch(ctx, req, p)
 
 			select {
-			case results <- extractionResult{response: resp, err: err, client: p.Name, order: order}:
+			case results <- extractionResult{response: resp, err: err, client: clientLabel, order: order}:
 			case <-ctx.Done():
 			}
 		}(idx, profile)
@@ -130,6 +132,7 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	var indexed []indexedAttempt
 	for res := range results {
 		if res.err == nil {
+			res.response.SourceClient = res.client
 			e.emitExtractionEvent("player_api_json", "success", res.client, "")
 			cancel()
 			sort.Slice(indexed, func(i, j int) bool { return indexed[i].order < indexed[j].order })
@@ -168,7 +171,7 @@ func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innert
 	seenFallback := map[string]struct{}{}
 	for _, c := range out {
 		if isFallbackClient(c) {
-			seenFallback[strings.ToUpper(strings.TrimSpace(c.Name))] = struct{}{}
+			seenFallback[fallbackKey(c)] = struct{}{}
 		}
 	}
 	appendIfMissing := func(alias string) {
@@ -176,12 +179,12 @@ func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innert
 		if !ok {
 			return
 		}
-		name := strings.ToUpper(strings.TrimSpace(p.Name))
-		if _, exists := seenFallback[name]; exists {
+		key := fallbackKey(p)
+		if _, exists := seenFallback[key]; exists {
 			return
 		}
 		out = append(out, p)
-		seenFallback[name] = struct{}{}
+		seenFallback[key] = struct{}{}
 	}
 	appendIfMissing("web_embedded")
 	appendIfMissing("tv")
@@ -313,8 +316,38 @@ func splitClientPhases(clients []innertube.ClientProfile) ([]innertube.ClientPro
 }
 
 func isFallbackClient(c innertube.ClientProfile) bool {
+	id := strings.ToLower(strings.TrimSpace(c.ID))
+	if id == "web_embedded" || id == "web_embedded_player" || id == "tv" || id == "tvhtml5" || id == "tv_downgraded" {
+		return true
+	}
 	name := strings.ToUpper(strings.TrimSpace(c.Name))
 	return name == "WEB_EMBEDDED_PLAYER" || name == "TVHTML5"
+}
+
+func fallbackKey(c innertube.ClientProfile) string {
+	if id := strings.ToLower(strings.TrimSpace(c.ID)); id != "" {
+		if strings.HasPrefix(id, "web_embedded") {
+			return "web_embedded"
+		}
+		if strings.HasPrefix(id, "tv") {
+			return "tv"
+		}
+	}
+	name := strings.ToUpper(strings.TrimSpace(c.Name))
+	if name == "WEB_EMBEDDED_PLAYER" {
+		return "web_embedded"
+	}
+	if name == "TVHTML5" {
+		return "tv"
+	}
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func profileIDOrName(c innertube.ClientProfile) string {
+	if id := strings.TrimSpace(c.ID); id != "" {
+		return id
+	}
+	return c.Name
 }
 
 func shouldRunFallbackPhase(attempts []AttemptError) bool {
@@ -357,8 +390,19 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", profile.UserAgent)
-	httpReq.Header.Set("Origin", "https://"+profile.Host)
-	httpReq.Header.Set("Referer", "https://"+profile.Host+"/watch?v="+req.VideoID)
+	origin := "https://" + profile.Host
+	httpReq.Header.Set("Origin", origin)
+	httpReq.Header.Set("X-Origin", origin)
+	httpReq.Header.Set("Referer", origin+"/watch?v="+req.VideoID)
+	if profile.ContextNameID > 0 {
+		httpReq.Header.Set("X-YouTube-Client-Name", strconv.Itoa(profile.ContextNameID))
+	}
+	if profile.Version != "" {
+		httpReq.Header.Set("X-YouTube-Client-Version", profile.Version)
+	}
+	if req.Context.Client.VisitorData != "" {
+		httpReq.Header.Set("X-Goog-Visitor-Id", req.Context.Client.VisitorData)
+	}
 	// Add other headers from profile
 	for k, v := range profile.Headers {
 		for _, val := range v {

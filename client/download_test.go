@@ -429,3 +429,77 @@ func TestDownloadAndMerge_KeepIntermediateFiles(t *testing.T) {
 		t.Fatalf("expected cleanup skip event, got=%v", events)
 	}
 }
+
+func TestDownloadFailureProvidesAttemptDetails(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	mediaURL := "https://media.example/v.webm?itag=18&pot=token&sig=xyz"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{"formats":[
+						{"itag":18,"url":"` + mediaURL + `","mimeType":"video/mp4","bitrate":1000}
+					]}
+				}`
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/base.js"></script></html>`)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/s/player/test/base.js":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(testPlayerJS())),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.String(), "https://media.example/v.webm?"):
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader("forbidden")),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("not found")),
+					Header:     make(http.Header),
+				}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+	})
+
+	_, err := c.Download(context.Background(), videoID, DownloadOptions{
+		Itag: 18,
+	})
+	if err == nil {
+		t.Fatal("expected download failure error, got nil")
+	}
+
+	attempts, ok := AttemptDetails(err)
+	if !ok || len(attempts) != 1 {
+		t.Fatalf("AttemptDetails() ok=%v attempts=%v err=%v", ok, attempts, err)
+	}
+	a := attempts[0]
+	if a.Stage != "download" || a.HTTPStatus != http.StatusForbidden {
+		t.Fatalf("unexpected stage/status: %+v", a)
+	}
+	if a.Itag != 18 || a.Protocol != "https" {
+		t.Fatalf("unexpected itag/protocol: %+v", a)
+	}
+	if a.URLHost != "media.example" || a.URLHasN || !a.URLHasPOT || !a.URLHasSignature {
+		t.Fatalf("unexpected url policy details: %+v", a)
+	}
+	if a.Client == "" {
+		t.Fatalf("expected source client in attempt details, got: %+v", a)
+	}
+}

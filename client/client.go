@@ -54,7 +54,8 @@ func NewClient(config Config) *Client {
 
 	registry := innertube.NewRegistry()
 	innerCfg := config.ToInnerTubeConfig()
-	selector := policy.NewSelector(registry, innerCfg.ClientOverrides, innerCfg.ClientSkip)
+	preferAuthDefaults := config.CookieJar != nil || (config.HTTPClient != nil && config.HTTPClient.Jar != nil)
+	selector := policy.NewSelector(registry, innerCfg.ClientOverrides, innerCfg.ClientSkip, preferAuthDefaults)
 	engine := orchestrator.NewEngine(selector, innerCfg)
 	playerHeaders := cloneHeader(innerCfg.RequestHeaders)
 	if playerHeaders == nil {
@@ -326,6 +327,7 @@ func toFormatInfo(f formats.Format) FormatInfo {
 		Ciphered:     f.Ciphered,
 		Quality:      f.Quality,
 		QualityLabel: f.QualityLabel,
+		SourceClient: f.SourceClient,
 	}
 }
 

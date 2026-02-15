@@ -193,8 +193,26 @@ func printAttemptDiagnostics(err error) {
 	fmt.Println("Attempt diagnostics:")
 	for i, a := range attempts {
 		fmt.Printf("  [%d] client=%s stage=%s", i+1, a.Client, a.Stage)
+		if a.Itag != 0 {
+			fmt.Printf(" itag=%d", a.Itag)
+		}
+		if a.Protocol != "" {
+			fmt.Printf(" proto=%s", a.Protocol)
+		}
 		if a.HTTPStatus != 0 {
 			fmt.Printf(" http=%d", a.HTTPStatus)
+		}
+		if a.URLHost != "" {
+			fmt.Printf(" host=%s", a.URLHost)
+		}
+		if a.URLHasN {
+			fmt.Printf(" has_n=true")
+		}
+		if a.URLHasPOT {
+			fmt.Printf(" has_pot=true")
+		}
+		if a.URLHasSignature {
+			fmt.Printf(" has_sig=true")
 		}
 		if a.POTRequired {
 			fmt.Printf(" pot_required=true")

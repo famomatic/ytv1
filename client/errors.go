@@ -81,6 +81,12 @@ type AttemptDetail struct {
 	Stage                string
 	Reason               string
 	HTTPStatus           int
+	Itag                 int
+	Protocol             string
+	URLHost              string
+	URLHasN              bool
+	URLHasPOT            bool
+	URLHasSignature      bool
 	POTRequired          bool
 	POTAvailable         bool
 	POTPolicy            string
@@ -94,6 +100,16 @@ type AttemptDetail struct {
 	Unavailable          bool
 	DRMProtected         bool
 	AvailableCountries   []string
+}
+
+// DownloadFailureDetailError preserves download failure context while exposing attempt-style diagnostics.
+type DownloadFailureDetailError struct {
+	Attempts []AttemptDetail
+}
+
+// Error returns a summary of download failure details.
+func (e *DownloadFailureDetailError) Error() string {
+	return "download failed with detailed attempts"
 }
 
 // AllClientsFailedDetailError preserves ErrAllClientsFailed while exposing attempt details.
@@ -191,6 +207,10 @@ func AttemptDetails(err error) ([]AttemptDetail, bool) {
 	var unavailableErr *UnavailableDetailError
 	if errors.As(err, &unavailableErr) {
 		return unavailableErr.Attempts, true
+	}
+	var downloadErr *DownloadFailureDetailError
+	if errors.As(err, &downloadErr) {
+		return downloadErr.Attempts, true
 	}
 	return nil, false
 }

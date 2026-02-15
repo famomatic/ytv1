@@ -595,6 +595,58 @@ func TestEngineAppliesRequestHeaders(t *testing.T) {
 	}
 }
 
+func TestEngineAppliesInnertubeIdentityHeaders(t *testing.T) {
+	web := innertube.WebClient
+	var sawClientName int32
+	var sawClientVersion int32
+	var sawVisitor int32
+	var sawXOrigin int32
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-YouTube-Client-Name") == "1" {
+			atomic.StoreInt32(&sawClientName, 1)
+		}
+		if r.Header.Get("X-YouTube-Client-Version") == web.Version {
+			atomic.StoreInt32(&sawClientVersion, 1)
+		}
+		if r.Header.Get("X-Goog-Visitor-Id") == "visitor-xyz" {
+			atomic.StoreInt32(&sawVisitor, 1)
+		}
+		if r.Header.Get("X-Origin") == "https://www.youtube.com" {
+			atomic.StoreInt32(&sawXOrigin, 1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient:  &http.Client{Transport: tr},
+			VisitorData: "visitor-xyz",
+		},
+	)
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&sawClientName) == 0 {
+		t.Fatalf("expected X-YouTube-Client-Name header")
+	}
+	if atomic.LoadInt32(&sawClientVersion) == 0 {
+		t.Fatalf("expected X-YouTube-Client-Version header")
+	}
+	if atomic.LoadInt32(&sawVisitor) == 0 {
+		t.Fatalf("expected X-Goog-Visitor-Id header")
+	}
+	if atomic.LoadInt32(&sawXOrigin) == 0 {
+		t.Fatalf("expected X-Origin header")
+	}
+}
+
 func TestEngineMetadataRetryOnTransientStatus(t *testing.T) {
 	web := innertube.WebClient
 	var calls int32
@@ -716,7 +768,7 @@ func TestEngineEmitsPlayerAPIEventsInDeterministicStartOrder(t *testing.T) {
 			hasSuccess = true
 		}
 	}
-	wantStarts := []string{"WEB", "MWEB"}
+	wantStarts := []string{"web", "mweb"}
 	if !reflect.DeepEqual(starts, wantStarts) {
 		t.Fatalf("start events = %v, want %v", starts, wantStarts)
 	}
