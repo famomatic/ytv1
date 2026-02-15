@@ -27,10 +27,12 @@ type InvalidInputDetailError struct {
 	Reason string
 }
 
+// Error returns a human-readable invalid input reason.
 func (e *InvalidInputDetailError) Error() string {
 	return "invalid input: " + e.Reason
 }
 
+// Is reports sentinel compatibility with ErrInvalidInput.
 func (e *InvalidInputDetailError) Is(target error) bool {
 	return target == ErrInvalidInput
 }
@@ -40,10 +42,12 @@ type MP3TranscoderError struct {
 	Mode SelectionMode
 }
 
+// Error returns a human-readable MP3 transcoder configuration error.
 func (e *MP3TranscoderError) Error() string {
 	return "mp3 transcoder not configured for mode=" + string(e.Mode)
 }
 
+// Is reports sentinel compatibility with ErrMP3TranscoderNotConfigured.
 func (e *MP3TranscoderError) Is(target error) bool {
 	return target == ErrMP3TranscoderNotConfigured
 }
@@ -61,10 +65,12 @@ type NoPlayableFormatsDetailError struct {
 	Skips []FormatSkipReason
 }
 
+// Error returns a summary of the no-playable-formats condition.
 func (e *NoPlayableFormatsDetailError) Error() string {
 	return "no playable formats after filtering for mode=" + string(e.Mode)
 }
 
+// Is reports sentinel compatibility with ErrNoPlayableFormats.
 func (e *NoPlayableFormatsDetailError) Is(target error) bool {
 	return target == ErrNoPlayableFormats
 }
@@ -95,10 +101,12 @@ type AllClientsFailedDetailError struct {
 	Attempts []AttemptDetail
 }
 
+// Error returns a summary of all-client failure.
 func (e *AllClientsFailedDetailError) Error() string {
 	return "all clients failed with detailed attempts"
 }
 
+// Is reports sentinel compatibility with ErrAllClientsFailed.
 func (e *AllClientsFailedDetailError) Is(target error) bool {
 	return target == ErrAllClientsFailed
 }
@@ -108,10 +116,12 @@ type LoginRequiredDetailError struct {
 	Attempts []AttemptDetail
 }
 
+// Error returns a summary of login-required failure.
 func (e *LoginRequiredDetailError) Error() string {
 	return "login required with detailed attempts"
 }
 
+// Is reports sentinel compatibility with ErrLoginRequired.
 func (e *LoginRequiredDetailError) Is(target error) bool {
 	return target == ErrLoginRequired
 }
@@ -121,10 +131,12 @@ type UnavailableDetailError struct {
 	Attempts []AttemptDetail
 }
 
+// Error returns a summary of unavailable-content failure.
 func (e *UnavailableDetailError) Error() string {
 	return "video unavailable with detailed attempts"
 }
 
+// Is reports sentinel compatibility with ErrUnavailable.
 func (e *UnavailableDetailError) Is(target error) bool {
 	return target == ErrUnavailable
 }
@@ -136,10 +148,12 @@ type TranscriptUnavailableDetailError struct {
 	Reason       string
 }
 
+// Error returns a human-readable transcript unavailable reason.
 func (e *TranscriptUnavailableDetailError) Error() string {
 	return "transcript unavailable: " + e.Reason
 }
 
+// Is reports sentinel compatibility with ErrUnavailable.
 func (e *TranscriptUnavailableDetailError) Is(target error) bool {
 	return target == ErrUnavailable
 }
@@ -151,10 +165,12 @@ type TranscriptParseDetailError struct {
 	Reason       string
 }
 
+// Error returns a human-readable transcript parse failure reason.
 func (e *TranscriptParseDetailError) Error() string {
 	return "transcript parse failed: " + e.Reason
 }
 
+// Is reports sentinel compatibility with ErrTranscriptParse.
 func (e *TranscriptParseDetailError) Is(target error) bool {
 	return target == ErrTranscriptParse
 }

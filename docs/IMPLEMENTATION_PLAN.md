@@ -56,6 +56,7 @@
 14. `[x]` Add regression fixtures/tests for new branches (n-decipher, manifest parse, playability matrix)
 15. `[x]` Update README/API docs/examples for all changed behavior
 16. `[x]` Playlist continuation robustness v2 with typed diagnostics and loop guards
+17. `[x]` Strengthen README messaging and complete public function comment audit
 
 ### 1.4 Known Risk Flags
 
@@ -397,3 +398,4 @@ After work:
 - `2026-02-16`: Full plan rewrite from coarse “mostly done” checklist to gap-driven, ordered, testable execution plan.
 - `2026-02-16`: Completed Task 13~15 (subtitle policy + transcript typed errors + regression coverage + README/API refresh).
 - `2026-02-16`: Completed Task 16 + continuation diagnostics and loop guards; added concurrent session-cache access test.
+- `2026-02-16`: Completed Task 17 (README hardening + public function comment audit and gap fixes).

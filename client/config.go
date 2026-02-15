@@ -141,6 +141,7 @@ type MetadataTransportConfig struct {
 	RetryStatusCodes []int
 }
 
+// ToInnerTubeConfig converts package-level Config into innertube.Config.
 func (c Config) ToInnerTubeConfig() innertube.Config {
 	disableFallback := c.DisableFallbackClients
 	if !disableFallback && len(c.ClientOverrides) > 0 && !c.AppendFallbackOnClientOverrides {
