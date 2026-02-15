@@ -6,8 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mjmst/ytv1/internal/innertube"
@@ -25,9 +25,9 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 type poTokenProviderStub struct {
-	token   string
-	err     error
-	called  int32
+	token    string
+	err      error
+	called   int32
 	clientID string
 }
 
@@ -160,6 +160,40 @@ func TestEngineInjectsPoTokenWhenProviderConfigured(t *testing.T) {
 	}
 }
 
+func TestEngineInjectsVisitorDataFromConfig(t *testing.T) {
+	web := innertube.WebClient
+	var sawVisitorData int32
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		if strings.Contains(payload, `"visitorData":"visitor-abc"`) {
+			atomic.StoreInt32(&sawVisitorData, 1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient:  &http.Client{Transport: tr},
+			VisitorData: "visitor-abc",
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&sawVisitorData) == 0 {
+		t.Fatalf("expected visitorData in request payload")
+	}
+}
+
 func TestEngineProceedsWithoutPoTokenWhenProviderMissing(t *testing.T) {
 	web := innertube.WebClient
 	var calls int32
@@ -219,6 +253,59 @@ func TestEngineProceedsWithoutPoTokenWhenProviderFails(t *testing.T) {
 	}
 }
 
+func TestEngineAddsFallbackClientsWhenOverridesOmitThem(t *testing.T) {
+	web := innertube.WebClient
+	var embeddedCalls int32
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		switch {
+		case strings.Contains(payload, `"clientName":"WEB"`):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm your age"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		case strings.Contains(payload, `"clientName":"WEB_EMBEDDED_PLAYER"`):
+			atomic.AddInt32(&embeddedCalls, 1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		case strings.Contains(payload, `"clientName":"TVHTML5"`):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"restricted"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"unexpected"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{HTTPClient: &http.Client{Transport: tr}},
+	)
+
+	resp, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if resp == nil || resp.PlayabilityStatus.Status != "OK" {
+		t.Fatalf("expected OK response from fallback path")
+	}
+	if atomic.LoadInt32(&embeddedCalls) == 0 {
+		t.Fatalf("expected embedded fallback client to be attempted")
+	}
+}
+
 func TestEngineMixedFailureMatrixIncludesHTTPAndPlayability(t *testing.T) {
 	web := innertube.WebClient
 	mweb := innertube.MWebClient
@@ -246,9 +333,18 @@ func TestEngineMixedFailureMatrixIncludesHTTPAndPlayability(t *testing.T) {
 				Body:       io.NopCloser(bytes.NewBufferString(`gateway error`)),
 				Header:     make(http.Header),
 			}, nil
+		case strings.Contains(payload, `"clientName":"TVHTML5"`):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"tv restricted"}}`)),
+				Header:     make(http.Header),
+			}, nil
 		default:
-			t.Fatalf("unexpected request payload: %s", payload)
-			return nil, nil
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"unexpected"}}`)),
+				Header:     make(http.Header),
+			}, nil
 		}
 	})
 
@@ -302,10 +398,60 @@ func TestPoTokenPolicyByProtocol(t *testing.T) {
 	}
 
 	mweb := innertube.MWebClient
-	if requiresPoToken(mweb, innertube.StreamingProtocolHTTPS) {
-		t.Fatalf("mweb https should not require po token without policy entry")
+	if !requiresPoToken(mweb, innertube.StreamingProtocolHTTPS) {
+		t.Fatalf("mweb https should require po token")
 	}
-	if recommendsPoToken(mweb, innertube.StreamingProtocolHTTPS) {
-		t.Fatalf("mweb https should not recommend po token without policy entry")
+	if !recommendsPoToken(mweb, innertube.StreamingProtocolHTTPS) {
+		t.Fatalf("mweb https should recommend po token")
+	}
+}
+
+func TestEngineResolvesAPIKeyFromWatchPageWhenEnabled(t *testing.T) {
+	web := innertube.WebClient
+	web.APIKey = "stale_fallback_key"
+
+	var sawDynamicKey int32
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/watch":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewBufferString(
+					`<script>ytcfg.set({"INNERTUBE_API_KEY":"dynamic_watch_key_789"});</script>`,
+				)),
+				Header: make(http.Header),
+			}, nil
+		case r.Method == http.MethodPost && r.URL.Path == "/youtubei/v1/player":
+			if r.URL.Query().Get("key") == "dynamic_watch_key_789" {
+				atomic.StoreInt32(&sawDynamicKey, 1)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(bytes.NewBufferString(`not found`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient:                    &http.Client{Transport: tr},
+			EnableDynamicAPIKeyResolution: true,
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&sawDynamicKey) == 0 {
+		t.Fatalf("expected player request to use dynamically resolved API key")
 	}
 }

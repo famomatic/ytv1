@@ -10,10 +10,96 @@
 
 ### Immediate Next Tasks (Execution Order)
 
-1. `[x]` Relax PO token requirement handling to non-blocking mode (attempt request without token if provider is missing/fails).
-2. `[x]` Add `android_vr` and `web_safari` Innertube profiles and registry aliases.
-3. `[x]` Align default selector order to yt-dlp-style priority (`android_vr -> web -> web_safari -> ...`) and update tests.
-4. `[x]` Run `go test ./...` and smoke-check `cmd/ytv1` behavior for `jNQXAC9IVRw`.
+1. `[x]` Rebuild format parser normalization (`internal/formats/parser.go`) from Innertube field matrix:
+   - Parse fps/quality/protocol/container/codec/audio-channel metadata deterministically.
+   - Preserve decipher-required fields explicitly (`Ciphered`, raw cipher params) instead of "assume URL".
+   - Add fixture tests for mixed `formats/adaptiveFormats`, missing fields, live/offline variants.
+2. `[x]` Replace "best first" download selection with explicit selection policy:
+   - Add package mode enum: `Best`, `MP4AV`, `MP4VideoOnly`, `AudioOnly`, `MP3`.
+   - Build deterministic selector (container, hasAudio/hasVideo, bitrate/resolution tie-breakers).
+   - Keep `itag` override as highest priority.
+3. `[-]` Implement MP3 pipeline as optional transcode layer:
+   - Add `Transcoder` interface in package config (default nil).
+   - If mode=`MP3` and no transcoder configured, return typed error.
+   - Stream download -> transcode to output writer/path (no temp shell command hard dependency in core).
+4. `[ ]` Refactor PO token handling to yt-dlp-like per-protocol/per-format decision:
+   - Evaluate POT requirement at stream-protocol stage (HTTPS/DASH/HLS), not only request stage.
+   - Add provider fetch policy hooks: required/recommended/never.
+   - Emit structured skip reasons when formats are dropped due to missing POT.
+5. `[ ]` Expand package error contract from coarse sentinels to typed detail errors:
+   - Add attempt matrix payload (client, stage, status, reason, http code, pot requirement).
+   - Keep sentinel compatibility via `errors.Is`, expose rich detail via `errors.As`.
+6. `[ ]` Add resilient download transport features (package-level):
+   - Range-based chunk download with bounded concurrency and context cancellation.
+   - Retry/backoff for transient HTTP/network failures.
+   - Optional resume support when output exists.
+7. `[ ]` Add package APIs for playlist/transcript/subtitle extraction:
+   - `GetPlaylist`, `GetTranscript`, subtitle track listing/fetch.
+   - Reuse Innertube context/policy stack (no CLI-only logic).
+8. `[ ]` Expand client config surface to match package use-cases:
+   - Per-request headers, retry policy, timeout strategy, client skip/priority policy, POT strategy, selector knobs.
+   - No hidden hardcoded defaults without override path.
+9. `[ ]` Strengthen playerjs robustness and regression strategy:
+   - Add real `base.js` fixture rotation workflow and parser fallback patterns.
+   - Add CI tests for signature/n-function extraction across multiple captured player revisions.
+10. `[ ]` Harden input normalization:
+   - Support broader YouTube URL families and query combinations.
+   - Keep strict invalid-input typed errors with exact reason.
+11. `[ ]` Keep explicit override investigation open:
+   - Reproduce `-clients android_vr,web,web_safari` -> `login required`.
+   - Capture per-client attempt diagnostics and decide fallback insertion policy for override mode.
+
+### Implementation Logic (Gap Closure)
+
+1. Format Parser Logic
+   - Move all field extraction to a single normalization table keyed by raw Innertube keys.
+   - Derive `HasAudio/HasVideo` from codec/channel/dimension signals instead of one-field heuristics.
+   - Normalize protocol source:
+     - direct URL => `https`
+     - dash manifest entry => `dash`
+     - hls manifest entry => `hls`
+   - Keep unresolved/ciphered entries in output with explicit flags; never silently drop.
+
+2. Selection Logic
+   - Introduce ranking pipeline:
+     - filter by mode constraints
+     - hard filters: cipher solvable, protocol allowed, container allowed
+     - score by quality/bitrate/fps/audio presence depending on mode
+   - Return `ErrNoPlayableFormats` with mode-specific reason if filtered to zero.
+
+3. Download/Transcode Logic
+   - Core downloader returns stream reader abstraction + metadata.
+   - Output writer layer handles file/path concerns.
+   - MP3 mode delegates to configured transcoder:
+     - input: audio stream + source mime/container
+     - output: encoded mp3 bytes to destination
+   - Keep transcoder pluggable to avoid mandatory external binary dependency.
+
+4. PO Token Logic
+   - Separate "request POT" and "stream POT" policy checks.
+   - Track POT state per client/protocol in attempt context.
+   - On missing recommended POT: keep format but mark warning.
+   - On missing required POT: skip format, continue other candidates.
+
+5. Error Mapping Logic
+   - Add internal error taxonomy:
+     - request failure, playability failure, pot-gated skip, decipher failure, transport failure
+   - Public mapping:
+     - sentinel error for compatibility
+     - attach typed detail struct for diagnostics and callers.
+
+6. Test Logic
+   - Add table tests for selector modes and tie-break rules.
+   - Add integration-like tests with recorded player responses covering:
+     - progressive-only
+     - adaptive-only
+     - cipher-required
+     - login-required fallback
+   - Add download tests for:
+     - chunk retries
+     - cancel propagation
+     - resume path
+     - mp3 missing-transcoder error.
 
 ## 1. Positioning
 

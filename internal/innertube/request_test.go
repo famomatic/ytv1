@@ -10,6 +10,26 @@ func TestNewPlayerRequestAndroidContext(t *testing.T) {
 	}
 }
 
+func TestNewPlayerRequestAndroidVRContext(t *testing.T) {
+	req := NewPlayerRequest(AndroidVRClient, "jNQXAC9IVRw")
+	c := req.Context.Client
+	if c.OsName != "Android" || c.OsVersion != "12L" {
+		t.Fatalf("unexpected android_vr os context: %+v", c)
+	}
+	if c.DeviceMake != "Oculus" || c.DeviceModel != "Quest 3" || c.AndroidSdkVersion != 32 {
+		t.Fatalf("unexpected android_vr device context: %+v", c)
+	}
+}
+
+func TestNewPlayerRequestIncludesVisitorData(t *testing.T) {
+	req := NewPlayerRequest(WebClient, "jNQXAC9IVRw", PlayerRequestOptions{
+		VisitorData: "visitor-123",
+	})
+	if req.Context.Client.VisitorData != "visitor-123" {
+		t.Fatalf("visitorData = %q, want %q", req.Context.Client.VisitorData, "visitor-123")
+	}
+}
+
 func TestNewPlayerRequestEmbeddedContext(t *testing.T) {
 	req := NewPlayerRequest(WebEmbeddedClient, "jNQXAC9IVRw")
 	if req.Context.ThirdParty == nil {

@@ -9,9 +9,9 @@ type PlayerResponse struct {
 }
 
 type PlayabilityStatus struct {
-	Status          string `json:"status"`
-	Reason          string `json:"reason"`
-	PlayableInEmbed bool   `json:"playableInEmbed"`
+	Status            string             `json:"status"`
+	Reason            string             `json:"reason"`
+	PlayableInEmbed   bool               `json:"playableInEmbed"`
 	LiveStreamability *LiveStreamability `json:"liveStreamability"`
 }
 
@@ -28,10 +28,9 @@ type LiveStreamability struct {
 }
 
 type LiveStreamabilityRenderer struct {
-	VideoId string `json:"videoId"`
+	VideoId     string `json:"videoId"`
 	PollDelayMs string `json:"pollDelayMs"`
 }
-
 
 type StreamingData struct {
 	ExpiresInSeconds string   `json:"expiresInSeconds"`
@@ -48,6 +47,7 @@ type Format struct {
 	Bitrate          int    `json:"bitrate"`
 	Width            int    `json:"width"`
 	Height           int    `json:"height"`
+	FPS              int    `json:"fps"`
 	InitRange        *Range `json:"initRange"`
 	IndexRange       *Range `json:"indexRange"`
 	LastModified     string `json:"lastModified"`
@@ -70,21 +70,21 @@ type Range struct {
 }
 
 type VideoDetails struct {
-	VideoID          string   `json:"videoId"`
-	Title            string   `json:"title"`
-	LengthSeconds    string   `json:"lengthSeconds"`
-	Keywords         []string `json:"keywords"`
-	ChannelID        string   `json:"channelId"`
-	IsOwnerViewing   bool     `json:"isOwnerViewing"`
-	ShortDescription string   `json:"shortDescription"`
-	IsCrawlable      bool     `json:"isCrawlable"`
-	Thumbnail        ThumbnailDetails `json:"thumbnail"`
-	AllowRatings     bool     `json:"allowRatings"`
-	ViewCount        string   `json:"viewCount"`
-	Author           string   `json:"author"`
-	IsPrivate        bool     `json:"isPrivate"`
-	IsUnpluggedCorpus bool    `json:"isUnpluggedCorpus"`
-	IsLiveContent    bool     `json:"isLiveContent"`
+	VideoID           string           `json:"videoId"`
+	Title             string           `json:"title"`
+	LengthSeconds     string           `json:"lengthSeconds"`
+	Keywords          []string         `json:"keywords"`
+	ChannelID         string           `json:"channelId"`
+	IsOwnerViewing    bool             `json:"isOwnerViewing"`
+	ShortDescription  string           `json:"shortDescription"`
+	IsCrawlable       bool             `json:"isCrawlable"`
+	Thumbnail         ThumbnailDetails `json:"thumbnail"`
+	AllowRatings      bool             `json:"allowRatings"`
+	ViewCount         string           `json:"viewCount"`
+	Author            string           `json:"author"`
+	IsPrivate         bool             `json:"isPrivate"`
+	IsUnpluggedCorpus bool             `json:"isUnpluggedCorpus"`
+	IsLiveContent     bool             `json:"isLiveContent"`
 }
 
 type ThumbnailDetails struct {

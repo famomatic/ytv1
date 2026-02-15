@@ -19,7 +19,8 @@ func main() {
 		videoID         = flag.String("v", "", "YouTube Video ID")
 		proxy           = flag.String("proxy", "", "Proxy URL")
 		download        = flag.Bool("download", false, "Download selected stream to file")
-		itag            = flag.Int("itag", 0, "Target itag for download (default: best available)")
+		itag            = flag.Int("itag", 0, "Target itag for download (default: mode-based)")
+		mode            = flag.String("mode", "best", "Download mode: best|mp4av|mp4videoonly|audioonly|mp3")
 		outputPath      = flag.String("o", "", "Output file path for download")
 		clients         = flag.String("clients", "", "Comma-separated Innertube client order override (e.g. android_vr,web,web_safari)")
 		visitorData     = flag.String("visitor-data", "", "VISITOR_INFO1_LIVE value override")
@@ -69,6 +70,7 @@ func main() {
 		fmt.Printf("Downloading video ID: %s...\n", *videoID)
 		result, err := c.Download(ctx, *videoID, client.DownloadOptions{
 			Itag:       *itag,
+			Mode:       client.SelectionMode(*mode),
 			OutputPath: *outputPath,
 		})
 		if err != nil {

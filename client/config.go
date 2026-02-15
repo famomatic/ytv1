@@ -41,18 +41,23 @@ type Config struct {
 	// ClientOverrides sets Innertube client trial order (e.g. "web", "ios", "android").
 	// If empty, package defaults are used.
 	ClientOverrides []string
+
+	// DisableDynamicAPIKeyResolution disables watch-page ytcfg API key extraction.
+	// Default is false (dynamic resolution enabled).
+	DisableDynamicAPIKeyResolution bool
 }
 
 func (c Config) ToInnerTubeConfig() innertube.Config {
 	return innertube.Config{
-		HTTPClient:              c.HTTPClient,
-		ProxyURL:                c.ProxyURL,
-		PoTokenProvider:         c.PoTokenProvider,
-		VisitorData:             c.VisitorData,
-		PlayerJSBaseURL:         c.PlayerJSBaseURL,
-		PlayerJSUserAgent:       c.PlayerJSUserAgent,
-		PlayerJSHeaders:         c.PlayerJSHeaders,
-		PlayerJSPreferredLocale: c.PlayerJSPreferredLocale,
-		ClientOverrides:         c.ClientOverrides,
+		HTTPClient:                    c.HTTPClient,
+		ProxyURL:                      c.ProxyURL,
+		PoTokenProvider:               c.PoTokenProvider,
+		VisitorData:                   c.VisitorData,
+		PlayerJSBaseURL:               c.PlayerJSBaseURL,
+		PlayerJSUserAgent:             c.PlayerJSUserAgent,
+		PlayerJSHeaders:               c.PlayerJSHeaders,
+		PlayerJSPreferredLocale:       c.PlayerJSPreferredLocale,
+		ClientOverrides:               c.ClientOverrides,
+		EnableDynamicAPIKeyResolution: !c.DisableDynamicAPIKeyResolution,
 	}
 }

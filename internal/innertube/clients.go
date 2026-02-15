@@ -14,15 +14,15 @@ var (
 		APIKey:          defaultInnertubeAPIKey,
 		PoTokenPolicy: map[VideoStreamingProtocol]PoTokenPolicy{
 			StreamingProtocolHTTPS: {
-				Required:                 true,
-				Recommended:              true,
-				NotRequiredForPremium:    true,
+				Required:                   true,
+				Recommended:                true,
+				NotRequiredForPremium:      true,
 				NotRequiredWithPlayerToken: false,
 			},
 			StreamingProtocolDASH: {
-				Required:                 true,
-				Recommended:              true,
-				NotRequiredForPremium:    true,
+				Required:                   true,
+				Recommended:                true,
+				NotRequiredForPremium:      true,
 				NotRequiredWithPlayerToken: false,
 			},
 			StreamingProtocolHLS: {
@@ -50,20 +50,40 @@ var (
 		Name:            "WEB",
 		Version:         "2.20260114.08.00",
 		ContextNameID:   1,
-		UserAgent:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
+		UserAgent:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)",
 		SupportsCookies: true,
 		Host:            "www.youtube.com",
 		APIKey:          defaultInnertubeAPIKey,
+		PoTokenPolicy:   WebClient.PoTokenPolicy,
 	}
 
 	// MWebClient represents the mobile web client.
 	MWebClient = ClientProfile{
-		Name:          "MWEB",
-		Version:       "2.20260115.01.00",
-		ContextNameID: 2,
-		UserAgent:     "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-		APIKey:        defaultInnertubeAPIKey,
-		Host:          "www.youtube.com",
+		Name:            "MWEB",
+		Version:         "2.20260115.01.00",
+		ContextNameID:   2,
+		UserAgent:       "Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)",
+		APIKey:          defaultInnertubeAPIKey,
+		Host:            "www.youtube.com",
+		SupportsCookies: true,
+		PoTokenPolicy: map[VideoStreamingProtocol]PoTokenPolicy{
+			StreamingProtocolHTTPS: {
+				Required:                   true,
+				Recommended:                true,
+				NotRequiredForPremium:      true,
+				NotRequiredWithPlayerToken: false,
+			},
+			StreamingProtocolDASH: {
+				Required:                   true,
+				Recommended:                true,
+				NotRequiredForPremium:      true,
+				NotRequiredWithPlayerToken: false,
+			},
+			StreamingProtocolHLS: {
+				Required:    false,
+				Recommended: true,
+			},
+		},
 	}
 
 	// AndroidClient mimics the official Android app.
@@ -129,9 +149,9 @@ var (
 	// AndroidVRClient matches yt-dlp's preferred no-auth mobile app fallback.
 	AndroidVRClient = ClientProfile{
 		Name:          "ANDROID_VR",
-		Version:       "1.60.19",
+		Version:       "1.71.26",
 		ContextNameID: 28,
-		UserAgent:     "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; en_US; Quest 3; Build/SQ3A.220605.009.A1) gzip",
+		UserAgent:     "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 		APIKey:        defaultInnertubeAPIKey,
 		Host:          "www.youtube.com",
 	}

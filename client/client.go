@@ -77,7 +77,6 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 	}
 
 	parsedFormats := formats.Parse(resp)
-	formats.SortByBest(parsedFormats)
 
 	outFormats := make([]FormatInfo, 0, len(parsedFormats))
 	for _, f := range parsedFormats {
@@ -234,8 +233,8 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 }
 
 func toFormatInfo(f formats.Format) FormatInfo {
-	hasVideo := f.Width > 0 || f.Height > 0
-	hasAudio := f.AudioChannels > 0 || f.AudioSampleRate > 0
+	hasVideo := f.HasVideo
+	hasAudio := f.HasAudio
 	return FormatInfo{
 		Itag:         f.Itag,
 		URL:          f.URL,
@@ -246,7 +245,7 @@ func toFormatInfo(f formats.Format) FormatInfo {
 		Width:        f.Width,
 		Height:       f.Height,
 		FPS:          f.FPS,
-		Ciphered:     f.URL == "",
+		Ciphered:     f.Ciphered,
 		Quality:      f.Quality,
 		QualityLabel: f.QualityLabel,
 	}

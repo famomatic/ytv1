@@ -12,13 +12,14 @@ type PoTokenProvider interface {
 
 // Config holds configuration specific to InnerTube and Orchestrator.
 type Config struct {
-	HTTPClient              *http.Client
-	ProxyURL                string
-	PoTokenProvider         PoTokenProvider
-	VisitorData             string
-	PlayerJSBaseURL         string
-	PlayerJSUserAgent       string
-	PlayerJSHeaders         http.Header
-	PlayerJSPreferredLocale string
-	ClientOverrides         []string
+	HTTPClient                    *http.Client
+	ProxyURL                      string
+	PoTokenProvider               PoTokenProvider
+	VisitorData                   string
+	PlayerJSBaseURL               string
+	PlayerJSUserAgent             string
+	PlayerJSHeaders               http.Header
+	PlayerJSPreferredLocale       string
+	ClientOverrides               []string
+	EnableDynamicAPIKeyResolution bool
 }

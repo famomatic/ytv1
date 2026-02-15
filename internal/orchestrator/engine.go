@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"sync"
 
@@ -17,15 +18,20 @@ import (
 
 // Engine is the main orchestrator for video extraction.
 type Engine struct {
-	selector policy.Selector
-	config   innertube.Config
+	selector       policy.Selector
+	config         innertube.Config
+	apiKeyResolver *innertube.APIKeyResolver
 }
 
 func NewEngine(selector policy.Selector, config innertube.Config) *Engine {
-	return &Engine{
+	engine := &Engine{
 		selector: selector,
 		config:   config,
 	}
+	if config.EnableDynamicAPIKeyResolution {
+		engine.apiKeyResolver = innertube.NewAPIKeyResolver(config.HTTPClient)
+	}
+	return engine
 }
 
 type extractionResult struct {
@@ -38,6 +44,7 @@ type extractionResult struct {
 // It implements the "Racing" extraction proposal.
 func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.PlayerResponse, error) {
 	clients := e.selector.Select(videoID)
+	clients = e.withFallbackClients(clients)
 	if len(clients) == 0 {
 		return nil, types.ErrNoClientsAvailable
 	}
@@ -83,7 +90,9 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 				return
 			}
 
-			req := innertube.NewPlayerRequest(p, videoID)
+			req := innertube.NewPlayerRequest(p, videoID, innertube.PlayerRequestOptions{
+				VisitorData: e.config.VisitorData,
+			})
 			if err := e.applyPoToken(ctx, req, p); err != nil {
 				select {
 				case results <- extractionResult{response: nil, err: err, client: p.Name}:
@@ -117,6 +126,38 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 		})
 	}
 	return nil, attempts
+}
+
+func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innertube.ClientProfile {
+	if len(clients) == 0 {
+		return clients
+	}
+	registry := e.selector.Registry()
+	if registry == nil {
+		return clients
+	}
+	out := append([]innertube.ClientProfile(nil), clients...)
+	seenFallback := map[string]struct{}{}
+	for _, c := range out {
+		if isFallbackClient(c) {
+			seenFallback[strings.ToUpper(strings.TrimSpace(c.Name))] = struct{}{}
+		}
+	}
+	appendIfMissing := func(alias string) {
+		p, ok := registry.Get(alias)
+		if !ok {
+			return
+		}
+		name := strings.ToUpper(strings.TrimSpace(p.Name))
+		if _, exists := seenFallback[name]; exists {
+			return
+		}
+		out = append(out, p)
+		seenFallback[name] = struct{}{}
+	}
+	appendIfMissing("web_embedded")
+	appendIfMissing("tv")
+	return out
 }
 
 func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) error {
@@ -195,12 +236,10 @@ func shouldRunFallbackPhase(attempts []AttemptError) bool {
 
 func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) (*innertube.PlayerResponse, error) {
 	// Construct URL
-	url := "https://" + profile.Host + "/youtubei/v1/player?key=" + profile.APIKey
-	if profile.APIKey == "" {
-		// Default API key for Web if not present (simplified)
-		// Usually profiles have keys. If not, we might need a default or extract from JS.
-		// For now, let's assume valid profiles or use a known default.
-		url = "https://" + profile.Host + "/youtubei/v1/player"
+	apiKey := e.resolveAPIKey(ctx, profile)
+	url := "https://" + profile.Host + "/youtubei/v1/player"
+	if apiKey != "" {
+		url += "?key=" + neturl.QueryEscape(apiKey)
 	}
 
 	// Marshaling request
@@ -209,7 +248,7 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 		return nil, err
 	}
 
-    // Create Request
+	// Create Request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -262,4 +301,15 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 	}
 
 	return &playerResp, nil
+}
+
+func (e *Engine) resolveAPIKey(ctx context.Context, profile innertube.ClientProfile) string {
+	if e.apiKeyResolver == nil {
+		return profile.APIKey
+	}
+	key, err := e.apiKeyResolver.Resolve(ctx, profile)
+	if err != nil {
+		return profile.APIKey
+	}
+	return key
 }

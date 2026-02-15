@@ -14,6 +14,7 @@ import (
 // DownloadOptions controls stream download behavior.
 type DownloadOptions struct {
 	Itag       int
+	Mode       SelectionMode
 	OutputPath string
 }
 
@@ -26,7 +27,7 @@ type DownloadResult struct {
 }
 
 // Download resolves the selected stream URL and writes it to a local file.
-// If options.Itag is 0, the first available format is selected.
+// If options.Itag is 0, format selection follows options.Mode (default: best).
 // If options.OutputPath is empty, "<videoID>-<itag><ext>" is used.
 func (c *Client) Download(ctx context.Context, input string, options DownloadOptions) (*DownloadResult, error) {
 	videoID, err := normalizeVideoID(input)
@@ -42,19 +43,12 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return nil, ErrNoPlayableFormats
 	}
 
-	chosen := formats[0]
-	if options.Itag != 0 {
-		found := false
-		for _, f := range formats {
-			if f.Itag == options.Itag {
-				chosen = f
-				found = true
-				break
-			}
-		}
-		if !found {
+	chosen, ok := selectDownloadFormat(formats, options)
+	if !ok {
+		if options.Itag != 0 {
 			return nil, fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, options.Itag)
 		}
+		return nil, fmt.Errorf("%w: mode=%s", ErrNoPlayableFormats, normalizeSelectionMode(options.Mode))
 	}
 
 	streamURL, err := c.ResolveStreamURL(ctx, videoID, chosen.Itag)
