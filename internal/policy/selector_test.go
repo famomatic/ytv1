@@ -6,11 +6,11 @@ import (
 	"github.com/mjmst/ytv1/internal/innertube"
 )
 
-func TestDefaultOrderIncludesMWeb(t *testing.T) {
+func TestDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
 	s := NewSelector(innertube.NewRegistry(), nil)
 	profiles := s.Select("jNQXAC9IVRw")
-	if len(profiles) < 6 {
-		t.Fatalf("expected at least 6 profiles, got %d", len(profiles))
+	if len(profiles) < 8 {
+		t.Fatalf("expected at least 8 profiles, got %d", len(profiles))
 	}
 
 	got := []string{
@@ -20,8 +20,10 @@ func TestDefaultOrderIncludesMWeb(t *testing.T) {
 		profiles[3].Name,
 		profiles[4].Name,
 		profiles[5].Name,
+		profiles[6].Name,
+		profiles[7].Name,
 	}
-	want := []string{"ANDROID", "IOS", "WEB", "MWEB", "WEB_EMBEDDED_PLAYER", "TVHTML5"}
+	want := []string{"ANDROID_VR", "WEB", "WEB", "ANDROID", "IOS", "MWEB", "WEB_EMBEDDED_PLAYER", "TVHTML5"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("order[%d] = %q, want %q", i, got[i], want[i])

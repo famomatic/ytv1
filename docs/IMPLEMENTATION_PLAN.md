@@ -10,14 +10,10 @@
 
 ### Immediate Next Tasks (Execution Order)
 
-1. `[x]` Add `orchestrator` unit tests for mixed-failure matrix (HTTP error + playability + PO token failure) and expected public error mapping.
-2. `[x]` Add `client.ResolveStreamURL` tests covering `s` only, `n` only, `s+n`, and malformed cipher query.
-3. `[x]` Add manifest fetch integration path: consume rewritten `DashManifestURL`/`HLSManifestURL` with `internal/formats/dash.go` and `internal/formats/hls.go`.
-4. `[x]` Improve PO token policy handling by protocol (`https`, `dash`, `hls`) and add protocol-specific tests.
-5. `[x]` Strengthen `playerjs` decipher test fixtures with at least one realistic base.js sample snapshot.
-6. `[x]` Add `client.GetVideo`/`GetFormats` package tests using mocked Innertube responses (OK, LOGIN_REQUIRED, UNPLAYABLE).
-7. `[x]` Document public package usage for library consumers in `README.md` (config, error handling, stream URL resolution).
-8. `[x]` Add a minimal regression checklist section to this plan for every YouTube breakage patch cycle.
+1. `[x]` Relax PO token requirement handling to non-blocking mode (attempt request without token if provider is missing/fails).
+2. `[x]` Add `android_vr` and `web_safari` Innertube profiles and registry aliases.
+3. `[x]` Align default selector order to yt-dlp-style priority (`android_vr -> web -> web_safari -> ...`) and update tests.
+4. `[x]` Run `go test ./...` and smoke-check `cmd/ytv1` behavior for `jNQXAC9IVRw`.
 
 ## 1. Positioning
 

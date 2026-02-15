@@ -44,6 +44,18 @@ var (
 		Screen:          "EMBED",
 	}
 
+	// WebSafariClient mirrors yt-dlp's "web_safari" strategy using WEB clientName
+	// with a Safari UA profile.
+	WebSafariClient = ClientProfile{
+		Name:            "WEB",
+		Version:         "2.20260114.08.00",
+		ContextNameID:   1,
+		UserAgent:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
+		SupportsCookies: true,
+		Host:            "www.youtube.com",
+		APIKey:          defaultInnertubeAPIKey,
+	}
+
 	// MWebClient represents the mobile web client.
 	MWebClient = ClientProfile{
 		Name:          "MWEB",
@@ -112,5 +124,15 @@ var (
 		APIKey:          defaultInnertubeAPIKey,
 		SupportsCookies: true,
 		Host:            "www.youtube.com",
+	}
+
+	// AndroidVRClient matches yt-dlp's preferred no-auth mobile app fallback.
+	AndroidVRClient = ClientProfile{
+		Name:          "ANDROID_VR",
+		Version:       "1.60.19",
+		ContextNameID: 28,
+		UserAgent:     "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; en_US; Quest 3; Build/SQ3A.220605.009.A1) gzip",
+		APIKey:        defaultInnertubeAPIKey,
+		Host:          "www.youtube.com",
 	}
 )

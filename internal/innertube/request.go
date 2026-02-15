@@ -114,6 +114,8 @@ func (r *PlayerRequest) SetPoToken(token string) {
 func applyClientContextDefaults(client *ClientInfo, profile ClientProfile) {
 	switch strings.ToUpper(strings.TrimSpace(profile.Name)) {
 	case "ANDROID":
+		fallthrough
+	case "ANDROID_VR":
 		client.OsName = "Android"
 		client.OsVersion = "11"
 		client.DeviceMake = "Google"

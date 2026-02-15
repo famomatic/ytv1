@@ -125,22 +125,16 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 		return nil
 	}
 	if e.config.PoTokenProvider == nil {
-		if policy.Required {
-			return &PoTokenRequiredError{Client: profile.Name, Cause: "provider not configured"}
-		}
+		// Non-blocking: proceed without token when provider is not configured.
 		return nil
 	}
 	token, err := e.config.PoTokenProvider.GetToken(ctx, profile.Name)
 	if err != nil {
-		if policy.Required {
-			return &PoTokenRequiredError{Client: profile.Name, Cause: "provider error"}
-		}
+		// Non-blocking: proceed without token when provider fails.
 		return nil
 	}
 	if token == "" {
-		if policy.Required {
-			return &PoTokenRequiredError{Client: profile.Name, Cause: "empty token"}
-		}
+		// Non-blocking: proceed without token when provider returns empty token.
 		return nil
 	}
 	req.SetPoToken(token)

@@ -160,71 +160,80 @@ func TestEngineInjectsPoTokenWhenProviderConfigured(t *testing.T) {
 	}
 }
 
-func TestEngineReturnsPoTokenRequiredErrorWhenProviderMissing(t *testing.T) {
+func TestEngineProceedsWithoutPoTokenWhenProviderMissing(t *testing.T) {
 	web := innertube.WebClient
+	var calls int32
 	engine := NewEngine(
 		selectorStub{clients: []innertube.ClientProfile{web}},
 		innertube.Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			t.Fatalf("http call should not happen when required po token is missing")
-			return nil, nil
+			atomic.AddInt32(&calls, 1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+				Header:     make(http.Header),
+			}, nil
 		})}},
 	)
 
-	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
-	if err == nil {
-		t.Fatalf("expected error")
+	resp, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
 	}
-	var allErr *AllClientsFailedError
-	if !errors.As(err, &allErr) {
-		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	if resp == nil || resp.PlayabilityStatus.Status != "OK" {
+		t.Fatalf("expected OK response")
 	}
-	if len(allErr.Attempts) != 1 {
-		t.Fatalf("expected 1 attempt, got %d", len(allErr.Attempts))
-	}
-	var poErr *PoTokenRequiredError
-	if !errors.As(allErr.Attempts[0].Err, &poErr) {
-		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("expected exactly 1 http call")
 	}
 }
 
-func TestEngineReturnsPoTokenRequiredErrorWhenProviderFails(t *testing.T) {
+func TestEngineProceedsWithoutPoTokenWhenProviderFails(t *testing.T) {
 	web := innertube.WebClient
 	provider := &poTokenProviderStub{err: errors.New("provider down")}
+	var calls int32
 
 	engine := NewEngine(
 		selectorStub{clients: []innertube.ClientProfile{web}},
 		innertube.Config{
 			HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				t.Fatalf("http call should not happen when provider fails for required token")
-				return nil, nil
+				atomic.AddInt32(&calls, 1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+					Header:     make(http.Header),
+				}, nil
 			})},
 			PoTokenProvider: provider,
 		},
 	)
 
-	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
-	if err == nil {
-		t.Fatalf("expected error")
+	resp, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
 	}
-	var allErr *AllClientsFailedError
-	if !errors.As(err, &allErr) {
-		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	if resp == nil || resp.PlayabilityStatus.Status != "OK" {
+		t.Fatalf("expected OK response")
 	}
-	var poErr *PoTokenRequiredError
-	if !errors.As(allErr.Attempts[0].Err, &poErr) {
-		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("expected exactly 1 http call")
 	}
 }
 
-func TestEngineMixedFailureMatrixIncludesHTTPPlayabilityAndPoToken(t *testing.T) {
-	web := innertube.WebClient            // required po token -> missing provider => po token failure
-	mweb := innertube.MWebClient          // playability failure from response
-	embedded := innertube.WebEmbeddedClient // fallback phase -> http failure
+func TestEngineMixedFailureMatrixIncludesHTTPAndPlayability(t *testing.T) {
+	web := innertube.WebClient
+	mweb := innertube.MWebClient
+	embedded := innertube.WebEmbeddedClient
 
 	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body, _ := io.ReadAll(r.Body)
 		payload := string(body)
 		switch {
+		case strings.Contains(payload, `"clientName":"WEB"`):
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Body:       io.NopCloser(bytes.NewBufferString(`bad request`)),
+				Header:     make(http.Header),
+			}, nil
 		case strings.Contains(payload, `"clientName":"MWEB"`):
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -261,7 +270,7 @@ func TestEngineMixedFailureMatrixIncludesHTTPPlayabilityAndPoToken(t *testing.T)
 		t.Fatalf("expected at least 3 attempts, got %d", len(allErr.Attempts))
 	}
 
-	var hasHTTP, hasPlayability, hasPoToken bool
+	var hasHTTP, hasPlayability bool
 	for _, attempt := range allErr.Attempts {
 		var httpErr *HTTPStatusError
 		if errors.As(attempt.Err, &httpErr) {
@@ -271,13 +280,9 @@ func TestEngineMixedFailureMatrixIncludesHTTPPlayabilityAndPoToken(t *testing.T)
 		if errors.As(attempt.Err, &playabilityErr) {
 			hasPlayability = true
 		}
-		var poErr *PoTokenRequiredError
-		if errors.As(attempt.Err, &poErr) {
-			hasPoToken = true
-		}
 	}
-	if !hasHTTP || !hasPlayability || !hasPoToken {
-		t.Fatalf("expected mixed failures (http=%v playability=%v poToken=%v)", hasHTTP, hasPlayability, hasPoToken)
+	if !hasHTTP || !hasPlayability {
+		t.Fatalf("expected mixed failures (http=%v playability=%v)", hasHTTP, hasPlayability)
 	}
 }
 

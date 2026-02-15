@@ -61,6 +61,7 @@ func main() {
 - `ResolveStreamURL(ctx, videoID, itag)`: cipher 포맷의 최종 재생 URL 해석
 - `FetchDASHManifest(ctx, input)`: DASH manifest 원문 fetch
 - `FetchHLSManifest(ctx, input)`: HLS manifest 원문 fetch
+- `Download(ctx, input, options)`: 선택한 스트림을 파일로 다운로드
 
 ### Error Handling
 
@@ -94,3 +95,5 @@ CLI는 패키지 검증용 얇은 어댑터입니다.
 
 - 메타데이터 조회: `ytv1.exe -v <video_id>`
 - player base.js URL 확인: `ytv1.exe -v <video_id> -playerjs`
+- 다운로드: `ytv1.exe -v <video_id> -download [-itag <itag>] [-o <output_path>]`
+- 우회 실험용: `-clients <a,b,c>`, `-visitor-data <VISITOR_INFO1_LIVE>`

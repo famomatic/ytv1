@@ -31,11 +31,13 @@ func (s *defaultSelector) Registry() innertube.Registry {
 func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 	clients := s.clientOrder
 	if len(clients) == 0 {
-		// Default strategy: try app clients first, then web variants as fallbacks.
+		// Default strategy follows yt-dlp style priority before fallback clients.
 		clients = []string{
+			"android_vr",
+			"web",
+			"web_safari",
 			"android",
 			"ios",
-			"web",
 			"mweb",
 			"web_embedded",
 			"tv",
@@ -60,7 +62,7 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 
 	// If overrides were provided but all invalid, fall back to defaults.
 	if len(profiles) == 0 && len(s.clientOrder) > 0 {
-		defaults := []string{"android", "ios", "web", "mweb", "web_embedded", "tv"}
+		defaults := []string{"android_vr", "web", "web_safari", "android", "ios", "mweb", "web_embedded", "tv"}
 		for _, name := range defaults {
 			if p, ok := s.registry.Get(name); ok {
 				profiles = append(profiles, p)
