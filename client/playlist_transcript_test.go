@@ -242,6 +242,9 @@ func TestGetPlaylist_ContinuationSkipsInvalidToken(t *testing.T) {
 	if got.Items[2].VideoID != "ccccccccccc" || got.Items[3].VideoID != "ddddddddddd" {
 		t.Fatalf("unexpected continuation items: %+v", got.Items)
 	}
+	if got.ContinuationStats.Requested < 2 || got.ContinuationStats.Succeeded < 2 {
+		t.Fatalf("unexpected continuation stats: %+v", got.ContinuationStats)
+	}
 }
 
 func TestGetPlaylist_ContinuationErrorUsesLogger(t *testing.T) {
@@ -309,6 +312,12 @@ func TestGetPlaylist_ContinuationErrorUsesLogger(t *testing.T) {
 	}
 	if len(logger.warnings) == 0 {
 		t.Fatalf("expected continuation warning to be logged")
+	}
+	if got.ContinuationStats.Failed == 0 {
+		t.Fatalf("expected failed continuation stats")
+	}
+	if len(got.ContinuationWarnings) == 0 || got.ContinuationWarnings[0].HTTPStatus != http.StatusInternalServerError {
+		t.Fatalf("unexpected continuation warnings: %+v", got.ContinuationWarnings)
 	}
 }
 
@@ -482,5 +491,54 @@ func TestGetTranscript_ParseTypedError(t *testing.T) {
 	var detail *TranscriptParseDetailError
 	if !errors.As(err, &detail) {
 		t.Fatalf("expected TranscriptParseDetailError")
+	}
+}
+
+func TestGetPlaylist_ContinuationStopsByMaxRequests(t *testing.T) {
+	html := `<html><script>var ytInitialData = {"responseContext":{"visitorData":"visitor"},"metadata":{"playlistMetadataRenderer":{"title":"My Playlist"}},"contents":[{"playlistVideoRenderer":{"videoId":"aaaaaaaaaaa","title":{"simpleText":"one"},"shortBylineText":{"runs":[{"text":"author1"}]},"lengthText":{"simpleText":"1:00"}}},{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"token-1"}}}}]};</script></html>`
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && r.URL.Path == "/playlist" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(html)),
+				}, nil
+			}
+			if r.Method == http.MethodPost && r.URL.Path == "/youtubei/v1/browse" {
+				return jsonResponse(t, map[string]any{
+					"onResponseReceivedActions": []any{
+						map[string]any{
+							"appendContinuationItemsAction": map[string]any{
+								"continuationItems": []any{
+									map[string]any{
+										"continuationItemRenderer": map[string]any{
+											"continuationEndpoint": map[string]any{
+												"continuationCommand": map[string]any{
+													"token": "token-2",
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				}), nil
+			}
+			t.Fatalf("unexpected request: %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+	c := &Client{config: Config{HTTPClient: httpClient, PlaylistContinuationMaxRequests: 1}}
+	got, err := c.GetPlaylist(context.Background(), "https://www.youtube.com/playlist?list=PL1234567890")
+	if err != nil {
+		t.Fatalf("GetPlaylist() error = %v", err)
+	}
+	if !got.ContinuationStats.StoppedByLimit {
+		t.Fatalf("expected stop by max request limit")
+	}
+	if len(got.ContinuationWarnings) == 0 || got.ContinuationWarnings[len(got.ContinuationWarnings)-1].Reason != "max_requests_reached" {
+		t.Fatalf("unexpected warnings: %+v", got.ContinuationWarnings)
 	}
 }

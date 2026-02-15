@@ -73,9 +73,28 @@ type PlaylistItem struct {
 	DurationSec     int64
 }
 
+// PlaylistContinuationWarning describes a non-fatal continuation traversal issue.
+type PlaylistContinuationWarning struct {
+	Token      string
+	Reason     string
+	HTTPStatus int
+}
+
+// PlaylistContinuationStats summarizes continuation traversal behavior.
+type PlaylistContinuationStats struct {
+	Requested        int
+	Succeeded        int
+	Failed           int
+	SkippedDuplicate int
+	SkippedEmpty     int
+	StoppedByLimit   bool
+}
+
 // PlaylistInfo is a normalized playlist payload.
 type PlaylistInfo struct {
-	ID    string
-	Title string
-	Items []PlaylistItem
+	ID                   string
+	Title                string
+	Items                []PlaylistItem
+	ContinuationWarnings []PlaylistContinuationWarning
+	ContinuationStats    PlaylistContinuationStats
 }

@@ -1,6 +1,8 @@
 package client
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,5 +57,32 @@ func TestSessionCacheMaxEntriesEvictsLRU(t *testing.T) {
 	}
 	if _, ok := c.getSession("c"); !ok {
 		t.Fatalf("expected session c to remain")
+	}
+}
+
+func TestSessionCacheConcurrentAccess_NoPanic(t *testing.T) {
+	c := &Client{
+		config: Config{
+			SessionCacheTTL:        time.Second,
+			SessionCacheMaxEntries: 64,
+		},
+		sessions: make(map[string]videoSession),
+	}
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(group int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				id := fmt.Sprintf("v-%d-%d", group, i%80)
+				c.putSession(id, videoSession{Response: &innertube.PlayerResponse{}})
+				_, _ = c.getSession(id)
+			}
+		}(g)
+	}
+	wg.Wait()
+	if len(c.sessions) == 0 {
+		t.Fatalf("expected sessions to be populated")
 	}
 }

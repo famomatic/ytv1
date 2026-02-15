@@ -98,6 +98,10 @@ type Config struct {
 
 	// SubtitlePolicy controls default subtitle track selection behavior.
 	SubtitlePolicy SubtitlePolicy
+
+	// PlaylistContinuationMaxRequests bounds continuation browse requests in GetPlaylist.
+	// Zero or negative uses package default.
+	PlaylistContinuationMaxRequests int
 }
 
 // SubtitlePolicy controls subtitle selection when language is not explicitly specified.

@@ -55,7 +55,7 @@
 13. `[x]` Expand subtitles/transcript capability (track preference, fallback policy, richer metadata)
 14. `[x]` Add regression fixtures/tests for new branches (n-decipher, manifest parse, playability matrix)
 15. `[x]` Update README/API docs/examples for all changed behavior
-16. `[-]` Playlist continuation robustness v2 with typed diagnostics and loop guards
+16. `[x]` Playlist continuation robustness v2 with typed diagnostics and loop guards
 
 ### 1.4 Known Risk Flags
 
@@ -299,7 +299,7 @@ Porting rule:
   - caller can distinguish unavailable vs parsing failure
 
 ### D3. Playlist continuation robustness v2
-- Status: `[ ]`
+- Status: `[x]`
 - Goal:
   - Keep resilient token traversal and prevent duplicates/loops with typed diagnostics.
 - Files:
@@ -321,14 +321,14 @@ Porting rule:
   - subtitles track edge cases
 
 ### E2. Integration-like behavior tests
-- Status: `[ ]`
+- Status: `[x]`
 - Add tests for:
   - fallback client behavior under override modes
   - PO token required/recommended matrix
   - session cache eviction behavior
 
 ### E3. Non-functional checks
-- Status: `[ ]`
+- Status: `[x]`
 - Ensure:
   - `go test ./...` green
   - race-risk areas covered by concurrency-sensitive tests where practical
@@ -396,3 +396,4 @@ After work:
 
 - `2026-02-16`: Full plan rewrite from coarse “mostly done” checklist to gap-driven, ordered, testable execution plan.
 - `2026-02-16`: Completed Task 13~15 (subtitle policy + transcript typed errors + regression coverage + README/API refresh).
+- `2026-02-16`: Completed Task 16 + continuation diagnostics and loop guards; added concurrent session-cache access test.

@@ -17,6 +17,8 @@ import (
 	"github.com/famomatic/ytv1/internal/innertube"
 )
 
+const defaultPlaylistContinuationMaxRequests = 100
+
 // GetSubtitleTracks returns subtitle/caption tracks exposed by the player response.
 func (c *Client) GetSubtitleTracks(ctx context.Context, input string) ([]SubtitleTrack, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
@@ -153,24 +155,43 @@ func (c *Client) GetPlaylist(ctx context.Context, input string) (*PlaylistInfo, 
 	pendingContinuations := findContinuationTokens(root)
 	visitorData := findVisitorData(root)
 	seenContinuations := make(map[string]struct{}, len(pendingContinuations))
+	maxRequests := c.config.PlaylistContinuationMaxRequests
+	if maxRequests <= 0 {
+		maxRequests = defaultPlaylistContinuationMaxRequests
+	}
 
 	for len(pendingContinuations) > 0 {
+		if info.ContinuationStats.Requested >= maxRequests {
+			info.ContinuationStats.StoppedByLimit = true
+			info.ContinuationWarnings = append(info.ContinuationWarnings, PlaylistContinuationWarning{
+				Token:  strings.TrimSpace(pendingContinuations[0]),
+				Reason: "max_requests_reached",
+			})
+			break
+		}
 		continuation := strings.TrimSpace(pendingContinuations[0])
 		pendingContinuations = pendingContinuations[1:]
 		if continuation == "" {
+			info.ContinuationStats.SkippedEmpty++
 			continue
 		}
 		if _, seen := seenContinuations[continuation]; seen {
+			info.ContinuationStats.SkippedDuplicate++
 			continue
 		}
 		seenContinuations[continuation] = struct{}{}
+		info.ContinuationStats.Requested++
 
 		browseResp, err := c.browse(ctx, continuation, visitorData)
 		if err != nil {
 			// Fail gracefully on continuation error and continue remaining candidates.
+			info.ContinuationStats.Failed++
+			warn := continuationWarningFromError(continuation, err)
+			info.ContinuationWarnings = append(info.ContinuationWarnings, warn)
 			c.warnf("failed to fetch continuation: %v", err)
 			continue
 		}
+		info.ContinuationStats.Succeeded++
 
 		newItems, nextTokens := parseBrowseResponse(browseResp)
 		info.Items = append(info.Items, newItems...)
@@ -218,7 +239,7 @@ func (c *Client) browse(ctx context.Context, continuation string, visitorData st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("browse failed: status=%d", resp.StatusCode)
+		return nil, &browseRequestError{StatusCode: resp.StatusCode}
 	}
 
 	var browseResp innertube.BrowseResponse
@@ -226,6 +247,27 @@ func (c *Client) browse(ctx context.Context, continuation string, visitorData st
 		return nil, err
 	}
 	return &browseResp, nil
+}
+
+type browseRequestError struct {
+	StatusCode int
+}
+
+func (e *browseRequestError) Error() string {
+	return fmt.Sprintf("browse failed: status=%d", e.StatusCode)
+}
+
+func continuationWarningFromError(token string, err error) PlaylistContinuationWarning {
+	warn := PlaylistContinuationWarning{
+		Token:  token,
+		Reason: "request_error",
+	}
+	var browseErr *browseRequestError
+	if errors.As(err, &browseErr) {
+		warn.Reason = "http_status_error"
+		warn.HTTPStatus = browseErr.StatusCode
+	}
+	return warn
 }
 
 func findVisitorData(root any) string {
