@@ -49,3 +49,21 @@ func (e *PlayabilityError) RequiresLogin() bool {
 	return strings.Contains(s, "LOGIN") || strings.Contains(s, "SIGN IN")
 }
 
+func (e *PlayabilityError) IsAgeRestricted() bool {
+	s := strings.ToUpper(e.Status + " " + e.Reason)
+	return strings.Contains(s, "AGE")
+}
+
+func (e *PlayabilityError) IsGeoRestricted() bool {
+	s := strings.ToUpper(e.Status + " " + e.Reason)
+	return strings.Contains(s, "COUNTRY") ||
+		strings.Contains(s, "REGION") ||
+		strings.Contains(s, "LOCATION")
+}
+
+func (e *PlayabilityError) IsUnavailable() bool {
+	s := strings.ToUpper(e.Status + " " + e.Reason)
+	return strings.Contains(s, "UNAVAILABLE") ||
+		strings.Contains(s, "PRIVATE") ||
+		strings.Contains(s, "DELETED")
+}

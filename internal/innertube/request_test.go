@@ -1,0 +1,30 @@
+package innertube
+
+import "testing"
+
+func TestNewPlayerRequestAndroidContext(t *testing.T) {
+	req := NewPlayerRequest(AndroidClient, "jNQXAC9IVRw")
+	c := req.Context.Client
+	if c.OsName != "Android" || c.DeviceModel == "" || c.AndroidSdkVersion == 0 {
+		t.Fatalf("unexpected android context: %+v", c)
+	}
+}
+
+func TestNewPlayerRequestEmbeddedContext(t *testing.T) {
+	req := NewPlayerRequest(WebEmbeddedClient, "jNQXAC9IVRw")
+	if req.Context.ThirdParty == nil {
+		t.Fatalf("expected thirdParty embed context")
+	}
+	if req.Context.ThirdParty.EmbedUrl == "" {
+		t.Fatalf("expected embed url")
+	}
+}
+
+func TestNewPlayerRequestTVContext(t *testing.T) {
+	req := NewPlayerRequest(TVClient, "jNQXAC9IVRw")
+	c := req.Context.Client
+	if c.OsName != "Cobalt" {
+		t.Fatalf("expected Cobalt OS for TV client, got %q", c.OsName)
+	}
+}
+

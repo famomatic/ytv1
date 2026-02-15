@@ -18,8 +18,8 @@
 
 ### Feature Completeness vs yt-dlp
 
-- `[-]` yt-dlp-level client matrix and priority behavior (baseline order expanded)
-- `[ ]` yt-dlp-level fallback policy by playability state (age gate, auth required, etc.)
+- `[-]` yt-dlp-level client matrix and priority behavior (baseline order + `mweb` + API key defaults wired)
+- `[-]` yt-dlp-level fallback policy by playability state (classification + phased fallback + reason-gated phase execution + mapping tests wired)
 - `[x]` Signature (`s`) decipher implementation (initial)
 - `[x]` `n` challenge solve for stream URLs (initial)
 - `[ ]` Manifest (`dash/hls`) `n` challenge handling
@@ -34,6 +34,9 @@
 4. `[x]` Implement real `playerjs.DecipherSignature` and `DecipherN` (initial version from legacy refs).
 5. `[x]` Wire `ResolveStreamURL` to use playerjs + challenge path instead of returning `ErrChallengeNotSolved`.
 6. `[-]` Expand selector/registry toward yt-dlp baseline clients and ordering (`ClientOverrides` wiring + baseline order expansion done; yt-dlp parity pending).
+7. `[x]` Add baseline unit tests for selector ordering/overrides and error mapping stability.
+8. `[x]` Add orchestrator phase-fallback test (primary -> embedded/tv fallback).
+9. `[x]` Add Innertube request context tests (android/embed/tv).
 
 ## 1. Positioning
 

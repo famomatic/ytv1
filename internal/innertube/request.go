@@ -1,6 +1,6 @@
 package innertube
 
-
+import "strings"
 
 type PlayerRequest struct {
 	Context       Context       `json:"context"`
@@ -60,19 +60,22 @@ type ContentPlaybackContext struct {
 
 
 func NewPlayerRequest(profile ClientProfile, videoID string) *PlayerRequest {
+	clientInfo := ClientInfo{
+		ClientName:       profile.Name,
+		ClientVersion:    profile.Version,
+		UserAgent:        profile.UserAgent,
+		AcceptLanguage:   "en",
+		TimeZone:         "UTC",
+		UtcOffsetMinutes: 0,
+	}
+	applyClientContextDefaults(&clientInfo, profile)
+
 	req := &PlayerRequest{
 		VideoID: videoID,
 		RacyCheckOk: true,
 		ContentCheckOk: true,
 		Context: Context{
-			Client: ClientInfo{
-				ClientName:      profile.Name,
-				ClientVersion:   profile.Version,
-				UserAgent:       profile.UserAgent,
-				AcceptLanguage:  "en",
-				TimeZone:        "UTC", 
-				UtcOffsetMinutes: 0,
-			},
+			Client: clientInfo,
 			Request: RequestContext{
 				UseSsl: true,
 			},
@@ -94,4 +97,35 @@ func NewPlayerRequest(profile ClientProfile, videoID string) *PlayerRequest {
 	}
 
 	return req
+}
+
+func applyClientContextDefaults(client *ClientInfo, profile ClientProfile) {
+	switch strings.ToUpper(strings.TrimSpace(profile.Name)) {
+	case "ANDROID":
+		client.OsName = "Android"
+		client.OsVersion = "11"
+		client.DeviceMake = "Google"
+		client.DeviceModel = "Pixel 5"
+		client.AndroidSdkVersion = 30
+	case "IOS":
+		client.OsName = "iOS"
+		client.OsVersion = "18.3.2.22D82"
+		client.DeviceMake = "Apple"
+		client.DeviceModel = "iPhone16,2"
+	case "MWEB":
+		client.OsName = "Android"
+		client.OsVersion = "11"
+		client.DeviceMake = "Google"
+		client.DeviceModel = "Pixel 5"
+	case "TVHTML5":
+		client.OsName = "Cobalt"
+		client.OsVersion = "25"
+		client.DeviceMake = "Unknown"
+		client.DeviceModel = "TV"
+	default:
+		client.OsName = "Windows"
+		client.OsVersion = "10.0"
+		client.DeviceMake = "Microsoft"
+		client.DeviceModel = "Desktop"
+	}
 }

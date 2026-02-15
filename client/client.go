@@ -244,15 +244,28 @@ func mapError(err error) error {
 		if playabilityErr.RequiresLogin() {
 			return ErrLoginRequired
 		}
+		if playabilityErr.IsAgeRestricted() {
+			return ErrLoginRequired
+		}
 		return ErrUnavailable
 	}
 
 	var allFailedErr *orchestrator.AllClientsFailedError
 	if errors.As(err, &allFailedErr) {
+		hasUnavailable := false
 		for _, attempt := range allFailedErr.Attempts {
-			if errors.As(attempt.Err, &playabilityErr) && playabilityErr.RequiresLogin() {
+			if !errors.As(attempt.Err, &playabilityErr) {
+				continue
+			}
+			if playabilityErr.RequiresLogin() || playabilityErr.IsAgeRestricted() {
 				return ErrLoginRequired
 			}
+			if playabilityErr.IsGeoRestricted() || playabilityErr.IsUnavailable() {
+				hasUnavailable = true
+			}
+		}
+		if hasUnavailable {
+			return ErrUnavailable
 		}
 		return ErrAllClientsFailed
 	}

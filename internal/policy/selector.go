@@ -36,6 +36,7 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 			"android",
 			"ios",
 			"web",
+			"mweb",
 			"web_embedded",
 			"tv",
 		}
@@ -59,7 +60,7 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 
 	// If overrides were provided but all invalid, fall back to defaults.
 	if len(profiles) == 0 && len(s.clientOrder) > 0 {
-		defaults := []string{"android", "ios", "web", "web_embedded", "tv"}
+		defaults := []string{"android", "ios", "web", "mweb", "web_embedded", "tv"}
 		for _, name := range defaults {
 			if p, ok := s.registry.Get(name); ok {
 				profiles = append(profiles, p)

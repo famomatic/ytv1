@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/mjmst/ytv1/internal/innertube"
@@ -40,6 +42,32 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 		return nil, types.ErrNoClientsAvailable
 	}
 
+	primary, fallback := splitClientPhases(clients)
+
+	resp, attempts := e.tryPhase(ctx, videoID, primary)
+	if resp != nil {
+		return resp, nil
+	}
+
+	if len(fallback) > 0 && shouldRunFallbackPhase(attempts) {
+		fallbackResp, fallbackAttempts := e.tryPhase(ctx, videoID, fallback)
+		if fallbackResp != nil {
+			return fallbackResp, nil
+		}
+		attempts = append(attempts, fallbackAttempts...)
+	}
+
+	if len(attempts) > 0 {
+		return nil, &AllClientsFailedError{Attempts: attempts}
+	}
+	return nil, types.ErrNoClientsAvailable
+}
+
+func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertube.ClientProfile) (*innertube.PlayerResponse, []AttemptError) {
+	if len(clients) == 0 {
+		return nil, nil
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -50,19 +78,14 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 		wg.Add(1)
 		go func(p innertube.ClientProfile) {
 			defer wg.Done()
-			
-			// Check for context cancellation before starting
+
 			if ctx.Err() != nil {
 				return
 			}
 
-			// TODO: Inject PO Token if required
-			// TODO: Use specific HTTP client / Proxy from config
-
 			req := innertube.NewPlayerRequest(p, videoID)
-			
 			resp, err := e.fetch(ctx, req, p)
-			
+
 			select {
 			case results <- extractionResult{response: resp, err: err, client: p.Name}:
 			case <-ctx.Done():
@@ -70,10 +93,6 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 		}(profile)
 	}
 
-	// Wait for first success or all failures
-	// This is a simplified version. A more robust one handles "all failed" properly.
-	
-	// Closer for the results channel
 	go func() {
 		wg.Wait()
 		close(results)
@@ -82,19 +101,47 @@ func (e *Engine) GetVideoInfo(ctx context.Context, videoID string) (*innertube.P
 	var attempts []AttemptError
 	for res := range results {
 		if res.err == nil {
-			cancel() // Cancel other requests
-			return res.response, nil
+			cancel()
+			return res.response, attempts
 		}
 		attempts = append(attempts, AttemptError{
 			Client: res.client,
 			Err:    res.err,
 		})
 	}
+	return nil, attempts
+}
 
-	if len(attempts) > 0 {
-		return nil, &AllClientsFailedError{Attempts: attempts}
+func splitClientPhases(clients []innertube.ClientProfile) ([]innertube.ClientProfile, []innertube.ClientProfile) {
+	var primary []innertube.ClientProfile
+	var fallback []innertube.ClientProfile
+	for _, c := range clients {
+		if isFallbackClient(c) {
+			fallback = append(fallback, c)
+			continue
+		}
+		primary = append(primary, c)
 	}
-	return nil, types.ErrNoClientsAvailable
+	return primary, fallback
+}
+
+func isFallbackClient(c innertube.ClientProfile) bool {
+	name := strings.ToUpper(strings.TrimSpace(c.Name))
+	return name == "WEB_EMBEDDED_PLAYER" || name == "TVHTML5"
+}
+
+func shouldRunFallbackPhase(attempts []AttemptError) bool {
+	for _, attempt := range attempts {
+		var pErr *PlayabilityError
+		if !errors.As(attempt.Err, &pErr) {
+			continue
+		}
+		// Keep fallback targeted to known playability gating classes.
+		if pErr.RequiresLogin() || pErr.IsAgeRestricted() || pErr.IsGeoRestricted() || pErr.IsUnavailable() {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) (*innertube.PlayerResponse, error) {

@@ -13,6 +13,7 @@ func NewRegistry() Registry {
 		clients: map[string]ClientProfile{
 			"web":          WebClient,
 			"web_embedded": WebEmbeddedClient,
+			"mweb":         MWebClient,
 			"android":      AndroidClient,
 			"ios":          iOSClient,
 			"tv":           TVClient,
