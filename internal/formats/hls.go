@@ -62,11 +62,11 @@ func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
-			pendingStreamAttrs = parseM3U8Attrs(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
+			pendingStreamAttrs = ParseM3U8Attrs(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
 			continue
 		}
 		if strings.HasPrefix(line, "#EXT-X-MEDIA:") {
-			attrs := parseM3U8Attrs(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+			attrs := ParseM3U8Attrs(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
 			if !strings.EqualFold(attrs["TYPE"], "AUDIO") {
 				continue
 			}
@@ -127,7 +127,8 @@ func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
 	return formats, nil
 }
 
-func parseM3U8Attrs(raw string) map[string]string {
+// ParseM3U8Attrs parses M3U8 attribute lists (KEY=VALUE,...).
+func ParseM3U8Attrs(raw string) map[string]string {
 	out := map[string]string{}
 	rest := raw
 	for len(rest) > 0 {

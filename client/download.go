@@ -9,18 +9,24 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/famomatic/ytv1/internal/downloader"
+	"github.com/famomatic/ytv1/internal/selector"
+	"github.com/famomatic/ytv1/internal/types"
 )
 
 // DownloadOptions controls stream download behavior.
 type DownloadOptions struct {
-	Itag       int
-	Mode       SelectionMode
-	OutputPath string
-	Resume     bool
-	MergeOutput bool
+	Itag           int
+	Mode           SelectionMode
+	FormatSelector string // e.g. "bestvideo+bestaudio", overrides Mode
+	OutputPath     string
+	Resume         bool
+	MergeOutput    bool
 }
 
 // DownloadResult describes a completed file download.
@@ -38,158 +44,242 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
 	defer cancel()
 
-	mode := normalizeSelectionMode(options.Mode)
 	videoID, err := normalizeVideoID(input)
 	if err != nil {
 		return nil, err
 	}
 
-	formats, err := c.GetFormats(ctx, videoID)
+	// filters ...
+
+	info, err := c.GetVideo(ctx, videoID)
 	if err != nil {
 		return nil, err
 	}
-	if len(formats) == 0 {
-		return nil, ErrNoPlayableFormats
+	formats := info.Formats
+
+	meta := types.Metadata{
+		Title:       info.Title,
+		Artist:      info.Author,
+		Description: info.Description,
+		Date:        info.PublishDate,
+		Duration:    int(info.DurationSec),
 	}
+	if meta.Date == "" {
+		meta.Date = info.UploadDate
+	}
+
+	// Filter unplayable formats (e.g. requiring PO Token)
 	filteredFormats, skipReasons := filterFormatsByPoTokenPolicy(formats, c.config)
 	if len(filteredFormats) == 0 && len(skipReasons) > 0 {
 		return nil, &NoPlayableFormatsDetailError{
-			Mode:  mode,
+			Mode:  options.Mode, // Approximate
 			Skips: skipReasons,
 		}
 	}
 	if len(filteredFormats) > 0 {
 		formats = filteredFormats
 	}
-
-	// Handle Muxing if requested and available
-	if options.MergeOutput && mode == SelectionModeBest && c.config.Muxer != nil && c.config.Muxer.Available() {
-		// Select best video-only
-		videoFmt, vOk := selectDownloadFormat(formats, DownloadOptions{Mode: SelectionModeVideoOnly})
-		// Select best audio-only
-		audioFmt, aOk := selectDownloadFormat(formats, DownloadOptions{Mode: SelectionModeAudioOnly})
-
-		if vOk && aOk {
-			// Resolution check: Is separate video+audio actually better than pre-muxed?
-			// Usually yes for 1080p+.
-			// But if the best video-only is same quality as best pre-muxed, we might not need to merge?
-			// yt-dlp always merges if possible for consistency.
-			
-			// We proceed with merge.
-			return c.downloadAndMerge(ctx, videoID, videoFmt, audioFmt, options)
-		}
+	if len(formats) == 0 {
+		return nil, ErrNoPlayableFormats
 	}
 
-	chosen, ok := selectDownloadFormat(formats, options)
-	if !ok {
-		if options.Itag != 0 {
-			return nil, fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, options.Itag)
-		}
-		if len(skipReasons) > 0 {
-			return nil, &NoPlayableFormatsDetailError{
-				Mode:  mode,
-				Skips: skipReasons,
+	// 1. Determine Selector
+	selStr := options.FormatSelector
+	if selStr == "" {
+		if options.Itag > 0 {
+			// Explicit Itag: No selector needed, handled in selection
+		} else {
+			// Map Mode to selector
+			switch options.Mode {
+			case SelectionModeBest, "":
+				selStr = "bestvideo+bestaudio/best"
+			case SelectionModeMP4AV:
+				selStr = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+			case SelectionModeMP4VideoOnly:
+				selStr = "bestvideo[ext=mp4]"
+			case SelectionModeVideoOnly:
+				selStr = "bestvideo"
+			case SelectionModeAudioOnly, SelectionModeMP3:
+				selStr = "bestaudio"
+			default:
+				selStr = "best"
 			}
 		}
-		return nil, fmt.Errorf("%w: mode=%s", ErrNoPlayableFormats, mode)
 	}
 
-	if mode == SelectionModeMP3 && c.config.MP3Transcoder == nil {
-		return nil, &MP3TranscoderError{Mode: mode}
+	// 2. Select Formats
+	var selected []types.FormatInfo
+	if options.Itag > 0 {
+		for _, f := range formats {
+			if f.Itag == options.Itag {
+				selected = []types.FormatInfo{f}
+				break
+			}
+		}
+		if len(selected) == 0 {
+			return nil, fmt.Errorf("requested itag %d not found", options.Itag)
+		}
+	} else {
+		sel, err := selector.Parse(selStr)
+		if err != nil {
+			return nil, fmt.Errorf("selector parse failed: %w", err)
+		}
+		selected, err = selector.Select(formats, sel)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	streamURL, err := c.ResolveStreamURL(ctx, videoID, chosen.Itag)
+	if len(selected) == 0 {
+		return nil, errors.New("no formats found matching criteria")
+	}
+
+	// 3. Fallback for Merge if Muxer missing
+	if len(selected) > 1 && (c.config.Muxer == nil || !c.config.Muxer.Available()) {
+		c.logger.Warnf("Muxer unavailable, falling back to best single file")
+		sel, _ := selector.Parse("best")
+		selected, _ = selector.Select(formats, sel)
+		if len(selected) == 0 {
+			return nil, errors.New("no formats found (and muxer unavailable)")
+		}
+	}
+
+	// 4. Download
+	if len(selected) == 1 {
+		return c.downloadSingle(ctx, videoID, selected[0], options.OutputPath, options)
+	}
+
+	return c.downloadAndMerge(ctx, videoID, selected, options, meta)
+}
+
+func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.FormatInfo, outputPath string, options DownloadOptions) (*DownloadResult, error) {
+	if outputPath == "" {
+		outputPath = defaultOutputPath(videoID, f.Itag, f.MimeType, options.Mode)
+	}
+	if dir := filepath.Dir(outputPath); dir != "." && dir != "" {
+		_ = os.MkdirAll(dir, 0755)
+	}
+
+	// MP3 Transcode Check
+	if options.Mode == SelectionModeMP3 && c.config.MP3Transcoder == nil {
+		return nil, &MP3TranscoderError{Mode: options.Mode}
+	}
+
+	streamURL, err := c.ResolveStreamURL(ctx, videoID, f.Itag)
 	if err != nil {
 		return nil, err
 	}
 
-	outputPath := options.OutputPath
-	if outputPath == "" {
-		outputPath = defaultOutputPath(videoID, chosen.Itag, chosen.MimeType, mode)
-	}
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
-		return nil, err
-	}
-
-	var written int64
-	if mode == SelectionModeMP3 {
+	// If MP3, we might need to download to temp then transcode, or stream transcode.
+	// Previous logic: transcodeURLToMP3 handles download.
+	if options.Mode == SelectionModeMP3 {
 		out, err := os.Create(outputPath)
 		if err != nil {
 			return nil, err
 		}
 		defer out.Close()
-		written, err = transcodeURLToMP3(ctx, c.config.HTTPClient, c.config.MP3Transcoder, streamURL, MP3TranscodeMetadata{
-			VideoID:        videoID,
-			SourceItag:     chosen.Itag,
-			SourceMimeType: chosen.MimeType,
+
+		bytes, err := transcodeURLToMP3(ctx, c.config.HTTPClient, c.config.MP3Transcoder, streamURL, MP3TranscodeMetadata{
+			VideoID: videoID, SourceItag: f.Itag, SourceMimeType: f.MimeType,
 		}, out)
-	} else {
-		written, err = downloadURLToPath(ctx, c.config.HTTPClient, streamURL, outputPath, options.Resume, c.config.DownloadTransport)
+		if err != nil {
+			return nil, err
+		}
+
+		return &DownloadResult{VideoID: videoID, Itag: f.Itag, OutputPath: outputPath, Bytes: bytes}, nil
 	}
-	if err != nil {
+
+	if err := c.downloadStream(ctx, videoID, streamURL, outputPath, f); err != nil {
 		return nil, err
 	}
 
 	return &DownloadResult{
 		VideoID:    videoID,
-		Itag:       chosen.Itag,
+		Itag:       f.Itag,
 		OutputPath: outputPath,
-		Bytes:      written,
+		Bytes:      getFileSize(outputPath),
 	}, nil
 }
 
-func (c *Client) downloadAndMerge(ctx context.Context, videoID string, videoFmt, audioFmt FormatInfo, options DownloadOptions) (*DownloadResult, error) {
-	// Determine output path logic
-	outputPath := options.OutputPath
-	if outputPath == "" {
-		// Default to mp4 if merging, or match video container?
-		// Usually mp4 is safe.
-		outputPath = fmt.Sprintf("%s-%d+%d.mp4", videoID, videoFmt.Itag, audioFmt.Itag)
+func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats []types.FormatInfo, options DownloadOptions, meta types.Metadata) (*DownloadResult, error) {
+	// Identify Video and Audio
+	var vidF, audF types.FormatInfo
+	foundV, foundA := false, false
+
+	for _, f := range formats {
+		if f.HasVideo && !foundV {
+			vidF = f
+			foundV = true
+		} else if f.HasAudio && !foundA {
+			audF = f
+			foundA = true
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil && filepath.Dir(outputPath) != "." {
+
+	if !foundV || !foundA {
+		// Should not happen if selector logic works for +
+		return c.downloadSingle(ctx, videoID, formats[0], options.OutputPath, options)
+	}
+
+	basePath := options.OutputPath
+	if basePath == "" {
+		basePath = fmt.Sprintf("%s-%d+%d.mp4", videoID, vidF.Itag, audF.Itag)
+	}
+	if filepath.Ext(basePath) == "" {
+		basePath += ".mp4"
+	}
+
+	if dir := filepath.Dir(basePath); dir != "." && dir != "" {
+		_ = os.MkdirAll(dir, 0755)
+	}
+
+	videoPath := basePath + ".f" + strconv.Itoa(vidF.Itag) + ".video"
+	audioPath := basePath + ".f" + strconv.Itoa(audF.Itag) + ".audio"
+
+	// Video
+	vURL, err := c.ResolveStreamURL(ctx, videoID, vidF.Itag)
+	if err != nil {
 		return nil, err
 	}
+	if err := c.downloadStream(ctx, videoID, vURL, videoPath, vidF); err != nil {
+		return nil, err
+	}
+	defer os.Remove(videoPath)
 
-	// Temp paths
-	videoPath := fmt.Sprintf("%s.video.tmp", outputPath)
-	audioPath := fmt.Sprintf("%s.audio.tmp", outputPath)
-	defer func() {
-		// Cleanup in case of error (success cleanup handled by muxer)
-		_ = os.Remove(videoPath)
-		_ = os.Remove(audioPath)
-	}()
-
-	// Download Video
-	vURL, err := c.ResolveStreamURL(ctx, videoID, videoFmt.Itag)
+	// Audio
+	aURL, err := c.ResolveStreamURL(ctx, videoID, audF.Itag)
 	if err != nil {
-		return nil, fmt.Errorf("resolve video failed: %w", err)
+		return nil, err
 	}
-	vBytes, err := downloadURLToPath(ctx, c.config.HTTPClient, vURL, videoPath, options.Resume, c.config.DownloadTransport)
-	if err != nil {
-		return nil, fmt.Errorf("download video failed: %w", err)
+	if err := c.downloadStream(ctx, videoID, aURL, audioPath, audF); err != nil {
+		return nil, err
 	}
-
-	// Download Audio
-	aURL, err := c.ResolveStreamURL(ctx, videoID, audioFmt.Itag)
-	if err != nil {
-		return nil, fmt.Errorf("resolve audio failed: %w", err)
-	}
-	_, err = downloadURLToPath(ctx, c.config.HTTPClient, aURL, audioPath, options.Resume, c.config.DownloadTransport)
-	if err != nil {
-		return nil, fmt.Errorf("download audio failed: %w", err)
-	}
+	defer os.Remove(audioPath)
 
 	// Merge
-	if err := c.config.Muxer.Merge(ctx, videoPath, audioPath, outputPath); err != nil {
+	if err := c.config.Muxer.Merge(ctx, videoPath, audioPath, basePath, meta); err != nil {
 		return nil, err
 	}
 
 	return &DownloadResult{
 		VideoID:    videoID,
-		Itag:       videoFmt.Itag, // Primary itag
-		OutputPath: outputPath,
-		Bytes:      vBytes, // Approximate (only video bytes?), logic decision.
+		Itag:       vidF.Itag,
+		OutputPath: basePath,
+		Bytes:      getFileSize(basePath),
 	}, nil
+}
+
+func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputPath string, f types.FormatInfo) error {
+	if f.Protocol == "hls" || strings.HasSuffix(streamURL, ".m3u8") {
+		_, err := c.downloadHLS(ctx, videoID, streamURL, outputPath, f)
+		return err
+	}
+	if f.Protocol == "dash" || strings.HasSuffix(streamURL, ".mpd") {
+		_, err := c.downloadDASH(ctx, videoID, streamURL, outputPath, f)
+		return err
+	}
+	_, err := downloadURLToPath(ctx, c.config.HTTPClient, streamURL, outputPath, false, c.config.DownloadTransport)
+	return err
 }
 
 func transcodeURLToMP3(
@@ -708,4 +798,71 @@ func defaultOutputPath(videoID string, itag int, mimeType string, mode Selection
 		}
 	}
 	return fmt.Sprintf("%s-%d%s", videoID, itag, ext)
+}
+
+func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
+	dl := downloader.NewHLSDownloader(c.config.HTTPClient, streamURL)
+
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if err := dl.Download(ctx, f); err != nil {
+		return nil, err
+	}
+
+	f.Sync()
+
+	info, err := os.Stat(outputPath)
+	size := int64(0)
+	if err == nil {
+		size = info.Size()
+	}
+
+	return &DownloadResult{
+		VideoID:    videoID,
+		Itag:       format.Itag,
+		OutputPath: outputPath,
+		Bytes:      size,
+	}, nil
+}
+
+func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
+	repID := fmt.Sprintf("%d", format.Itag)
+	dl := downloader.NewDASHDownloader(c.config.HTTPClient, streamURL, repID)
+
+	f, err := os.Create(outputPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	if err := dl.Download(ctx, f); err != nil {
+		return nil, err
+	}
+
+	f.Sync()
+
+	info, err := os.Stat(outputPath)
+	size := int64(0)
+	if err == nil {
+		size = info.Size()
+	}
+
+	return &DownloadResult{
+		VideoID:    videoID,
+		Itag:       format.Itag,
+		OutputPath: outputPath,
+		Bytes:      size,
+	}, nil
+}
+
+func getFileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }

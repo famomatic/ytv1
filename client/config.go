@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/famomatic/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/types"
 )
 
 // Config holds configuration for the YouTube client.
@@ -17,6 +18,10 @@ type Config struct {
 	// ProxyURL is the optional proxy URL to use for requests.
 	// If HTTPClient is provided, this field is ignored.
 	ProxyURL string
+
+	// CookieJar is an optional cookie jar to use for requests.
+	// Applied to HTTPClient if non-nil.
+	CookieJar http.CookieJar
 
 	// PoTokenProvider is the provider for PO Tokens.
 	// If nil, PO Tokens will not be injected, which may cause throttling or errors.
@@ -114,7 +119,7 @@ type SubtitlePolicy struct {
 // Muxer defines the interface for media muxing operations.
 type Muxer interface {
 	Available() bool
-	Merge(ctx context.Context, videoPath, audioPath, outputPath string) error
+	Merge(ctx context.Context, videoPath, audioPath, outputPath string, meta types.Metadata) error
 }
 
 // DownloadTransportConfig controls retry/backoff behavior for direct stream downloads.

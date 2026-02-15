@@ -46,6 +46,9 @@ func NewClient(config Config) *Client {
 	if config.HTTPClient == nil {
 		config.HTTPClient = defaultHTTPClient(config.ProxyURL)
 	}
+	if config.CookieJar != nil {
+		config.HTTPClient.Jar = config.CookieJar
+	}
 
 	registry := innertube.NewRegistry()
 	innerCfg := config.ToInnerTubeConfig()

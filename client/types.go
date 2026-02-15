@@ -1,5 +1,7 @@
 package client
 
+import "github.com/famomatic/ytv1/internal/types"
+
 // VideoInfo is the package-level metadata result.
 type VideoInfo struct {
 	ID              string
@@ -20,21 +22,7 @@ type VideoInfo struct {
 }
 
 // FormatInfo is the normalized public format model.
-type FormatInfo struct {
-	Itag         int
-	URL          string
-	MimeType     string
-	Protocol     string
-	HasAudio     bool
-	HasVideo     bool
-	Bitrate      int
-	Width        int
-	Height       int
-	FPS          int
-	Ciphered     bool
-	Quality      string
-	QualityLabel string
-}
+type FormatInfo = types.FormatInfo
 
 // SubtitleTrack describes one subtitle/caption track.
 type SubtitleTrack struct {
