@@ -9,6 +9,7 @@ var (
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 		SupportsCookies: true,
 		Host:            "www.youtube.com",
+		APIKey:          "AIzaSyAMfDpyiHtLq81UCmkNk0q5zY0ongtTTDn",
 		PoTokenPolicy: map[VideoStreamingProtocol]PoTokenPolicy{
 			StreamingProtocolHTTPS: {
 				Required:                 true,

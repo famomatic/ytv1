@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 
@@ -118,6 +119,8 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", profile.UserAgent)
+	httpReq.Header.Set("Origin", "https://"+profile.Host)
+	httpReq.Header.Set("Referer", "https://"+profile.Host+"/watch?v="+req.VideoID)
 	// Add other headers from profile
 	for k, v := range profile.Headers {
 		for _, val := range v {
@@ -136,15 +139,22 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 		return nil, fmt.Errorf("innertube error: %d", resp.StatusCode)
 	}
 
+	// Read body for potential debugging
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
 	// Parse Response
 	var playerResp innertube.PlayerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&playerResp); err != nil {
+	if err := json.Unmarshal(respBody, &playerResp); err != nil {
 		return nil, err
 	}
 
 	// Playability Check
 	if !playerResp.PlayabilityStatus.IsOK() && !playerResp.PlayabilityStatus.IsLive() {
-		return nil, fmt.Errorf("unplayable: %s", playerResp.PlayabilityStatus.Status)
+		// Log detailed error reason if available
+		return nil, fmt.Errorf("unplayable: %s. Reason: %s", playerResp.PlayabilityStatus.Status, playerResp.PlayabilityStatus.Reason)
 	}
 
 	return &playerResp, nil

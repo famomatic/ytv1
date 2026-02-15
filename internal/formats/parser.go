@@ -60,9 +60,11 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 			}
 
 			// Parse integers
-			if fps, _ := strconv.Atoi(f.QualityLabel[:len(f.QualityLabel)-1]); fps > 0 {
-				// Rough fps extraction, needs better regex usually but this is a placeholder
-				// Actually QualityLabel is like "1080p60", so we can extracting "60"
+			if len(f.QualityLabel) > 1 {
+				if fps, _ := strconv.Atoi(f.QualityLabel[:len(f.QualityLabel)-1]); fps > 0 {
+                    // Rough fps extraction, needs better regex usually but this is a placeholder
+                    // Actually QualityLabel is like "1080p60", so we can extracting "60"
+				}
 			}
 			
 			if f.AudioSampleRate != "" {
