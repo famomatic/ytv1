@@ -50,7 +50,7 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 		return nil, FormatInfo{}, fmt.Errorf("%w: itag=%d mode=%s", ErrNoPlayableFormats, options.Itag, normalizeSelectionMode(options.Mode))
 	}
 
-	streamURL, err := c.ResolveStreamURL(ctx, videoID, chosen.Itag)
+	streamURL, err := c.resolveSelectedFormatURL(ctx, videoID, chosen)
 	if err != nil {
 		return nil, FormatInfo{}, err
 	}
@@ -58,6 +58,7 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	if err != nil {
 		return nil, FormatInfo{}, err
 	}
+	applyMediaRequestHeaders(req, c.config.RequestHeaders, videoID)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, FormatInfo{}, err

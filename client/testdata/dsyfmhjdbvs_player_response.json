@@ -1,0 +1,28 @@
+{
+  "playabilityStatus": {
+    "status": "OK"
+  },
+  "videoDetails": {
+    "videoId": "DSYFmhjDbvs",
+    "title": "Nameless (Instrumental)",
+    "author": "Sample Artist"
+  },
+  "streamingData": {
+    "adaptiveFormats": [
+      {
+        "itag": 248,
+        "url": "__BASE_URL__/videoplayback?itag=248&n=abcd",
+        "mimeType": "video/webm; codecs=\"vp9\"",
+        "bitrate": 700000
+      },
+      {
+        "itag": 251,
+        "signatureCipher": "url=__BASE_URL_ESCAPED__%2Fvideoplayback%3Fitag%3D251%26n%3Dabcd&s=xyz&sp=sig",
+        "mimeType": "audio/webm; codecs=\"opus\"",
+        "bitrate": 128000
+      }
+    ],
+    "dashManifestUrl": "__BASE_URL__/manifest.mpd?n=abcd",
+    "hlsManifestUrl": "__BASE_URL__/manifest.m3u8?n=abcd"
+  }
+}

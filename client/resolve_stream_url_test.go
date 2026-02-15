@@ -14,11 +14,25 @@ type playerResolverStub struct {
 	js string
 }
 
+type countingPlayerResolverStub struct {
+	js    string
+	calls int
+}
+
 func (s playerResolverStub) GetPlayerJS(context.Context, string) (string, error) {
 	return s.js, nil
 }
 
 func (s playerResolverStub) GetPlayerURL(context.Context, string) (string, error) {
+	return "/s/player/test/base.js", nil
+}
+
+func (s *countingPlayerResolverStub) GetPlayerJS(context.Context, string) (string, error) {
+	s.calls++
+	return s.js, nil
+}
+
+func (s *countingPlayerResolverStub) GetPlayerURL(context.Context, string) (string, error) {
 	return "/s/player/test/base.js", nil
 }
 
@@ -171,5 +185,108 @@ func TestResolveStreamURL_MalformedCipher(t *testing.T) {
 	}
 }
 
+func TestResolveSelectedFormatURL_PrefersSelectedFormatURL(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	c := testClientWithSession(videoID, innertube.Format{
+		Itag: 248,
+		URL:  "https://blocked.example/video",
+	}, testPlayerJS())
+
+	selected := FormatInfo{
+		Itag: 248,
+		URL:  "https://manifest.example/video",
+	}
+
+	out, err := c.resolveSelectedFormatURL(context.Background(), videoID, selected)
+	if err != nil {
+		t.Fatalf("resolveSelectedFormatURL() error = %v", err)
+	}
+	if out != "https://manifest.example/video" {
+		t.Fatalf("resolveSelectedFormatURL()=%q, want %q", out, "https://manifest.example/video")
+	}
+}
+
+func TestPrimeChallengeSolutions_BatchesAndCaches(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	resolver := &countingPlayerResolverStub{js: testPlayerJS()}
+	resp := &innertube.PlayerResponse{
+		VideoDetails: innertube.VideoDetails{VideoID: videoID},
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{
+				{
+					Itag:            251,
+					SignatureCipher: buildCipher("https://example.com/audio?n=abcd", map[string]string{"s": "xyz", "sp": "sig"}),
+				},
+			},
+		},
+	}
+	c := &Client{
+		config:           Config{HTTPClient: http.DefaultClient},
+		playerJSResolver: resolver,
+		sessions:         map[string]videoSession{},
+		challenges:       map[string]challengeSolutions{},
+	}
+
+	c.primeChallengeSolutions(context.Background(), "/s/player/test/base.js", resp, "", "")
+	if resolver.calls != 1 {
+		t.Fatalf("player js calls=%d, want 1", resolver.calls)
+	}
+
+	if _, err := c.decodeSignatureWithCache(context.Background(), "/s/player/test/base.js", "xyz"); err != nil {
+		t.Fatalf("decodeSignatureWithCache() error = %v", err)
+	}
+	if _, err := c.decodeNWithCache(context.Background(), "/s/player/test/base.js", "abcd"); err != nil {
+		t.Fatalf("decodeNWithCache() error = %v", err)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("expected cached decode calls to avoid extra js fetch, got calls=%d", resolver.calls)
+	}
+}
+
+func TestPrimeChallengeSolutions_EmitsPartialOnMixedSolve(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	// n-function exists, signature decipher ops intentionally absent.
+	js := `
+xx.get("n"))&&(b=abc[0](x)+1||nx)
+;nx=function(a){return a.slice(1)}
+`
+	resolver := &countingPlayerResolverStub{js: js}
+	resp := &innertube.PlayerResponse{
+		VideoDetails: innertube.VideoDetails{VideoID: videoID},
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{
+				{
+					Itag:            251,
+					SignatureCipher: buildCipher("https://example.com/audio?n=abcd", map[string]string{"s": "xyz", "sp": "sig"}),
+				},
+			},
+		},
+	}
+	var phases []string
+	c := &Client{
+		config: Config{
+			HTTPClient: http.DefaultClient,
+			OnExtractionEvent: func(evt ExtractionEvent) {
+				if evt.Stage == "challenge" {
+					phases = append(phases, evt.Phase)
+				}
+			},
+		},
+		playerJSResolver: resolver,
+		sessions:         map[string]videoSession{},
+		challenges:       map[string]challengeSolutions{},
+	}
+
+	c.primeChallengeSolutions(context.Background(), "/s/player/test/base.js", resp, "", "")
+	if len(phases) == 0 {
+		t.Fatalf("expected challenge events")
+	}
+	last := phases[len(phases)-1]
+	if last != "partial" {
+		t.Fatalf("last challenge phase=%q, want partial", last)
+	}
+}
+
 var _ playerjs.Resolver = playerResolverStub{}
+var _ playerjs.Resolver = (*countingPlayerResolverStub)(nil)
 

@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/famomatic/ytv1/internal/types"
 )
 
 func TestDownloadURLToWriter_OK(t *testing.T) {
@@ -243,5 +245,187 @@ func TestDownloadURLToPath_ChunkedCancel(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation error, got %v", err)
+	}
+}
+
+func TestDownloadURLToPathWithHeaders_AppliesMediaHeaders(t *testing.T) {
+	var gotUA, gotReferer, gotOrigin string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotReferer = r.Header.Get("Referer")
+		gotOrigin = r.Header.Get("Origin")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+
+	out := filepath.Join(t.TempDir(), "headers.bin")
+	_, err := downloadURLToPathWithHeaders(
+		context.Background(),
+		srv.Client(),
+		srv.URL,
+		out,
+		false,
+		DownloadTransportConfig{},
+		"abc123",
+		http.Header{"User-Agent": []string{"custom-agent/1.0"}},
+	)
+	if err != nil {
+		t.Fatalf("downloadURLToPathWithHeaders() error = %v", err)
+	}
+	if gotUA != "custom-agent/1.0" {
+		t.Fatalf("User-Agent=%q, want %q", gotUA, "custom-agent/1.0")
+	}
+	if gotReferer != "https://www.youtube.com/watch?v=abc123" {
+		t.Fatalf("Referer=%q", gotReferer)
+	}
+	if gotOrigin != "https://www.youtube.com" {
+		t.Fatalf("Origin=%q", gotOrigin)
+	}
+}
+
+type testMuxer struct{}
+
+func (testMuxer) Available() bool { return true }
+
+func (testMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPath string, meta types.Metadata) error {
+	v, err := os.ReadFile(videoPath)
+	if err != nil {
+		return err
+	}
+	a, err := os.ReadFile(audioPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outputPath, append(v, a...), 0o644)
+}
+
+func TestDownloadAndMerge_DefaultCleansIntermediateFiles(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	var events []DownloadEvent
+	mediaBase := "https://media.example"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{"adaptiveFormats":[
+						{"itag":248,"url":"` + mediaBase + `/v.webm","mimeType":"video/webm","bitrate":1000},
+						{"itag":251,"url":"` + mediaBase + `/a.webm","mimeType":"audio/webm","bitrate":1000}
+					]}
+				}`
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/base.js"></script></html>`)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.String() == mediaBase+"/v.webm":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("video")), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.String() == mediaBase+"/a.webm":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("audio")), Header: make(http.Header)}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header)}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+		Muxer:           testMuxer{},
+		OnDownloadEvent: func(evt DownloadEvent) { events = append(events, evt) },
+	})
+	out := filepath.Join(t.TempDir(), "merged.webm")
+	res, err := c.Download(context.Background(), videoID, DownloadOptions{
+		Mode:       SelectionModeBest,
+		OutputPath: out,
+	})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if res.OutputPath != out {
+		t.Fatalf("output path=%q want=%q", res.OutputPath, out)
+	}
+	videoPath := out + ".f248.video"
+	audioPath := out + ".f251.audio"
+	if _, err := os.Stat(videoPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected video intermediate deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(audioPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected audio intermediate deleted, stat err=%v", err)
+	}
+	var hasMergeComplete, hasCleanupDelete bool
+	for _, evt := range events {
+		if evt.Stage == "merge" && evt.Phase == "complete" {
+			hasMergeComplete = true
+		}
+		if evt.Stage == "cleanup" && evt.Phase == "delete" {
+			hasCleanupDelete = true
+		}
+	}
+	if !hasMergeComplete || !hasCleanupDelete {
+		t.Fatalf("expected merge complete and cleanup delete events, got=%v", events)
+	}
+}
+
+func TestDownloadAndMerge_KeepIntermediateFiles(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	var events []DownloadEvent
+	mediaBase := "https://media.example"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{"adaptiveFormats":[
+						{"itag":248,"url":"` + mediaBase + `/v.webm","mimeType":"video/webm","bitrate":1000},
+						{"itag":251,"url":"` + mediaBase + `/a.webm","mimeType":"audio/webm","bitrate":1000}
+					]}
+				}`
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/base.js"></script></html>`)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.String() == mediaBase+"/v.webm":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("video")), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.String() == mediaBase+"/a.webm":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("audio")), Header: make(http.Header)}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header)}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+		Muxer:           testMuxer{},
+		OnDownloadEvent: func(evt DownloadEvent) { events = append(events, evt) },
+	})
+	out := filepath.Join(t.TempDir(), "merged.webm")
+	_, err := c.Download(context.Background(), videoID, DownloadOptions{
+		Mode:                  SelectionModeBest,
+		OutputPath:            out,
+		KeepIntermediateFiles: true,
+	})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	videoPath := out + ".f248.video"
+	audioPath := out + ".f251.audio"
+	if _, err := os.Stat(videoPath); err != nil {
+		t.Fatalf("expected video intermediate kept, stat err=%v", err)
+	}
+	if _, err := os.Stat(audioPath); err != nil {
+		t.Fatalf("expected audio intermediate kept, stat err=%v", err)
+	}
+	var hasCleanupSkip bool
+	for _, evt := range events {
+		if evt.Stage == "cleanup" && evt.Phase == "skip" {
+			hasCleanupSkip = true
+		}
+	}
+	if !hasCleanupSkip {
+		t.Fatalf("expected cleanup skip event, got=%v", events)
 	}
 }

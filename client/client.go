@@ -27,6 +27,8 @@ type Client struct {
 	logger           Logger
 	sessionsMu       sync.RWMutex
 	sessions         map[string]videoSession
+	challengesMu     sync.RWMutex
+	challenges       map[string]challengeSolutions
 }
 
 type videoSession struct {
@@ -80,6 +82,7 @@ func NewClient(config Config) *Client {
 		playerJSResolver: jsResolver,
 		logger:           logger,
 		sessions:         make(map[string]videoSession),
+		challenges:       make(map[string]challengeSolutions),
 	}
 }
 
@@ -123,7 +126,14 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		HLSManifestURL:  resp.StreamingData.HlsManifestURL,
 	}
 
-	playerURL, _ := c.playerJSResolver.GetPlayerURL(ctx, videoID)
+	c.emitExtractionEvent("webpage", "start", "web", videoID)
+	playerURL, playerErr := c.playerJSResolver.GetPlayerURL(ctx, videoID)
+	if playerErr != nil {
+		c.emitExtractionEvent("webpage", "failure", "web", playerErr.Error())
+	} else {
+		c.emitExtractionEvent("webpage", "success", "web", playerURL)
+	}
+	c.primeChallengeSolutions(ctx, playerURL, resp, info.DashManifestURL, info.HLSManifestURL)
 	info.DashManifestURL = c.resolveManifestURL(ctx, info.DashManifestURL, playerURL)
 	info.HLSManifestURL = c.resolveManifestURL(ctx, info.HLSManifestURL, playerURL)
 
@@ -249,14 +259,8 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 		return "", ErrChallengeNotSolved
 	}
 
-	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, session.PlayerURL)
-	if err != nil {
-		return "", ErrChallengeNotSolved
-	}
-	decipherer := playerjs.NewDecipherer(jsBody)
-
 	if s := params.Get("s"); s != "" {
-		decSig, err := decipherer.DecipherSignature(s)
+		decSig, err := c.decodeSignatureWithCache(ctx, session.PlayerURL, s)
 		if err != nil {
 			return "", ErrChallengeNotSolved
 		}
@@ -271,7 +275,7 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 
 	q := u.Query()
 	if n := q.Get("n"); n != "" {
-		decN, err := decipherer.DecipherN(n)
+		decN, err := c.decodeNWithCache(ctx, session.PlayerURL, n)
 		if err != nil {
 			return "", ErrChallengeNotSolved
 		}
@@ -280,6 +284,29 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 	}
 
 	return u.String(), nil
+}
+
+func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f FormatInfo) (string, error) {
+	videoID, err := normalizeVideoID(videoID)
+	if err != nil {
+		return "", err
+	}
+
+	if strings.TrimSpace(f.URL) != "" {
+		session, ok := c.getSession(videoID)
+		if !ok {
+			if _, err := c.GetVideo(ctx, videoID); err != nil {
+				return "", err
+			}
+			session, ok = c.getSession(videoID)
+			if !ok {
+				return "", ErrChallengeNotSolved
+			}
+		}
+		return c.resolveDirectURL(ctx, f.URL, session.PlayerURL)
+	}
+
+	return c.ResolveStreamURL(ctx, videoID, f.Itag)
 }
 
 func toFormatInfo(f formats.Format) FormatInfo {
@@ -549,12 +576,9 @@ func (c *Client) resolveManifestURL(ctx context.Context, manifestURL, playerURL 
 	if manifestURL == "" || playerURL == "" || !hasQueryParam(manifestURL, "n") {
 		return manifestURL
 	}
-	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, playerURL)
-	if err != nil {
-		return manifestURL
-	}
-	decipherer := playerjs.NewDecipherer(jsBody)
-	rewritten, err := rewriteURLParam(manifestURL, "n", decipherer.DecipherN)
+	rewritten, err := rewriteURLParam(manifestURL, "n", func(value string) (string, error) {
+		return c.decodeNWithCache(ctx, playerURL, value)
+	})
 	if err != nil {
 		return manifestURL
 	}
@@ -591,17 +615,25 @@ func rewriteURLParam(rawURL, key string, decoder func(string) (string, error)) (
 func (c *Client) loadManifestFormats(ctx context.Context, dashURL, hlsURL string) []FormatInfo {
 	out := make([]FormatInfo, 0, 16)
 	if dashURL != "" {
+		c.emitExtractionEvent("manifest", "start", "dash", dashURL)
 		if dash, err := formats.FetchDASHManifest(ctx, c.httpClient(), dashURL); err == nil {
+			c.emitExtractionEvent("manifest", "success", "dash", dashURL)
 			for _, f := range dash.Formats {
 				out = append(out, toFormatInfo(f))
 			}
+		} else {
+			c.emitExtractionEvent("manifest", "failure", "dash", err.Error())
 		}
 	}
 	if hlsURL != "" {
+		c.emitExtractionEvent("manifest", "start", "hls", hlsURL)
 		if hls, err := formats.FetchHLSManifest(ctx, c.httpClient(), hlsURL); err == nil {
+			c.emitExtractionEvent("manifest", "success", "hls", hlsURL)
 			for _, f := range hls.Formats {
 				out = append(out, toFormatInfo(f))
 			}
+		} else {
+			c.emitExtractionEvent("manifest", "failure", "hls", err.Error())
 		}
 	}
 	return out
@@ -646,12 +678,9 @@ func (c *Client) resolveDirectURL(ctx context.Context, rawURL string, playerURL 
 		return "", ErrChallengeNotSolved
 	}
 
-	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, playerURL)
-	if err != nil {
-		return "", ErrChallengeNotSolved
-	}
-	decipherer := playerjs.NewDecipherer(jsBody)
-	rewritten, err := rewriteURLParam(rawURL, "n", decipherer.DecipherN)
+	rewritten, err := rewriteURLParam(rawURL, "n", func(value string) (string, error) {
+		return c.decodeNWithCache(ctx, playerURL, value)
+	})
 	if err != nil {
 		return "", ErrChallengeNotSolved
 	}
@@ -680,4 +709,16 @@ func parseInt64String(raw string) int64 {
 		return 0
 	}
 	return v
+}
+
+func (c *Client) emitExtractionEvent(stage, phase, source, detail string) {
+	if c == nil || c.config.OnExtractionEvent == nil {
+		return
+	}
+	c.config.OnExtractionEvent(ExtractionEvent{
+		Stage:  stage,
+		Phase:  phase,
+		Client: source,
+		Detail: detail,
+	})
 }

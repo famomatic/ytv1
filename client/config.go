@@ -93,6 +93,18 @@ type Config struct {
 	// If nil, warnings are suppressed.
 	Logger Logger
 
+	// OnExtractionEvent receives extraction lifecycle events (optional).
+	// If nil, extraction events are suppressed.
+	OnExtractionEvent func(ExtractionEvent)
+
+	// OnDownloadEvent receives download lifecycle events (optional).
+	// If nil, download events are suppressed.
+	OnDownloadEvent func(DownloadEvent)
+
+	// KeepIntermediateFiles keeps intermediate video/audio files after merge download.
+	// Default is false (remove intermediates on successful/failed merge attempt).
+	KeepIntermediateFiles bool
+
 	// SessionCacheTTL expires in-memory video sessions after this duration.
 	// Zero disables TTL-based expiration.
 	SessionCacheTTL time.Duration
@@ -148,6 +160,18 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 		disableFallback = true
 	}
 
+	var extractionHandler innertube.ExtractionEventHandler
+	if c.OnExtractionEvent != nil {
+		extractionHandler = func(evt innertube.ExtractionEvent) {
+			c.OnExtractionEvent(ExtractionEvent{
+				Stage:  evt.Stage,
+				Phase:  evt.Phase,
+				Client: evt.Client,
+				Detail: evt.Detail,
+			})
+		}
+	}
+
 	return innertube.Config{
 		HTTPClient:                    c.HTTPClient,
 		ProxyURL:                      c.ProxyURL,
@@ -165,5 +189,6 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 		DisableFallbackClients:        disableFallback,
 		MetadataTransport:             innertube.MetadataTransportConfig(c.MetadataTransport),
 		EnableDynamicAPIKeyResolution: !c.DisableDynamicAPIKeyResolution,
+		OnExtractionEvent:             extractionHandler,
 	}
 }

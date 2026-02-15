@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -655,5 +657,70 @@ func TestEngineDisableFallbackClients(t *testing.T) {
 	// With auto-append disabled and selector returning WEB only, fallback clients must not be added.
 	if len(allErr.Attempts) != 1 {
 		t.Fatalf("expected 1 attempt, got %d", len(allErr.Attempts))
+	}
+}
+
+func TestEngineEmitsPlayerAPIEventsInDeterministicStartOrder(t *testing.T) {
+	web := innertube.WebClient
+	mweb := innertube.MWebClient
+
+	var mu sync.Mutex
+	var got []innertube.ExtractionEvent
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		if strings.Contains(payload, `"clientName":"MWEB"`) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"UNPLAYABLE","reason":"blocked"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web, mweb}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: tr},
+			OnExtractionEvent: func(evt innertube.ExtractionEvent) {
+				mu.Lock()
+				defer mu.Unlock()
+				got = append(got, evt)
+			},
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var starts []string
+	var hasSuccess bool
+	for _, evt := range got {
+		if evt.Stage != "player_api_json" {
+			continue
+		}
+		if evt.Phase == "start" {
+			starts = append(starts, evt.Client)
+		}
+		if evt.Phase == "success" {
+			hasSuccess = true
+		}
+	}
+	wantStarts := []string{"WEB", "MWEB"}
+	if !reflect.DeepEqual(starts, wantStarts) {
+		t.Fatalf("start events = %v, want %v", starts, wantStarts)
+	}
+	if !hasSuccess {
+		t.Fatalf("expected at least one success event")
 	}
 }

@@ -30,6 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize config: %v", err)
 	}
+	attachLifecycleHandlers(&cfg, opts)
 	c := client.New(cfg)
 	ctx := context.Background()
 
@@ -44,6 +45,18 @@ func main() {
 				printAttemptDiagnostics(err)
 			}
 		}
+	}
+}
+
+func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
+	if !opts.Verbose {
+		return
+	}
+	cfg.OnExtractionEvent = func(evt client.ExtractionEvent) {
+		fmt.Println(formatExtractionEvent(evt))
+	}
+	cfg.OnDownloadEvent = func(evt client.DownloadEvent) {
+		fmt.Println(formatDownloadEvent(evt))
 	}
 }
 
@@ -191,4 +204,29 @@ func printAttemptDiagnostics(err error) {
 		}
 		fmt.Println()
 	}
+}
+
+func formatExtractionEvent(evt client.ExtractionEvent) string {
+	scope := evt.Stage + ":" + evt.Phase
+	if evt.Client != "" {
+		scope += " client=" + evt.Client
+	}
+	if evt.Detail != "" {
+		scope += " detail=" + evt.Detail
+	}
+	return "[extract] " + scope
+}
+
+func formatDownloadEvent(evt client.DownloadEvent) string {
+	scope := evt.Stage + ":" + evt.Phase
+	if evt.VideoID != "" {
+		scope += " video_id=" + evt.VideoID
+	}
+	if evt.Path != "" {
+		scope += " path=" + evt.Path
+	}
+	if evt.Detail != "" {
+		scope += " detail=" + evt.Detail
+	}
+	return "[download] " + scope
 }

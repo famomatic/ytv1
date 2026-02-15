@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,7 @@ type extractionResult struct {
 	response *innertube.PlayerResponse
 	err      error
 	client   string
+	order    int
 }
 
 // GetVideoInfo fetches video info using the configured policy and clients.
@@ -87,9 +89,10 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	results := make(chan extractionResult, len(clients))
 	var wg sync.WaitGroup
 
-	for _, profile := range clients {
+	for idx, profile := range clients {
+		e.emitExtractionEvent("player_api_json", "start", profile.Name, "")
 		wg.Add(1)
-		go func(p innertube.ClientProfile) {
+		go func(order int, p innertube.ClientProfile) {
 			defer wg.Done()
 
 			if ctx.Err() != nil {
@@ -101,7 +104,7 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			})
 			if err := e.applyPoToken(ctx, req, p); err != nil {
 				select {
-				case results <- extractionResult{response: nil, err: err, client: p.Name}:
+				case results <- extractionResult{response: nil, err: err, client: p.Name, order: order}:
 				case <-ctx.Done():
 				}
 				return
@@ -109,10 +112,10 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			resp, err := e.fetch(ctx, req, p)
 
 			select {
-			case results <- extractionResult{response: resp, err: err, client: p.Name}:
+			case results <- extractionResult{response: resp, err: err, client: p.Name, order: order}:
 			case <-ctx.Done():
 			}
-		}(profile)
+		}(idx, profile)
 	}
 
 	go func() {
@@ -120,16 +123,35 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 		close(results)
 	}()
 
-	var attempts []AttemptError
+	type indexedAttempt struct {
+		order   int
+		attempt AttemptError
+	}
+	var indexed []indexedAttempt
 	for res := range results {
 		if res.err == nil {
+			e.emitExtractionEvent("player_api_json", "success", res.client, "")
 			cancel()
+			sort.Slice(indexed, func(i, j int) bool { return indexed[i].order < indexed[j].order })
+			attempts := make([]AttemptError, 0, len(indexed))
+			for _, item := range indexed {
+				attempts = append(attempts, item.attempt)
+			}
 			return res.response, attempts
 		}
-		attempts = append(attempts, AttemptError{
-			Client: res.client,
-			Err:    res.err,
+		e.emitExtractionEvent("player_api_json", "failure", res.client, res.err.Error())
+		indexed = append(indexed, indexedAttempt{
+			order: res.order,
+			attempt: AttemptError{
+				Client: res.client,
+				Err:    res.err,
+			},
 		})
+	}
+	sort.Slice(indexed, func(i, j int) bool { return indexed[i].order < indexed[j].order })
+	attempts := make([]AttemptError, 0, len(indexed))
+	for _, item := range indexed {
+		attempts = append(attempts, item.attempt)
 	}
 	return nil, attempts
 }
@@ -576,4 +598,16 @@ func withRequestTimeout(ctx context.Context, timeout time.Duration) (context.Con
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, timeout)
+}
+
+func (e *Engine) emitExtractionEvent(stage, phase, client, detail string) {
+	if e == nil || e.config.OnExtractionEvent == nil {
+		return
+	}
+	e.config.OnExtractionEvent(innertube.ExtractionEvent{
+		Stage:  stage,
+		Phase:  phase,
+		Client: client,
+		Detail: detail,
+	})
 }

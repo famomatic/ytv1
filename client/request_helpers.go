@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -21,6 +23,24 @@ func applyRequestHeaders(req *http.Request, headers http.Header) {
 		for _, v := range vals {
 			req.Header.Add(k, v)
 		}
+	}
+}
+
+func applyMediaRequestHeaders(req *http.Request, headers http.Header, videoID string) {
+	applyRequestHeaders(req, headers)
+
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", innertube.WebClient.UserAgent)
+	}
+	if req.Header.Get("Origin") == "" {
+		req.Header.Set("Origin", "https://www.youtube.com")
+	}
+	if req.Header.Get("Referer") == "" {
+		if videoID != "" {
+			req.Header.Set("Referer", "https://www.youtube.com/watch?v="+videoID)
+			return
+		}
+		req.Header.Set("Referer", "https://www.youtube.com/")
 	}
 }
 
