@@ -9,8 +9,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 type selectorStub struct {
@@ -218,6 +219,41 @@ func TestEngineProceedsWithoutPoTokenWhenProviderMissing(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 1 {
 		t.Fatalf("expected exactly 1 http call")
+	}
+}
+
+func TestEngineFailsWithoutPoTokenWhenPolicyOverrideRequired(t *testing.T) {
+	web := innertube.WebClient
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"}}`)),
+					Header:     make(http.Header),
+				}, nil
+			})},
+			PoTokenFetchPolicy: map[innertube.VideoStreamingProtocol]innertube.PoTokenFetchPolicy{
+				innertube.StreamingProtocolHTTPS: innertube.PoTokenFetchPolicyRequired,
+			},
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err == nil {
+		t.Fatalf("expected error for required POT without provider")
+	}
+	var allErr *AllClientsFailedError
+	if !errors.As(err, &allErr) {
+		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	}
+	if len(allErr.Attempts) == 0 {
+		t.Fatalf("expected at least one attempt error")
+	}
+	var poErr *PoTokenRequiredError
+	if !errors.As(allErr.Attempts[0].Err, &poErr) {
+		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
 	}
 }
 
@@ -453,5 +489,101 @@ func TestEngineResolvesAPIKeyFromWatchPageWhenEnabled(t *testing.T) {
 	}
 	if atomic.LoadInt32(&sawDynamicKey) == 0 {
 		t.Fatalf("expected player request to use dynamically resolved API key")
+	}
+}
+
+func TestEngineAppliesRequestHeaders(t *testing.T) {
+	web := innertube.WebClient
+	var sawHeader int32
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-Test-Header") == "ytv1" {
+			atomic.StoreInt32(&sawHeader, 1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: tr},
+			RequestHeaders: http.Header{
+				"X-Test-Header": []string{"ytv1"},
+			},
+		},
+	)
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&sawHeader) == 0 {
+		t.Fatalf("expected custom request header to be sent")
+	}
+}
+
+func TestEngineMetadataRetryOnTransientStatus(t *testing.T) {
+	web := innertube.WebClient
+	var calls int32
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(bytes.NewBufferString(`bad gateway`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: tr},
+			MetadataTransport: innertube.MetadataTransportConfig{
+				MaxRetries:     1,
+				InitialBackoff: time.Millisecond,
+				MaxBackoff:     time.Millisecond,
+			},
+		},
+	)
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("expected 2 calls with retry, got %d", atomic.LoadInt32(&calls))
+	}
+}
+
+func TestEngineDisableFallbackClients(t *testing.T) {
+	web := innertube.WebClient
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in"}}`)), Header: make(http.Header)}, nil
+			})},
+			DisableFallbackClients: true,
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var allErr *AllClientsFailedError
+	if !errors.As(err, &allErr) {
+		t.Fatalf("expected all-clients-failed error")
+	}
+	// With auto-append disabled and selector returning WEB only, fallback clients must not be added.
+	if len(allErr.Attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(allErr.Attempts))
 	}
 }

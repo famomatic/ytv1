@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 func TestFetchDASHManifest_UsesRewrittenNURL(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/dop251/goja"
 )
@@ -46,7 +47,7 @@ func (d *Decipherer) DecipherN(n string) (string, error) {
 type DecipherOperation func([]byte) []byte
 
 const (
-	jsVarStr = "[a-zA-Z_\\$][a-zA-Z_0-9]*"
+	jsVarStr   = "[a-zA-Z_\\$][a-zA-Z_0-9]*"
 	reverseStr = ":function\\(a\\)\\{" +
 		"(?:return )?a\\.reverse\\(\\)" +
 		"\\}"
@@ -69,30 +70,39 @@ var (
 		// Some variants use optional chaining / looser spacing.
 		regexp.MustCompile(`\.get\("n"\).*?&&.*?([a-zA-Z0-9$]{1,})\([a-zA-Z0-9$]{1,}\)`),
 	}
-	actionsObjRegexp    = regexp.MustCompile(fmt.Sprintf(
+	actionsObjRegexp = regexp.MustCompile(fmt.Sprintf(
 		"(?:var|let|const)\\s+(%s)=\\{((?:(?:%s%s|%s%s|%s%s),?\\n?)+)\\}\\s*;?",
 		jsVarStr, jsVarStr, swapStr, jsVarStr, spliceStr, jsVarStr, reverseStr))
-	actionsFuncRegexp = regexp.MustCompile(fmt.Sprintf(
-		"function(?: %s)?\\(a\\)\\{"+
-			"a=a\\.split\\([^\\)]*\\);\\s*"+
-			"((?:(?:a=)?%s\\.%s\\(a,\\d+\\);)+)"+
-			"return a\\.join\\([^\\)]*\\)"+
-			"\\}", jsVarStr, jsVarStr, jsVarStr))
-	reverseRegexp = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, reverseStr))
-	spliceRegexp  = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, spliceStr))
-	swapRegexp    = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, swapStr))
+	reverseRegexp      = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, reverseStr))
+	spliceRegexp       = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, spliceStr))
+	swapRegexp         = regexp.MustCompile(fmt.Sprintf("(?m)(?:^|,)(%s)%s", jsVarStr, swapStr))
+	actionsFuncRegexps = []*regexp.Regexp{
+		// function XX(a){...}
+		regexp.MustCompile(fmt.Sprintf(
+			"function(?:\\s+%s)?\\(a\\)\\{"+
+				"a=a\\.split\\([^\\)]*\\);\\s*"+
+				"((?:(?:a=)?%s(?:\\.%s|\\[[^\\]]+\\])\\(a,\\d+\\);?\\s*)+)"+
+				"return a\\.join\\([^\\)]*\\)"+
+				"\\}", jsVarStr, jsVarStr, jsVarStr)),
+		// XX=function(a){...}
+		regexp.MustCompile(fmt.Sprintf(
+			"%s\\s*=\\s*function\\(a\\)\\{"+
+				"a=a\\.split\\([^\\)]*\\);\\s*"+
+				"((?:(?:a=)?%s(?:\\.%s|\\[[^\\]]+\\])\\(a,\\d+\\);?\\s*)+)"+
+				"return a\\.join\\([^\\)]*\\)"+
+				"\\}", jsVarStr, jsVarStr, jsVarStr)),
+	}
 )
 
 func (d *Decipherer) parseDecipherOps() ([]DecipherOperation, error) {
 	objResult := actionsObjRegexp.FindSubmatch(d.jsBody)
-	funcResult := actionsFuncRegexp.FindSubmatch(d.jsBody)
-	if len(objResult) < 3 || len(funcResult) < 2 {
-		return nil, fmt.Errorf("error parsing signature tokens (#obj=%d, #func=%d)", len(objResult), len(funcResult))
+	funcBody := d.findActionsFuncBody()
+	if len(objResult) < 3 || len(funcBody) == 0 {
+		return nil, fmt.Errorf("error parsing signature tokens (#obj=%d, #func=%d)", len(objResult), len(funcBody))
 	}
 
 	obj := objResult[1]
 	objBody := objResult[2]
-	funcBody := funcResult[1]
 
 	var reverseKey, spliceKey, swapKey string
 	if result := reverseRegexp.FindSubmatch(objBody); len(result) > 1 {
@@ -106,8 +116,14 @@ func (d *Decipherer) parseDecipherOps() ([]DecipherOperation, error) {
 	}
 
 	regex, err := regexp.Compile(fmt.Sprintf(
-		"(?:a=)?%s\\.(%s|%s|%s)\\(a,(\\d+)\\)",
+		"(?:a=)?%s(?:\\.(%s|%s|%s)|\\[(?:\"(%s|%s|%s)\"|'(%s|%s|%s)')\\])\\(a,(\\d+)\\)",
 		regexp.QuoteMeta(string(obj)),
+		regexp.QuoteMeta(reverseKey),
+		regexp.QuoteMeta(spliceKey),
+		regexp.QuoteMeta(swapKey),
+		regexp.QuoteMeta(reverseKey),
+		regexp.QuoteMeta(spliceKey),
+		regexp.QuoteMeta(swapKey),
 		regexp.QuoteMeta(reverseKey),
 		regexp.QuoteMeta(spliceKey),
 		regexp.QuoteMeta(swapKey),
@@ -118,18 +134,33 @@ func (d *Decipherer) parseDecipherOps() ([]DecipherOperation, error) {
 
 	var ops []DecipherOperation
 	for _, s := range regex.FindAllSubmatch(funcBody, -1) {
-		switch string(s[1]) {
+		if len(s) < 5 {
+			continue
+		}
+		key := firstNonEmptySubmatch(s[1], s[2], s[3])
+		arg, _ := strconv.Atoi(string(s[4]))
+		switch key {
 		case reverseKey:
 			ops = append(ops, reverseFunc)
 		case swapKey:
-			arg, _ := strconv.Atoi(string(s[2]))
 			ops = append(ops, newSwapFunc(arg))
 		case spliceKey:
-			arg, _ := strconv.Atoi(string(s[2]))
 			ops = append(ops, newSpliceFunc(arg))
 		}
 	}
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("error parsing signature operations (empty op list)")
+	}
 	return ops, nil
+}
+
+func (d *Decipherer) findActionsFuncBody() []byte {
+	for _, re := range actionsFuncRegexps {
+		if m := re.FindSubmatch(d.jsBody); len(m) > 1 {
+			return m[1]
+		}
+	}
+	return nil
 }
 
 func (d *Decipherer) getNFunction() (string, error) {
@@ -161,14 +192,21 @@ func (d *Decipherer) getNFunction() (string, error) {
 }
 
 func (d *Decipherer) extractFunction(name string) (string, error) {
-	def := []byte(name + "=function(")
-	start := bytes.Index(d.jsBody, def)
-	if start < 1 {
-		def = []byte("function " + name + "(")
+	name = strings.TrimSpace(name)
+	defPatterns := [][]byte{
+		[]byte(name + "=function("),
+		[]byte(name + " = function("),
+		[]byte("function " + name + "("),
+	}
+	start := -1
+	for _, def := range defPatterns {
 		start = bytes.Index(d.jsBody, def)
-		if start < 1 {
-			return "", fmt.Errorf("unable to extract n-function body")
+		if start >= 0 {
+			break
 		}
+	}
+	if start < 0 {
+		return "", fmt.Errorf("unable to extract n-function body")
 	}
 
 	pos := start + bytes.IndexByte(d.jsBody[start:], '{') + 1
@@ -199,6 +237,15 @@ func (d *Decipherer) extractFunction(name string) (string, error) {
 		}
 	}
 	return string(d.jsBody[start:pos]), nil
+}
+
+func firstNonEmptySubmatch(groups ...[]byte) string {
+	for _, g := range groups {
+		if len(g) > 0 {
+			return string(g)
+		}
+	}
+	return ""
 }
 
 func evalJavascript(jsFunction, arg string) (string, error) {

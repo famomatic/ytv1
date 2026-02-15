@@ -3,11 +3,11 @@ package policy
 import (
 	"testing"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 func TestDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
-	s := NewSelector(innertube.NewRegistry(), nil)
+	s := NewSelector(innertube.NewRegistry(), nil, nil)
 	profiles := s.Select("jNQXAC9IVRw")
 	if len(profiles) < 8 {
 		t.Fatalf("expected at least 8 profiles, got %d", len(profiles))
@@ -32,7 +32,7 @@ func TestDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
 }
 
 func TestOverridesAreNormalizedAndDeduplicated(t *testing.T) {
-	s := NewSelector(innertube.NewRegistry(), []string{"  WEB ", "web", "mWeb", "unknown"})
+	s := NewSelector(innertube.NewRegistry(), []string{"  WEB ", "web", "mWeb", "unknown"}, nil)
 	profiles := s.Select("jNQXAC9IVRw")
 	if len(profiles) != 2 {
 		t.Fatalf("expected 2 profiles, got %d", len(profiles))
@@ -46,7 +46,7 @@ func TestOverridesAreNormalizedAndDeduplicated(t *testing.T) {
 }
 
 func TestOverrideAliasesAreAccepted(t *testing.T) {
-	s := NewSelector(innertube.NewRegistry(), []string{"WEB_EMBEDDED_PLAYER", "TVHTML5"})
+	s := NewSelector(innertube.NewRegistry(), []string{"WEB_EMBEDDED_PLAYER", "TVHTML5"}, nil)
 	profiles := s.Select("jNQXAC9IVRw")
 	if len(profiles) != 2 {
 		t.Fatalf("expected 2 profiles, got %d", len(profiles))
@@ -56,5 +56,16 @@ func TestOverrideAliasesAreAccepted(t *testing.T) {
 	}
 	if profiles[1].Name != "TVHTML5" {
 		t.Fatalf("second profile = %q, want TVHTML5", profiles[1].Name)
+	}
+}
+
+func TestSkipClientsAreExcluded(t *testing.T) {
+	s := NewSelector(innertube.NewRegistry(), []string{"web", "mweb", "ios"}, []string{"mweb"})
+	profiles := s.Select("jNQXAC9IVRw")
+	if len(profiles) != 2 {
+		t.Fatalf("expected 2 profiles, got %d", len(profiles))
+	}
+	if profiles[0].Name != "WEB" || profiles[1].Name != "IOS" {
+		t.Fatalf("unexpected order after skip: %q, %q", profiles[0].Name, profiles[1].Name)
 	}
 }

@@ -6,6 +6,7 @@ type PlayerResponse struct {
 	StreamingData     StreamingData     `json:"streamingData"`
 	VideoDetails      VideoDetails      `json:"videoDetails"`
 	Microformat       Microformat       `json:"microformat"`
+	Captions          Captions          `json:"captions"`
 }
 
 type PlayabilityStatus struct {
@@ -129,4 +130,29 @@ type Embed struct {
 
 type SimpleText struct {
 	SimpleText string `json:"simpleText"`
+}
+
+type Captions struct {
+	PlayerCaptionsTracklistRenderer PlayerCaptionsTracklistRenderer `json:"playerCaptionsTracklistRenderer"`
+}
+
+type PlayerCaptionsTracklistRenderer struct {
+	CaptionTracks []CaptionTrack `json:"captionTracks"`
+}
+
+type CaptionTrack struct {
+	BaseURL      string   `json:"baseUrl"`
+	Name         LangText `json:"name"`
+	VssID        string   `json:"vssId"`
+	LanguageCode string   `json:"languageCode"`
+	Kind         string   `json:"kind,omitempty"`
+}
+
+type LangText struct {
+	SimpleText string    `json:"simpleText"`
+	Runs       []TextRun `json:"runs"`
+}
+
+type TextRun struct {
+	Text string `json:"text"`
 }

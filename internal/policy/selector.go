@@ -3,7 +3,7 @@ package policy
 import (
 	"strings"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 // Selector decides which clients to use for a given video request.
@@ -15,12 +15,22 @@ type Selector interface {
 type defaultSelector struct {
 	registry    innertube.Registry
 	clientOrder []string
+	clientSkip  map[string]struct{}
 }
 
-func NewSelector(registry innertube.Registry, clientOrder []string) Selector {
+func NewSelector(registry innertube.Registry, clientOrder []string, clientSkip []string) Selector {
+	skip := make(map[string]struct{}, len(clientSkip))
+	for _, name := range clientSkip {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if normalized == "" {
+			continue
+		}
+		skip[normalized] = struct{}{}
+	}
 	return &defaultSelector{
 		registry:    registry,
 		clientOrder: clientOrder,
+		clientSkip:  skip,
 	}
 }
 
@@ -54,6 +64,9 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 		if _, exists := seen[normalized]; exists {
 			continue
 		}
+		if _, skipped := s.clientSkip[normalized]; skipped {
+			continue
+		}
 		seen[normalized] = struct{}{}
 		if p, ok := s.registry.Get(normalized); ok {
 			profiles = append(profiles, p)
@@ -64,6 +77,9 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 	if len(profiles) == 0 && len(s.clientOrder) > 0 {
 		defaults := []string{"android_vr", "web", "web_safari", "android", "ios", "mweb", "web_embedded", "tv"}
 		for _, name := range defaults {
+			if _, skipped := s.clientSkip[name]; skipped {
+				continue
+			}
 			if p, ok := s.registry.Get(name); ok {
 				profiles = append(profiles, p)
 			}

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 // Format represents a media format.

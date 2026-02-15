@@ -3,7 +3,7 @@ package formats
 import (
 	"testing"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 func TestParse_NormalizesFormatsDeterministically(t *testing.T) {

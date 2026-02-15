@@ -8,12 +8,12 @@ import (
 	"net/url"
 	"sync"
 
-	"github.com/mjmst/ytv1/internal/formats"
-	"github.com/mjmst/ytv1/internal/innertube"
-	"github.com/mjmst/ytv1/internal/orchestrator"
-	"github.com/mjmst/ytv1/internal/playerjs"
-	"github.com/mjmst/ytv1/internal/policy"
-	"github.com/mjmst/ytv1/internal/types"
+	"github.com/famomatic/ytv1/internal/formats"
+	"github.com/famomatic/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/orchestrator"
+	"github.com/famomatic/ytv1/internal/playerjs"
+	"github.com/famomatic/ytv1/internal/policy"
+	"github.com/famomatic/ytv1/internal/types"
 )
 
 // Client is the high-level YouTube client.
@@ -43,15 +43,20 @@ func NewClient(config Config) *Client {
 
 	registry := innertube.NewRegistry()
 	innerCfg := config.ToInnerTubeConfig()
-	selector := policy.NewSelector(registry, innerCfg.ClientOverrides)
+	selector := policy.NewSelector(registry, innerCfg.ClientOverrides, innerCfg.ClientSkip)
 	engine := orchestrator.NewEngine(selector, innerCfg)
+	playerHeaders := cloneHeader(innerCfg.RequestHeaders)
+	if playerHeaders == nil {
+		playerHeaders = make(http.Header)
+	}
+	mergeHeaders(playerHeaders, innerCfg.PlayerJSHeaders)
 	jsResolver := playerjs.NewResolver(
 		config.HTTPClient,
 		playerjs.NewMemoryCache(),
 		playerjs.ResolverConfig{
 			BaseURL:         innerCfg.PlayerJSBaseURL,
 			UserAgent:       innerCfg.PlayerJSUserAgent,
-			Headers:         innerCfg.PlayerJSHeaders,
+			Headers:         playerHeaders,
 			PreferredLocale: innerCfg.PlayerJSPreferredLocale,
 		},
 	)
@@ -66,6 +71,9 @@ func NewClient(config Config) *Client {
 
 // GetVideo fetches video metadata and normalized formats for the input ID/URL.
 func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error) {
+	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
 	videoID, err := normalizeVideoID(input)
 	if err != nil {
 		return nil, err
@@ -107,6 +115,9 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 
 // GetFormats returns normalized formats only.
 func (c *Client) GetFormats(ctx context.Context, input string) ([]FormatInfo, error) {
+	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
 	v, err := c.GetVideo(ctx, input)
 	if err != nil {
 		return nil, err
@@ -119,6 +130,9 @@ func (c *Client) GetFormats(ctx context.Context, input string) ([]FormatInfo, er
 
 // FetchDASHManifest fetches DASH manifest content for the given video ID/URL.
 func (c *Client) FetchDASHManifest(ctx context.Context, input string) (string, error) {
+	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
 	session, videoID, err := c.ensureSession(ctx, input)
 	if err != nil {
 		return "", err
@@ -136,6 +150,9 @@ func (c *Client) FetchDASHManifest(ctx context.Context, input string) (string, e
 
 // FetchHLSManifest fetches HLS manifest content for the given video ID/URL.
 func (c *Client) FetchHLSManifest(ctx context.Context, input string) (string, error) {
+	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
 	session, videoID, err := c.ensureSession(ctx, input)
 	if err != nil {
 		return "", err
@@ -153,6 +170,9 @@ func (c *Client) FetchHLSManifest(ctx context.Context, input string) (string, er
 
 // ResolveStreamURL resolves a direct playable URL for a specific itag.
 func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int) (string, error) {
+	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	defer cancel()
+
 	videoID, err := normalizeVideoID(videoID)
 	if err != nil {
 		return "", err
@@ -239,6 +259,7 @@ func toFormatInfo(f formats.Format) FormatInfo {
 		Itag:         f.Itag,
 		URL:          f.URL,
 		MimeType:     f.MimeType,
+		Protocol:     f.Protocol,
 		HasAudio:     hasAudio,
 		HasVideo:     hasVideo,
 		Bitrate:      f.Bitrate,
@@ -268,7 +289,7 @@ func mapError(err error) error {
 	}
 	switch {
 	case errors.Is(err, types.ErrNoClientsAvailable):
-		return ErrAllClientsFailed
+		return &AllClientsFailedDetailError{}
 	case errors.Is(err, types.ErrLoginRequired):
 		return ErrLoginRequired
 	case errors.Is(err, types.ErrVideoUnavailable):
@@ -279,45 +300,93 @@ func mapError(err error) error {
 
 	var playabilityErr *orchestrator.PlayabilityError
 	if errors.As(err, &playabilityErr) {
+		attempts := []AttemptDetail{attemptDetailFromSingle(playabilityErr.Client, playabilityErr)}
 		if playabilityErr.RequiresLogin() {
-			return ErrLoginRequired
+			return &LoginRequiredDetailError{Attempts: attempts}
 		}
 		if playabilityErr.IsAgeRestricted() {
-			return ErrLoginRequired
+			return &LoginRequiredDetailError{Attempts: attempts}
 		}
-		return ErrUnavailable
+		return &UnavailableDetailError{Attempts: attempts}
 	}
 
 	var allFailedErr *orchestrator.AllClientsFailedError
 	if errors.As(err, &allFailedErr) {
+		attempts := make([]AttemptDetail, 0, len(allFailedErr.Attempts))
 		hasUnavailable := false
+		hasLoginRequired := false
 		for _, attempt := range allFailedErr.Attempts {
+			attempts = append(attempts, attemptDetailFromSingle(attempt.Client, attempt.Err))
 			if !errors.As(attempt.Err, &playabilityErr) {
 				continue
 			}
 			if playabilityErr.RequiresLogin() || playabilityErr.IsAgeRestricted() {
-				return ErrLoginRequired
+				hasLoginRequired = true
 			}
 			if playabilityErr.IsGeoRestricted() || playabilityErr.IsUnavailable() {
 				hasUnavailable = true
 			}
 		}
-		if hasUnavailable {
-			return ErrUnavailable
+		if hasLoginRequired {
+			return &LoginRequiredDetailError{Attempts: attempts}
 		}
-		return ErrAllClientsFailed
+		if hasUnavailable {
+			return &UnavailableDetailError{Attempts: attempts}
+		}
+		return &AllClientsFailedDetailError{Attempts: attempts}
 	}
 
 	var httpStatusErr *orchestrator.HTTPStatusError
 	if errors.As(err, &httpStatusErr) {
-		return ErrAllClientsFailed
+		return &AllClientsFailedDetailError{
+			Attempts: []AttemptDetail{attemptDetailFromSingle(httpStatusErr.Client, httpStatusErr)},
+		}
 	}
 	var poTokenErr *orchestrator.PoTokenRequiredError
 	if errors.As(err, &poTokenErr) {
-		return ErrAllClientsFailed
+		return &AllClientsFailedDetailError{
+			Attempts: []AttemptDetail{attemptDetailFromSingle(poTokenErr.Client, poTokenErr)},
+		}
 	}
 
 	return err
+}
+
+func attemptDetailFromSingle(client string, err error) AttemptDetail {
+	d := AttemptDetail{
+		Client: client,
+		Stage:  "unknown",
+	}
+	if err == nil {
+		return d
+	}
+
+	d.Reason = err.Error()
+
+	var playabilityErr *orchestrator.PlayabilityError
+	if errors.As(err, &playabilityErr) {
+		d.Stage = "playability"
+		d.Reason = playabilityErr.Status + ": " + playabilityErr.Reason
+		return d
+	}
+
+	var httpStatusErr *orchestrator.HTTPStatusError
+	if errors.As(err, &httpStatusErr) {
+		d.Stage = "request"
+		d.HTTPStatus = httpStatusErr.StatusCode
+		return d
+	}
+
+	var poTokenErr *orchestrator.PoTokenRequiredError
+	if errors.As(err, &poTokenErr) {
+		d.Stage = "pot"
+		d.POTRequired = true
+		d.POTAvailable = false
+		d.Reason = poTokenErr.Cause
+		return d
+	}
+
+	return d
 }
 
 func (c *Client) getSession(videoID string) (videoSession, bool) {

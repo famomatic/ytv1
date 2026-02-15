@@ -2,8 +2,9 @@ package client
 
 import (
 	"net/http"
+	"time"
 
-	"github.com/mjmst/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 // Config holds configuration for the YouTube client.
@@ -19,6 +20,10 @@ type Config struct {
 	// PoTokenProvider is the provider for PO Tokens.
 	// If nil, PO Tokens will not be injected, which may cause throttling or errors.
 	PoTokenProvider innertube.PoTokenProvider
+
+	// PoTokenFetchPolicy overrides POT enforcement per streaming protocol.
+	// Supported values: required|recommended|never.
+	PoTokenFetchPolicy map[innertube.VideoStreamingProtocol]innertube.PoTokenFetchPolicy
 
 	// VisitorData is the "VISITOR_INFO1_LIVE" cookie value.
 	// Use this to persist sessions or emulate a specific user context.
@@ -42,22 +47,80 @@ type Config struct {
 	// If empty, package defaults are used.
 	ClientOverrides []string
 
+	// AppendFallbackOnClientOverrides keeps fallback-client auto append enabled even
+	// when ClientOverrides is explicitly provided.
+	// Default is false: explicit override mode disables auto fallback append.
+	AppendFallbackOnClientOverrides bool
+
 	// DisableDynamicAPIKeyResolution disables watch-page ytcfg API key extraction.
 	// Default is false (dynamic resolution enabled).
 	DisableDynamicAPIKeyResolution bool
+
+	// RequestHeaders are applied to package-level outgoing HTTP requests.
+	RequestHeaders http.Header
+
+	// RequestTimeout applies a default timeout when incoming context has no deadline.
+	// Zero means no additional timeout.
+	RequestTimeout time.Duration
+
+	// ClientSkip excludes specific Innertube clients from selection.
+	ClientSkip []string
+
+	// DisableFallbackClients disables automatic fallback-client append behavior.
+	DisableFallbackClients bool
+
+	// MetadataTransport configures retry/backoff for Innertube metadata requests.
+	MetadataTransport MetadataTransportConfig
+
+	// MP3Transcoder handles optional stream->mp3 conversion in Download(mode=mp3).
+	// If nil, mp3 mode returns ErrMP3TranscoderNotConfigured.
+	MP3Transcoder MP3Transcoder
+
+	// DownloadTransport configures retry/backoff behavior for stream downloads.
+	DownloadTransport DownloadTransportConfig
+}
+
+// DownloadTransportConfig controls retry/backoff behavior for direct stream downloads.
+type DownloadTransportConfig struct {
+	MaxRetries       int
+	InitialBackoff   time.Duration
+	MaxBackoff       time.Duration
+	RetryStatusCodes []int
+	EnableChunked    bool
+	ChunkSize        int64
+	MaxConcurrency   int
+}
+
+// MetadataTransportConfig controls retry/backoff for Innertube player metadata requests.
+type MetadataTransportConfig struct {
+	MaxRetries       int
+	InitialBackoff   time.Duration
+	MaxBackoff       time.Duration
+	RetryStatusCodes []int
 }
 
 func (c Config) ToInnerTubeConfig() innertube.Config {
+	disableFallback := c.DisableFallbackClients
+	if !disableFallback && len(c.ClientOverrides) > 0 && !c.AppendFallbackOnClientOverrides {
+		disableFallback = true
+	}
+
 	return innertube.Config{
 		HTTPClient:                    c.HTTPClient,
 		ProxyURL:                      c.ProxyURL,
 		PoTokenProvider:               c.PoTokenProvider,
+		PoTokenFetchPolicy:            c.PoTokenFetchPolicy,
 		VisitorData:                   c.VisitorData,
 		PlayerJSBaseURL:               c.PlayerJSBaseURL,
 		PlayerJSUserAgent:             c.PlayerJSUserAgent,
 		PlayerJSHeaders:               c.PlayerJSHeaders,
 		PlayerJSPreferredLocale:       c.PlayerJSPreferredLocale,
 		ClientOverrides:               c.ClientOverrides,
+		ClientSkip:                    c.ClientSkip,
+		RequestHeaders:                c.RequestHeaders,
+		RequestTimeout:                c.RequestTimeout,
+		DisableFallbackClients:        disableFallback,
+		MetadataTransport:             innertube.MetadataTransportConfig(c.MetadataTransport),
 		EnableDynamicAPIKeyResolution: !c.DisableDynamicAPIKeyResolution,
 	}
 }

@@ -1,4 +1,4 @@
-module github.com/mjmst/ytv1
+module github.com/famomatic/ytv1
 
 go 1.23
 

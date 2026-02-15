@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -71,7 +72,7 @@ func TestGetVideoLoginRequired(t *testing.T) {
 	}`)
 
 	_, err := c.GetVideo(context.Background(), "jNQXAC9IVRw")
-	if err != ErrLoginRequired {
+	if !errors.Is(err, ErrLoginRequired) {
 		t.Fatalf("GetVideo() error = %v, want %v", err, ErrLoginRequired)
 	}
 }
@@ -83,7 +84,7 @@ func TestGetVideoUnavailable(t *testing.T) {
 	}`)
 
 	_, err := c.GetVideo(context.Background(), "jNQXAC9IVRw")
-	if err != ErrUnavailable {
+	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("GetVideo() error = %v, want %v", err, ErrUnavailable)
 	}
 }
@@ -96,8 +97,7 @@ func TestGetFormatsNoPlayable(t *testing.T) {
 	}`)
 
 	_, err := c.GetFormats(context.Background(), "jNQXAC9IVRw")
-	if err != ErrNoPlayableFormats {
+	if !errors.Is(err, ErrNoPlayableFormats) {
 		t.Fatalf("GetFormats() error = %v, want %v", err, ErrNoPlayableFormats)
 	}
 }
-

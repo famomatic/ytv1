@@ -18,34 +18,34 @@
    - Add package mode enum: `Best`, `MP4AV`, `MP4VideoOnly`, `AudioOnly`, `MP3`.
    - Build deterministic selector (container, hasAudio/hasVideo, bitrate/resolution tie-breakers).
    - Keep `itag` override as highest priority.
-3. `[-]` Implement MP3 pipeline as optional transcode layer:
+3. `[x]` Implement MP3 pipeline as optional transcode layer:
    - Add `Transcoder` interface in package config (default nil).
    - If mode=`MP3` and no transcoder configured, return typed error.
    - Stream download -> transcode to output writer/path (no temp shell command hard dependency in core).
-4. `[ ]` Refactor PO token handling to yt-dlp-like per-protocol/per-format decision:
+4. `[x]` Refactor PO token handling to yt-dlp-like per-protocol/per-format decision:
    - Evaluate POT requirement at stream-protocol stage (HTTPS/DASH/HLS), not only request stage.
    - Add provider fetch policy hooks: required/recommended/never.
    - Emit structured skip reasons when formats are dropped due to missing POT.
-5. `[ ]` Expand package error contract from coarse sentinels to typed detail errors:
+5. `[x]` Expand package error contract from coarse sentinels to typed detail errors:
    - Add attempt matrix payload (client, stage, status, reason, http code, pot requirement).
    - Keep sentinel compatibility via `errors.Is`, expose rich detail via `errors.As`.
-6. `[ ]` Add resilient download transport features (package-level):
+6. `[x]` Add resilient download transport features (package-level):
    - Range-based chunk download with bounded concurrency and context cancellation.
    - Retry/backoff for transient HTTP/network failures.
    - Optional resume support when output exists.
-7. `[ ]` Add package APIs for playlist/transcript/subtitle extraction:
+7. `[x]` Add package APIs for playlist/transcript/subtitle extraction:
    - `GetPlaylist`, `GetTranscript`, subtitle track listing/fetch.
    - Reuse Innertube context/policy stack (no CLI-only logic).
-8. `[ ]` Expand client config surface to match package use-cases:
+8. `[x]` Expand client config surface to match package use-cases:
    - Per-request headers, retry policy, timeout strategy, client skip/priority policy, POT strategy, selector knobs.
    - No hidden hardcoded defaults without override path.
-9. `[ ]` Strengthen playerjs robustness and regression strategy:
+9. `[x]` Strengthen playerjs robustness and regression strategy:
    - Add real `base.js` fixture rotation workflow and parser fallback patterns.
    - Add CI tests for signature/n-function extraction across multiple captured player revisions.
-10. `[ ]` Harden input normalization:
+10. `[x]` Harden input normalization:
    - Support broader YouTube URL families and query combinations.
    - Keep strict invalid-input typed errors with exact reason.
-11. `[ ]` Keep explicit override investigation open:
+11. `[x]` Keep explicit override investigation open:
    - Reproduce `-clients android_vr,web,web_safari` -> `login required`.
    - Capture per-client attempt diagnostics and decide fallback insertion policy for override mode.
 

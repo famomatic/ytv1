@@ -27,7 +27,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/mjmst/ytv1/client"
+	"github.com/famomatic/ytv1/client"
 )
 
 func main() {

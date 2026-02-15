@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mjmst/ytv1/client"
-	"github.com/mjmst/ytv1/internal/playerjs"
+	"github.com/famomatic/ytv1/client"
+	"github.com/famomatic/ytv1/internal/playerjs"
 )
 
 func main() {
@@ -23,6 +23,8 @@ func main() {
 		mode            = flag.String("mode", "best", "Download mode: best|mp4av|mp4videoonly|audioonly|mp3")
 		outputPath      = flag.String("o", "", "Output file path for download")
 		clients         = flag.String("clients", "", "Comma-separated Innertube client order override (e.g. android_vr,web,web_safari)")
+		overrideDiag    = flag.Bool("override-diagnostics", false, "Print per-client attempt diagnostics on metadata failure")
+		overrideAppend  = flag.Bool("override-append-fallback", false, "When -clients is set, keep fallback auto-append enabled")
 		visitorData     = flag.String("visitor-data", "", "VISITOR_INFO1_LIVE value override")
 		playerJSURLOnly = flag.Bool("playerjs", false, "Print player base.js URL only")
 	)
@@ -60,6 +62,10 @@ func main() {
 	}
 	if trimmed := strings.TrimSpace(*clients); trimmed != "" {
 		cfg.ClientOverrides = splitCSV(trimmed)
+		cfg.AppendFallbackOnClientOverrides = *overrideAppend
+		if !*overrideAppend {
+			cfg.DisableFallbackClients = true
+		}
 	}
 	c := client.New(cfg)
 
@@ -74,6 +80,9 @@ func main() {
 			OutputPath: *outputPath,
 		})
 		if err != nil {
+			if *overrideDiag {
+				printAttemptDiagnostics(err)
+			}
 			log.Fatalf("Error downloading stream: %v", err)
 		}
 		fmt.Printf("Downloaded: %s (%d bytes, itag=%d)\n", result.OutputPath, result.Bytes, result.Itag)
@@ -83,6 +92,9 @@ func main() {
 	fmt.Printf("Fetching info for video ID: %s...\n", *videoID)
 	info, err := c.GetVideo(ctx, *videoID)
 	if err != nil {
+		if *overrideDiag {
+			printAttemptDiagnostics(err)
+		}
 		log.Fatalf("Error fetching video info: %v", err)
 	}
 
@@ -106,4 +118,25 @@ func splitCSV(raw string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+func printAttemptDiagnostics(err error) {
+	attempts, ok := client.AttemptDetails(err)
+	if !ok || len(attempts) == 0 {
+		return
+	}
+	fmt.Println("Attempt diagnostics:")
+	for i, a := range attempts {
+		fmt.Printf("  [%d] client=%s stage=%s", i+1, a.Client, a.Stage)
+		if a.HTTPStatus != 0 {
+			fmt.Printf(" http=%d", a.HTTPStatus)
+		}
+		if a.POTRequired {
+			fmt.Printf(" pot_required=true")
+		}
+		if a.Reason != "" {
+			fmt.Printf(" reason=%q", a.Reason)
+		}
+		fmt.Println()
+	}
 }

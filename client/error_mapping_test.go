@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/mjmst/ytv1/internal/orchestrator"
+	"github.com/famomatic/ytv1/internal/orchestrator"
 )
 
 func TestMapErrorPlayabilityAgeRestricted(t *testing.T) {
@@ -13,8 +13,16 @@ func TestMapErrorPlayabilityAgeRestricted(t *testing.T) {
 		Status: "LOGIN_REQUIRED",
 		Reason: "This video may be inappropriate for some users.",
 	}
-	if got := mapError(err); got != ErrLoginRequired {
+	got := mapError(err)
+	if !errors.Is(got, ErrLoginRequired) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrLoginRequired)
+	}
+	var detail *LoginRequiredDetailError
+	if !errors.As(got, &detail) {
+		t.Fatalf("mapError() should expose LoginRequiredDetailError")
+	}
+	if len(detail.Attempts) != 1 || detail.Attempts[0].Stage != "playability" {
+		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
 	}
 }
 
@@ -31,7 +39,7 @@ func TestMapErrorAllClientsFailedUnavailable(t *testing.T) {
 			},
 		},
 	}
-	if got := mapError(err); got != ErrUnavailable {
+	if got := mapError(err); !errors.Is(got, ErrUnavailable) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrUnavailable)
 	}
 }
@@ -49,7 +57,7 @@ func TestMapErrorAllClientsFailedLogin(t *testing.T) {
 			},
 		},
 	}
-	if got := mapError(err); got != ErrLoginRequired {
+	if got := mapError(err); !errors.Is(got, ErrLoginRequired) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrLoginRequired)
 	}
 }
@@ -81,8 +89,16 @@ func TestMapErrorMixedFailureMatrixPrefersLogin(t *testing.T) {
 			},
 		},
 	}
-	if got := mapError(err); got != ErrLoginRequired {
+	got := mapError(err)
+	if !errors.Is(got, ErrLoginRequired) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrLoginRequired)
+	}
+	var detail *LoginRequiredDetailError
+	if !errors.As(got, &detail) {
+		t.Fatalf("mapError() should expose LoginRequiredDetailError")
+	}
+	if len(detail.Attempts) != 3 {
+		t.Fatalf("expected 3 attempts, got %d", len(detail.Attempts))
 	}
 }
 
@@ -93,5 +109,12 @@ func TestMapErrorPoTokenRequiredFallsBackToAllClientsFailed(t *testing.T) {
 	}
 	if got := mapError(err); !errors.Is(got, ErrAllClientsFailed) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrAllClientsFailed)
+	}
+	var detail *AllClientsFailedDetailError
+	if !errors.As(mapError(err), &detail) {
+		t.Fatalf("mapError() should expose AllClientsFailedDetailError")
+	}
+	if len(detail.Attempts) != 1 || detail.Attempts[0].Stage != "pot" {
+		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
 	}
 }

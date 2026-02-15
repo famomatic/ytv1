@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/mjmst/ytv1/internal/innertube"
-	"github.com/mjmst/ytv1/internal/playerjs"
+	"github.com/famomatic/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/playerjs"
 )
 
 type playerResolverStub struct {
