@@ -23,13 +23,26 @@ type Config struct {
 	// VisitorData is the "VISITOR_INFO1_LIVE" cookie value.
 	// Use this to persist sessions or emulate a specific user context.
 	VisitorData string
+
+	// PlayerJSBaseURL overrides player JS fetch host (default: https://www.youtube.com).
+	PlayerJSBaseURL string
+
+	// PlayerJSUserAgent overrides player JS fetch User-Agent.
+	// If empty, package fallback is used.
+	PlayerJSUserAgent string
+
+	// PlayerJSHeaders are additional headers for player JS fetches.
+	PlayerJSHeaders http.Header
 }
 
 func (c Config) ToInnerTubeConfig() innertube.Config {
-    return innertube.Config{
-        HTTPClient: c.HTTPClient,
-        ProxyURL:   c.ProxyURL,
-        PoTokenProvider: c.PoTokenProvider,
-        VisitorData: c.VisitorData,
-    }
+	return innertube.Config{
+		HTTPClient: c.HTTPClient,
+		ProxyURL: c.ProxyURL,
+		PoTokenProvider: c.PoTokenProvider,
+		VisitorData: c.VisitorData,
+		PlayerJSBaseURL: c.PlayerJSBaseURL,
+		PlayerJSUserAgent: c.PlayerJSUserAgent,
+		PlayerJSHeaders: c.PlayerJSHeaders,
+	}
 }

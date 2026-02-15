@@ -27,7 +27,7 @@ func main() {
 	cfg := client.Config{
 		ProxyURL: *proxy,
 	}
-	c := client.NewClient(cfg)
+	c := client.New(cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

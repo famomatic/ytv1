@@ -1,10 +1,7 @@
 package playerjs
 
 import (
-    "errors"
-    "regexp"
-    "strconv"
-    "strings"
+	"errors"
 )
 
 // Decipherer handles signature deciphering and n-parameter transformation.

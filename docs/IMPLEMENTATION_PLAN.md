@@ -1,158 +1,218 @@
-# ytv1 Detailed Implementation Plan
+# ytv1 Implementation Plan (Package-First)
 
-## 1. Scope and Positioning
+## Status Legend
 
-- **Project name**: `ytv1`
-- **Goal**: A robust, maintainable, and "yt-dlp aligned" YouTube client for Go.
-- **Independence**: Do not depend on `kkdai/youtube` runtime behavior; use it only as legacy reference.
-- **Core reference**: `yt-dlp` YouTube extractor (logic, constants, and flow).
-- **Key differences from legacy**:
-  - Context-aware execution (cancellation/timeouts).
-  - Multi-client architecture (simulating Android, iOS, Web, TV to evade throttling).
-  - Proper PO Token injection support (critical for stability).
-  - Structured extraction pipeline (Policy -> Clients -> Orchestrator -> Format Selector).
+- `[x]` done
+- `[-]` in progress
+- `[ ]` pending
 
-## 2. Architecture & Responsibilities
+## Current Snapshot (Update Every Work Session)
 
-### 2.1 Package Structure
+### Foundation
 
-- `internal/innertube`:
-  - **Registry**: Known clients (`android`, `ios`, `web_creator`, etc.) and their headers/constants.
-  - **Request**: Construction of `/player` and `/next` endpoint bodies.
-  - **PO Token**: Interfaces for injecting/generating tokens `_base.py:GvsPoTokenPolicy`.
-- `internal/policy`:
-  - **Selector**: Logic to decide *which* clients to try based on video state (e.g., "Age Gated" -> `tv_embedded` or `web_creator`, "Music" -> `web_music`).
-- `internal/playerjs`:
-  - **Resolver**: Downloads and caches player JS.
-  - **Decipher**: Extracts cipher operations (n-sig, s-sig).
-- `internal/formats`:
-  - **Processor**: Parses `streamingData` from raw InnerTube responses.
-  - **Sorter**: `yt-dlp` style format sorting (Resolution > Bitrate > Codec).
-- `internal/orchestrator`:
-  - **Engine**: Runs the "Try Client A -> If Fail -> Try Client B" loop.
-  - **Merger**: Combines formats found by different clients (e.g. Android gives Playable URL, Web gives 1080p non-playable).
-- `pkg/client`:
-  - **Client**: High-level public API (`GetVideo`, `GetPlaylist`).
-  - **Config**: Configuration options (Proxy, HTTP Client, PO Token Provider).
+- `[x]` Public package-first API skeleton exists (`client.New/GetVideo/GetFormats/ResolveStreamURL`)
+- `[x]` Build is green (`go test ./...`)
+- `[x]` PlayerJS fetch settings are externally configurable (base URL / UA / headers with fallback)
+- `[-]` Internal error -> public error mapping is wired, but still string-based in part
+- `[ ]` Binary outputs excluded from VCS by default (`ytv1.exe` still needs ignore rule)
 
-## 3. Data Model
+### Feature Completeness vs yt-dlp
 
-### 3.1 Core Types
+- `[ ]` yt-dlp-level client matrix and priority behavior
+- `[ ]` yt-dlp-level fallback policy by playability state (age gate, auth required, etc.)
+- `[ ]` Signature (`s`) decipher implementation
+- `[ ]` `n` challenge solve for stream URLs
+- `[ ]` Manifest (`dash/hls`) `n` challenge handling
+- `[ ]` PO Token policy/flow implementation
+- `[ ]` Stream URL resolver fully wired (no placeholder path)
 
-- `VideoInfo`:
-  - `ID`, `Title`, `Author`, `Duration`
-  - `Formats`: List of `Format`
-  - `DASHManifestURL`, `HLSManifestURL`
-- `Format`:
-  - `Itag`, `URL`, `MimeType`
+### Immediate Next Tasks (Execution Order)
+
+1. `[ ]` Add `.gitignore` rule for `ytv1.exe` (and common build outputs).
+2. `[ ]` Remove string-heuristic error mapping; introduce typed orchestration errors.
+3. `[ ]` Carry `playerURL`/challenge context from orchestrator to `ResolveStreamURL`.
+4. `[ ]` Implement real `playerjs.DecipherSignature` and `DecipherN` (initial version from legacy refs).
+5. `[ ]` Wire `ResolveStreamURL` to use playerjs + challenge path instead of returning `ErrChallengeNotSolved`.
+6. `[ ]` Expand selector/registry toward yt-dlp baseline clients and ordering.
+
+## 1. Positioning
+
+- `ytv1` is a Go library first.
+- CLI (`cmd/ytv1`) is only a thin adapter for manual smoke tests.
+- Success criteria are package-level API behavior and testability, not executable behavior.
+
+## 2. Primary Deliverable
+
+Provide a stable public package API:
+
+- `client.New(config)`
+- `client.GetVideo(ctx, input)`
+- `client.GetFormats(ctx, input)`
+- `client.ResolveStreamURL(ctx, videoID, itag)`
+
+CLI is explicitly non-authoritative. If CLI works but package API is unstable, milestone is considered failed.
+
+## 3. References and Porting Policy
+
+### 3.1 Source references
+
+- `legacy/kkdai-youtube`: transport/parsing reference only.
+- `d:/yt-dlp/yt_dlp/extractor/youtube`: extraction strategy reference.
+
+### 3.2 Porting rule
+
+- Port behavior, not structure.
+- No Python-style state flow in public package API.
+- Keep runtime dependencies pure Go.
+
+## 4. Package Architecture
+
+- `client` (public)
+  - public API, options, error contracts
+- `internal/orchestrator`
+  - client fallback orchestration
+- `internal/innertube`
+  - client registry, request builders, response types
+- `internal/policy`
+  - candidate client selection logic
+- `internal/playerjs`
+  - player JS fetch/cache + decipher helpers
+- `internal/formats`
+  - streamingData parsing + normalization
+- `internal/challenge`
+  - `s` / `n` challenge solve interfaces
+- `internal/httpx`
+  - shared HTTP abstraction
+
+## 5. Public API Contract (v1)
+
+### 5.1 Config
+
+- `HTTPClient *http.Client`
+- `Logger` (optional)
+- `PoTokenProvider` (optional interface, no hard dependency)
+- `ClientOverrides []string` (optional, for debug/testing)
+
+### 5.2 Data contract
+
+- `VideoInfo`
+  - `ID`, `Title`, `DurationSec`, `Author`
+  - `Formats []FormatInfo`
+- `FormatInfo`
+  - `Itag`, `MimeType`, `HasAudio`, `HasVideo`
   - `Bitrate`, `Width`, `Height`, `FPS`
-  - `AudioChannels`, `AudioSampleRate`
-  - `VideoCodec`, `AudioCodec` (normalized strings)
-  - `Protocol`: `https` | `dash` | `hls`
-- `Context`:
-  - Standard `context.Context` usage for all I/O.
+  - `URL` (if directly playable)
+  - `Ciphered bool`
 
-### 3.2 Interfaces
+### 5.3 Error contract
 
-- `PoTokenProvider`:
-  - `GetToken(ctx, clientID string) (string, error)`
-  - Allows external injection of PO Tokens (e.g. via separate generator or static string).
+Typed errors (package-level):
 
-## 4. Execution Pipeline
+- `ErrUnavailable`
+- `ErrLoginRequired`
+- `ErrNoPlayableFormats`
+- `ErrChallengeNotSolved`
+- `ErrAllClientsFailed` (with attempt details)
 
-1. **Input**: Video ID + specific `Options` (optional).
-2. **Policy Selection**: Determine candidate clients.
-   - *Default*: `android`, `ios`, `web`, `tv_embedded`.
-3. **Execution Loop** (Sequential or Bounded Concurrent):
-   - **Step 3a**: Build Request (inject PO Token if available/required).
-   - **Step 3b**: Fetch `PlayerResponse`.
-   - **Step 3c**: Validate Playability (Status="OK" / "UNPLAYABLE").
-4. **Extraction**:
-   - Extract raw formats.
-5. **Deciphering**:
-   - Resolve Player JS (if signature deciphering needed).
-   - Solve `n` parameter and `s` signature.
-6. **Polishing**:
-   - Resolve DASH/HLS manifests if present.
-   - Merge formats from all successful clients.
-7. **Sorting**:
-   - Apply `yt-dlp` sorting qualities (User preference or default Best).
-8. **Output**: `VideoInfo` struct.
+## 6. Execution Pipeline (Internal)
 
-## 5. Detailed Phases
+1. Normalize input -> video ID.
+2. Policy selects candidate clients.
+3. Orchestrator requests `/youtubei/v1/player` per candidate.
+4. Collect first valid player responses and metadata.
+5. Parse formats from streamingData.
+6. If needed, resolve player JS and solve `s`/`n` challenges.
+7. Emit normalized `VideoInfo` and `FormatInfo`.
 
-### Phase 1: Core Abstractions & Configuration
-- **Files**: `pkg/client/config.go`, `internal/types/context.go`
-- **Tasks**:
-  - Define `Config` struct (HTTPClient, Proxy, VisitorData).
-  - Define `PoTokenProvider` interface.
-  - Define standard `CommonError` types (VideoUnavailable, LoginRequired).
+## 7. Detailed Phases
 
-### Phase 2: Innertube Registry & PO Token Support
-- **Files**: `internal/innertube/registry.go`, `internal/innertube/clients.go`
-- **Tasks**:
-  - Port clients from `yt-dlp/_base.py`:
-    - `android` (Reliable, no JS required often).
-    - `ios` (Good for HLS/Live).
-    - `web` (Standard, requires PO Token often).
-    - `tv_embedded` (Good for age-gated bypass).
-  - Implement `GvsPoTokenPolicy` struct in Go to map requirements.
+### Phase 1: API and Error freeze (package-first)
 
-### Phase 3: Innertube Request/Response
-- **Files**: `internal/innertube/request.go`, `internal/innertube/response.go`
-- **Tasks**:
-  - Implement `PlayerRequest` builder.
-  - Support `CheckPlayability` logic.
-  - Strict JSON definitions for `StreamingData` and `PlayabilityStatus`.
+- Target:
+  - `client/client.go`
+  - `client/types.go`
+  - `client/errors.go`
+- Outcome:
+  - Public API signatures fixed before internal changes.
 
-### Phase 4: Policy & Orchestrator
-- **Files**: `internal/policy/selector.go`, `internal/orchestrator/engine.go`
-- **Tasks**:
-  - Implement default fallback strategy: `Android -> iOS -> Web -> TV`.
-  - Handle "Video ID not found" vs "Sign in required" vs "Throttle".
+### Phase 2: Innertube core
 
-### Phase 5: Player JS & Deciphering
-- **Files**: `internal/playerjs/resolver.go`, `internal/playerjs/cache.go`
-- **Tasks**:
-  - Cache Player JS body by ID/Version.
-  - Extract `Decipher` functions using regex (existing `kkdai/youtube` logic acts as reference here).
-  - **Crucial**: Implement `n` parameter descrambling (often changes, keep robust).
+- Target:
+  - `internal/innertube/clients.go`
+  - `internal/innertube/request.go`
+  - `internal/innertube/response.go`
+- Outcome:
+  - Deterministic request building and response decoding.
 
-### Phase 6: Formats & Sorting (The "yt-dlp" equivalent)
-- **Files**: `internal/formats/parser.go`, `internal/formats/sort.go`
-- **Tasks**:
-  - Normalize Codec strings (`avc1.4d401e` -> `h264`).
-  - Implement sorting logic:
-    - `has_video` & `has_audio` > `resolution` > `fps` > `bitrate`.
+### Phase 3: Policy + Orchestrator
 
-### Phase 7: Manifest Handling
-- **Files**: `internal/formats/dash.go`, `internal/formats/hls.go`
-- **Tasks**:
-  - Fetch basic HLS/DASH manifests.
-  - *Note*: Full DASH parsing can be complex; start with `GetManifestURL` and basic stream extraction if needed.
+- Target:
+  - `internal/policy/selector.go`
+  - `internal/orchestrator/engine.go`
+- Outcome:
+  - Predictable fallback and structured failure reporting.
 
-### Phase 8: Public API & CLI
-- **Files**: `pkg/client/client.go`, `cmd/ytv1/main.go`
-- **Tasks**:
-  - methods: `GetVideo(ctx, url)`, `GetPlaylist(ctx, url)`.
-  - CLI flags: `--proxy`, `--po-token`, `--client-override`.
+### Phase 4: Format parser
 
-### Phase 9: Verification & Test Suite
-- **Tasks**:
-  - **Fixtures**: Capture real raw JSON capabilities from `yt-dlp --dump-json`.
-  - **Mock Server**: Test orchestrated fallbacks without hitting real YouTube.
-  - **Integration**: "Can we download Video X?" (Daily/Weekly run).
+- Target:
+  - `internal/formats/parser.go`
+- Outcome:
+  - Stable metadata extraction independent of stream playback.
 
-## 6. Immediate Action Plan (Sprint 1)
+### Phase 5: PlayerJS + Challenge
 
-1.  **Skeleton**: Create package structure `internal/innertube`, `internal/orchestrator`.
-2.  **Registry**: Add `android` and `ios` client profiles.
-3.  **Request**: Implement basic `Player` endpoint fetcher.
-4.  **Integration**: Verify we can get a `200 OK` from YouTube API with a dummy video ID.
+- Target:
+  - `internal/playerjs/*`
+  - `internal/challenge/*`
+- Outcome:
+  - URL resolution for ciphered formats.
 
-## 7. Known Risks
+### Phase 6: Integration to public API
 
-- **PO Token Requirements**: YouTube is aggressively enforcing this.
-  - *Mitigation*: We will expose the `PoTokenProvider` interface early so users can plug in generators like `github.com/yt-dlp/yt-dlp-get-pot` or others.
-- **Android Client degradation**: Sometimes Android client gets throttled.
-  - *Mitigation*: Use `ios` as strong secondary.
+- Target:
+  - `client` package wiring
+- Outcome:
+  - `GetVideo/GetFormats/ResolveStreamURL` functional.
+
+### Phase 7: CLI as adapter (last)
+
+- Target:
+  - `cmd/ytv1/main.go`
+- Outcome:
+  - CLI delegates only to `client` package.
+  - No extraction logic allowed in CLI.
+
+## 8. Test Strategy
+
+- Unit tests by package first.
+- Orchestrator tests with mocked HTTP responses.
+- Fixture-based parser tests for multiple playability shapes.
+- One smoke command allowed:
+  - `./ytv1.exe -v <id>`
+  - but this is verification only, not design target.
+
+## 9. Current Immediate Fixes (before next feature work)
+
+1. `[x]` Make repository build green (`go test ./...`).
+2. `[x]` Remove unused imports in `internal/playerjs/*`.
+3. `[-]` Ensure selector/client config consistency (API key and fallback behavior).
+4. `[ ]` Keep binary out of VCS (`ytv1.exe` in `.gitignore`).
+
+## 10. Definition of Done (v1)
+
+v1 is done when:
+
+1. Public package API is stable and documented.
+2. `go test ./...` passes reliably.
+3. Package can return metadata for known sample IDs.
+4. Ciphered formats are either resolvable or return explicit typed errors.
+5. CLI remains a thin wrapper over package API.
+
+## 11. Plan Update Rule (Mandatory)
+
+Before starting any substantial change and after finishing it:
+
+1. Update `Current Snapshot` status markers.
+2. Move completed items from `Immediate Next Tasks` to done state.
+3. Add newly discovered work items with `[ ]`.
+4. Keep this file as the single source of truth for execution order.
