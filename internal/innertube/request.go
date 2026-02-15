@@ -9,6 +9,7 @@ type PlayerRequest struct {
 	ContentCheckOk bool         `json:"contentCheckOk,omitempty"`
 	RacyCheckOk    bool         `json:"racyCheckOk,omitempty"`
 	PlaybackContext PlaybackContext `json:"playbackContext,omitempty"`
+	ServiceIntegrityDimensions *ServiceIntegrityDimensions `json:"serviceIntegrityDimensions,omitempty"`
 }
 
 type Context struct {
@@ -58,6 +59,10 @@ type ContentPlaybackContext struct {
 	SignatureTimestamp int `json:"signatureTimestamp,omitempty"`
 }
 
+type ServiceIntegrityDimensions struct {
+	PoToken string `json:"poToken,omitempty"`
+}
+
 
 func NewPlayerRequest(profile ClientProfile, videoID string) *PlayerRequest {
 	clientInfo := ClientInfo{
@@ -97,6 +102,13 @@ func NewPlayerRequest(profile ClientProfile, videoID string) *PlayerRequest {
 	}
 
 	return req
+}
+
+func (r *PlayerRequest) SetPoToken(token string) {
+	if token == "" {
+		return
+	}
+	r.ServiceIntegrityDimensions = &ServiceIntegrityDimensions{PoToken: token}
 }
 
 func applyClientContextDefaults(client *ClientInfo, profile ClientProfile) {

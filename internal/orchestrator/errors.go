@@ -67,3 +67,13 @@ func (e *PlayabilityError) IsUnavailable() bool {
 		strings.Contains(s, "PRIVATE") ||
 		strings.Contains(s, "DELETED")
 }
+
+// PoTokenRequiredError indicates a request could not proceed due to missing/invalid PO token.
+type PoTokenRequiredError struct {
+	Client string
+	Cause  string
+}
+
+func (e *PoTokenRequiredError) Error() string {
+	return fmt.Sprintf("po token required client=%s cause=%s", e.Client, e.Cause)
+}

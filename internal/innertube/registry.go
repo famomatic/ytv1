@@ -13,10 +13,12 @@ func NewRegistry() Registry {
 		clients: map[string]ClientProfile{
 			"web":          WebClient,
 			"web_embedded": WebEmbeddedClient,
+			"web_embedded_player": WebEmbeddedClient,
 			"mweb":         MWebClient,
 			"android":      AndroidClient,
 			"ios":          iOSClient,
 			"tv":           TVClient,
+			"tvhtml5":      TVClient,
 		},
 	}
 }

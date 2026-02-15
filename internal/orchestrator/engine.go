@@ -84,6 +84,13 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			}
 
 			req := innertube.NewPlayerRequest(p, videoID)
+			if err := e.applyPoToken(ctx, req, p); err != nil {
+				select {
+				case results <- extractionResult{response: nil, err: err, client: p.Name}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			resp, err := e.fetch(ctx, req, p)
 
 			select {
@@ -112,6 +119,34 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	return nil, attempts
 }
 
+func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) error {
+	policy, hasPolicy := profile.PoTokenPolicy[innertube.StreamingProtocolHTTPS]
+	if !hasPolicy || (!policy.Required && !policy.Recommended) {
+		return nil
+	}
+	if e.config.PoTokenProvider == nil {
+		if policy.Required {
+			return &PoTokenRequiredError{Client: profile.Name, Cause: "provider not configured"}
+		}
+		return nil
+	}
+	token, err := e.config.PoTokenProvider.GetToken(ctx, profile.Name)
+	if err != nil {
+		if policy.Required {
+			return &PoTokenRequiredError{Client: profile.Name, Cause: "provider error"}
+		}
+		return nil
+	}
+	if token == "" {
+		if policy.Required {
+			return &PoTokenRequiredError{Client: profile.Name, Cause: "empty token"}
+		}
+		return nil
+	}
+	req.SetPoToken(token)
+	return nil
+}
+
 func splitClientPhases(clients []innertube.ClientProfile) ([]innertube.ClientProfile, []innertube.ClientProfile) {
 	var primary []innertube.ClientProfile
 	var fallback []innertube.ClientProfile
@@ -134,6 +169,10 @@ func shouldRunFallbackPhase(attempts []AttemptError) bool {
 	for _, attempt := range attempts {
 		var pErr *PlayabilityError
 		if !errors.As(attempt.Err, &pErr) {
+			var poErr *PoTokenRequiredError
+			if errors.As(attempt.Err, &poErr) {
+				return true
+			}
 			continue
 		}
 		// Keep fallback targeted to known playability gating classes.

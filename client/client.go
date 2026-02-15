@@ -88,9 +88,13 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		Title:   resp.VideoDetails.Title,
 		Author:  resp.VideoDetails.Author,
 		Formats: outFormats,
+		DashManifestURL: resp.StreamingData.DashManifestURL,
+		HLSManifestURL:  resp.StreamingData.HlsManifestURL,
 	}
 
 	playerURL, _ := c.playerJSResolver.GetPlayerURL(ctx, videoID)
+	info.DashManifestURL = c.resolveManifestURL(ctx, info.DashManifestURL, playerURL)
+	info.HLSManifestURL = c.resolveManifestURL(ctx, info.HLSManifestURL, playerURL)
 	c.sessionsMu.Lock()
 	c.sessions[videoID] = videoSession{
 		Response:  resp,
@@ -274,6 +278,10 @@ func mapError(err error) error {
 	if errors.As(err, &httpStatusErr) {
 		return ErrAllClientsFailed
 	}
+	var poTokenErr *orchestrator.PoTokenRequiredError
+	if errors.As(err, &poTokenErr) {
+		return ErrAllClientsFailed
+	}
 
 	return err
 }
@@ -300,4 +308,47 @@ func findRawFormat(resp *innertube.PlayerResponse, itag int) (innertube.Format, 
 		}
 	}
 	return innertube.Format{}, false
+}
+
+func (c *Client) resolveManifestURL(ctx context.Context, manifestURL, playerURL string) string {
+	if manifestURL == "" || playerURL == "" || !hasQueryParam(manifestURL, "n") {
+		return manifestURL
+	}
+	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, playerURL)
+	if err != nil {
+		return manifestURL
+	}
+	decipherer := playerjs.NewDecipherer(jsBody)
+	rewritten, err := rewriteURLParam(manifestURL, "n", decipherer.DecipherN)
+	if err != nil {
+		return manifestURL
+	}
+	return rewritten
+}
+
+func hasQueryParam(rawURL, key string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Query().Get(key) != ""
+}
+
+func rewriteURLParam(rawURL, key string, decoder func(string) (string, error)) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	current := q.Get(key)
+	if current == "" {
+		return rawURL, nil
+	}
+	next, err := decoder(current)
+	if err != nil {
+		return "", err
+	}
+	q.Set(key, next)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }

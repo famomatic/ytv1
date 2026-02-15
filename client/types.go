@@ -6,6 +6,8 @@ type VideoInfo struct {
 	Title   string
 	Author  string
 	Formats []FormatInfo
+	DashManifestURL string
+	HLSManifestURL  string
 }
 
 // FormatInfo is the normalized public format model.

@@ -43,3 +43,16 @@ func TestOverridesAreNormalizedAndDeduplicated(t *testing.T) {
 	}
 }
 
+func TestOverrideAliasesAreAccepted(t *testing.T) {
+	s := NewSelector(innertube.NewRegistry(), []string{"WEB_EMBEDDED_PLAYER", "TVHTML5"})
+	profiles := s.Select("jNQXAC9IVRw")
+	if len(profiles) != 2 {
+		t.Fatalf("expected 2 profiles, got %d", len(profiles))
+	}
+	if profiles[0].Name != "WEB_EMBEDDED_PLAYER" {
+		t.Fatalf("first profile = %q, want WEB_EMBEDDED_PLAYER", profiles[0].Name)
+	}
+	if profiles[1].Name != "TVHTML5" {
+		t.Fatalf("second profile = %q, want TVHTML5", profiles[1].Name)
+	}
+}

@@ -8,35 +8,16 @@
 
 ## Current Snapshot (Update Every Work Session)
 
-### Foundation
-
-- `[x]` Public package-first API skeleton exists (`client.New/GetVideo/GetFormats/ResolveStreamURL`)
-- `[x]` Build is green (`go test ./...`)
-- `[x]` PlayerJS fetch settings are externally configurable (base URL / UA / headers with fallback)
-- `[x]` Internal error -> public error mapping is wired with typed orchestrator errors
-- `[x]` Binary outputs excluded from VCS by default (`ytv1.exe` ignored and untracked)
-
-### Feature Completeness vs yt-dlp
-
-- `[-]` yt-dlp-level client matrix and priority behavior (baseline order + `mweb` + API key defaults wired)
-- `[-]` yt-dlp-level fallback policy by playability state (classification + phased fallback + reason-gated phase execution + mapping tests wired)
-- `[x]` Signature (`s`) decipher implementation (initial)
-- `[x]` `n` challenge solve for stream URLs (initial)
-- `[ ]` Manifest (`dash/hls`) `n` challenge handling
-- `[ ]` PO Token policy/flow implementation
-- `[x]` Stream URL resolver fully wired (initial path)
-
 ### Immediate Next Tasks (Execution Order)
 
-1. `[x]` Add `.gitignore` rule for `ytv1.exe` (and common build outputs).
-2. `[x]` Remove string-heuristic error mapping; introduce typed orchestration errors.
-3. `[x]` Carry `playerURL`/challenge context from orchestrator to `ResolveStreamURL`.
-4. `[x]` Implement real `playerjs.DecipherSignature` and `DecipherN` (initial version from legacy refs).
-5. `[x]` Wire `ResolveStreamURL` to use playerjs + challenge path instead of returning `ErrChallengeNotSolved`.
-6. `[-]` Expand selector/registry toward yt-dlp baseline clients and ordering (`ClientOverrides` wiring + baseline order expansion done; yt-dlp parity pending).
-7. `[x]` Add baseline unit tests for selector ordering/overrides and error mapping stability.
-8. `[x]` Add orchestrator phase-fallback test (primary -> embedded/tv fallback).
-9. `[x]` Add Innertube request context tests (android/embed/tv).
+1. `[ ]` Add `orchestrator` unit tests for mixed-failure matrix (HTTP error + playability + PO token failure) and expected public error mapping.
+2. `[ ]` Add `client.ResolveStreamURL` tests covering `s` only, `n` only, `s+n`, and malformed cipher query.
+3. `[ ]` Add manifest fetch integration path: consume rewritten `DashManifestURL`/`HLSManifestURL` with `internal/formats/dash.go` and `internal/formats/hls.go`.
+4. `[ ]` Improve PO token policy handling by protocol (`https`, `dash`, `hls`) and add protocol-specific tests.
+5. `[ ]` Strengthen `playerjs` decipher test fixtures with at least one realistic base.js sample snapshot.
+6. `[ ]` Add `client.GetVideo`/`GetFormats` package tests using mocked Innertube responses (OK, LOGIN_REQUIRED, UNPLAYABLE).
+7. `[ ]` Document public package usage for library consumers in `README.md` (config, error handling, stream URL resolution).
+8. `[ ]` Add a minimal regression checklist section to this plan for every YouTube breakage patch cycle.
 
 ## 1. Positioning
 

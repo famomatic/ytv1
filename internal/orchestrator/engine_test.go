@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -22,6 +23,19 @@ func (s selectorStub) Registry() innertube.Registry            { return innertub
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type poTokenProviderStub struct {
+	token   string
+	err     error
+	called  int32
+	clientID string
+}
+
+func (p *poTokenProviderStub) GetToken(_ context.Context, clientID string) (string, error) {
+	atomic.AddInt32(&p.called, 1)
+	p.clientID = clientID
+	return p.token, p.err
+}
 
 func TestEngineFallsBackToEmbeddedPhase(t *testing.T) {
 	android := innertube.AndroidClient
@@ -61,7 +75,7 @@ func TestEngineFallsBackToEmbeddedPhase(t *testing.T) {
 }
 
 func TestEngineSkipsFallbackOnHTTPFailureOnly(t *testing.T) {
-	android := innertube.AndroidClient
+	mweb := innertube.MWebClient
 	embedded := innertube.WebEmbeddedClient
 	var embeddedCalls int32
 
@@ -69,7 +83,7 @@ func TestEngineSkipsFallbackOnHTTPFailureOnly(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		payload := string(body)
 		switch {
-		case strings.Contains(payload, `"clientName":"ANDROID"`):
+		case strings.Contains(payload, `"clientName":"MWEB"`):
 			return &http.Response{
 				StatusCode: http.StatusInternalServerError,
 				Body:       io.NopCloser(bytes.NewBufferString(`server error`)),
@@ -92,7 +106,7 @@ func TestEngineSkipsFallbackOnHTTPFailureOnly(t *testing.T) {
 	})
 
 	engine := NewEngine(
-		selectorStub{clients: []innertube.ClientProfile{android, embedded}},
+		selectorStub{clients: []innertube.ClientProfile{mweb, embedded}},
 		innertube.Config{HTTPClient: &http.Client{Transport: tr}},
 	)
 
@@ -102,5 +116,102 @@ func TestEngineSkipsFallbackOnHTTPFailureOnly(t *testing.T) {
 	}
 	if atomic.LoadInt32(&embeddedCalls) != 0 {
 		t.Fatalf("embedded fallback should be skipped for non-playability failures")
+	}
+}
+
+func TestEngineInjectsPoTokenWhenProviderConfigured(t *testing.T) {
+	web := innertube.WebClient
+	provider := &poTokenProviderStub{token: "po-token-123"}
+	var sawPoToken int32
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		if strings.Contains(payload, `"poToken":"po-token-123"`) {
+			atomic.StoreInt32(&sawPoToken, 1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient:      &http.Client{Transport: tr},
+			PoTokenProvider: provider,
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&provider.called) == 0 {
+		t.Fatalf("expected PoTokenProvider to be called")
+	}
+	if provider.clientID != web.Name {
+		t.Fatalf("provider clientID = %q, want %q", provider.clientID, web.Name)
+	}
+	if atomic.LoadInt32(&sawPoToken) == 0 {
+		t.Fatalf("expected poToken in request payload")
+	}
+}
+
+func TestEngineReturnsPoTokenRequiredErrorWhenProviderMissing(t *testing.T) {
+	web := innertube.WebClient
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			t.Fatalf("http call should not happen when required po token is missing")
+			return nil, nil
+		})}},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var allErr *AllClientsFailedError
+	if !errors.As(err, &allErr) {
+		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	}
+	if len(allErr.Attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(allErr.Attempts))
+	}
+	var poErr *PoTokenRequiredError
+	if !errors.As(allErr.Attempts[0].Err, &poErr) {
+		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
+	}
+}
+
+func TestEngineReturnsPoTokenRequiredErrorWhenProviderFails(t *testing.T) {
+	web := innertube.WebClient
+	provider := &poTokenProviderStub{err: errors.New("provider down")}
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				t.Fatalf("http call should not happen when provider fails for required token")
+				return nil, nil
+			})},
+			PoTokenProvider: provider,
+		},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	var allErr *AllClientsFailedError
+	if !errors.As(err, &allErr) {
+		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	}
+	var poErr *PoTokenRequiredError
+	if !errors.As(allErr.Attempts[0].Err, &poErr) {
+		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
 	}
 }
