@@ -34,6 +34,8 @@ func filterFormatsByPoTokenPolicy(formats []FormatInfo, cfg Config) ([]FormatInf
 
 func protocolFromFormat(f FormatInfo) innertube.VideoStreamingProtocol {
 	switch strings.ToLower(strings.TrimSpace(f.Protocol)) {
+	case string(innertube.StreamingProtocolUnknown):
+		return innertube.StreamingProtocolUnknown
 	case string(innertube.StreamingProtocolDASH):
 		return innertube.StreamingProtocolDASH
 	case string(innertube.StreamingProtocolHLS):

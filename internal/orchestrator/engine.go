@@ -190,8 +190,11 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 	if e.config.PoTokenProvider == nil {
 		if len(requiredProtocols) > 0 {
 			return &PoTokenRequiredError{
-				Client: profile.Name,
-				Cause:  "provider missing (required by policy)",
+				Client:            profile.Name,
+				Cause:             "provider missing (required by policy)",
+				Policy:            innertube.PoTokenFetchPolicyRequired,
+				Protocols:         append([]innertube.VideoStreamingProtocol(nil), requiredProtocols...),
+				ProviderAvailable: false,
 			}
 		}
 		return nil
@@ -201,8 +204,11 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 	if err != nil {
 		if len(requiredProtocols) > 0 {
 			return &PoTokenRequiredError{
-				Client: profile.Name,
-				Cause:  "provider error: " + err.Error(),
+				Client:            profile.Name,
+				Cause:             "provider error: " + err.Error(),
+				Policy:            innertube.PoTokenFetchPolicyRequired,
+				Protocols:         append([]innertube.VideoStreamingProtocol(nil), requiredProtocols...),
+				ProviderAvailable: true,
 			}
 		}
 		return nil
@@ -210,13 +216,15 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 	if token == "" {
 		if len(requiredProtocols) > 0 {
 			return &PoTokenRequiredError{
-				Client: profile.Name,
-				Cause:  "empty token from provider",
+				Client:            profile.Name,
+				Cause:             "empty token from provider",
+				Policy:            innertube.PoTokenFetchPolicyRequired,
+				Protocols:         append([]innertube.VideoStreamingProtocol(nil), requiredProtocols...),
+				ProviderAvailable: true,
 			}
 		}
 		return nil
 	}
-
 	req.SetPoToken(token)
 	return nil
 }
@@ -400,13 +408,81 @@ func (e *Engine) fetchOnce(ctx context.Context, template *http.Request, profile 
 	}
 
 	if !playerResp.PlayabilityStatus.IsOK() && !playerResp.PlayabilityStatus.IsLive() {
+		detail := extractPlayabilityDetail(&playerResp)
 		return nil, &PlayabilityError{
 			Client: profile.Name,
 			Status: playerResp.PlayabilityStatus.Status,
 			Reason: playerResp.PlayabilityStatus.Reason,
+			Detail: detail,
 		}
 	}
 	return &playerResp, nil
+}
+
+func extractPlayabilityDetail(resp *innertube.PlayerResponse) PlayabilityDetail {
+	if resp == nil {
+		return PlayabilityDetail{}
+	}
+	status := strings.ToUpper(strings.TrimSpace(resp.PlayabilityStatus.Status))
+	reason := firstNonEmpty(
+		resp.PlayabilityStatus.Reason,
+		resp.PlayabilityStatus.Subreason,
+		errorScreenReason(resp.PlayabilityStatus.ErrorScreen),
+	)
+	subreason := firstNonEmpty(
+		resp.PlayabilityStatus.Subreason,
+		errorScreenSubreason(resp.PlayabilityStatus.ErrorScreen),
+	)
+	text := strings.ToUpper(strings.TrimSpace(status + " " + reason + " " + subreason))
+	countries := append([]string(nil), resp.Microformat.PlayerMicroformatRenderer.AvailableCountries...)
+	return PlayabilityDetail{
+		Subreason:          subreason,
+		AvailableCountries: countries,
+		GeoRestricted:      strings.Contains(text, "COUNTRY") || strings.Contains(text, "REGION") || strings.Contains(text, "LOCATION"),
+		LoginRequired:      strings.Contains(text, "LOGIN") || strings.Contains(text, "SIGN IN"),
+		AgeRestricted:      strings.Contains(text, "AGE"),
+		Unavailable:        strings.Contains(text, "UNAVAILABLE") || strings.Contains(text, "PRIVATE") || strings.Contains(text, "DELETED"),
+		DRMProtected:       strings.Contains(text, "DRM"),
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func errorScreenReason(es *innertube.ErrorScreen) string {
+	if es == nil || es.PlayerErrorMessageRenderer == nil {
+		return ""
+	}
+	return langTextToString(es.PlayerErrorMessageRenderer.Reason)
+}
+
+func errorScreenSubreason(es *innertube.ErrorScreen) string {
+	if es == nil || es.PlayerErrorMessageRenderer == nil {
+		return ""
+	}
+	return langTextToString(es.PlayerErrorMessageRenderer.Subreason)
+}
+
+func langTextToString(v innertube.LangText) string {
+	if strings.TrimSpace(v.SimpleText) != "" {
+		return strings.TrimSpace(v.SimpleText)
+	}
+	if len(v.Runs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(v.Runs))
+	for _, run := range v.Runs {
+		if text := strings.TrimSpace(run.Text); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
 type effectiveMetadataTransportConfig struct {

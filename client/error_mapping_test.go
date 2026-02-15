@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/famomatic/ytv1/internal/innertube"
 	"github.com/famomatic/ytv1/internal/orchestrator"
 )
 
@@ -41,6 +42,13 @@ func TestMapErrorAllClientsFailedUnavailable(t *testing.T) {
 	}
 	if got := mapError(err); !errors.Is(got, ErrUnavailable) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrUnavailable)
+	}
+	var detail *UnavailableDetailError
+	if !errors.As(mapError(err), &detail) {
+		t.Fatalf("mapError() should expose UnavailableDetailError")
+	}
+	if len(detail.Attempts) != 1 || !detail.Attempts[0].GeoRestricted {
+		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
 	}
 }
 
@@ -106,6 +114,12 @@ func TestMapErrorPoTokenRequiredFallsBackToAllClientsFailed(t *testing.T) {
 	err := &orchestrator.PoTokenRequiredError{
 		Client: "WEB",
 		Cause:  "provider not configured",
+		Policy: innertube.PoTokenFetchPolicyRequired,
+		Protocols: []innertube.VideoStreamingProtocol{
+			innertube.StreamingProtocolHTTPS,
+			innertube.StreamingProtocolDASH,
+		},
+		ProviderAvailable: false,
 	}
 	if got := mapError(err); !errors.Is(got, ErrAllClientsFailed) {
 		t.Fatalf("mapError() = %v, want %v", got, ErrAllClientsFailed)
@@ -116,5 +130,43 @@ func TestMapErrorPoTokenRequiredFallsBackToAllClientsFailed(t *testing.T) {
 	}
 	if len(detail.Attempts) != 1 || detail.Attempts[0].Stage != "pot" {
 		t.Fatalf("unexpected detail attempts: %+v", detail.Attempts)
+	}
+	if detail.Attempts[0].POTPolicy != string(innertube.PoTokenFetchPolicyRequired) {
+		t.Fatalf("unexpected pot policy: %+v", detail.Attempts[0])
+	}
+	if len(detail.Attempts[0].POTProtocols) != 2 {
+		t.Fatalf("unexpected pot protocols: %+v", detail.Attempts[0].POTProtocols)
+	}
+}
+
+func TestMapErrorPlayabilityTypedFieldsPropagated(t *testing.T) {
+	err := &orchestrator.PlayabilityError{
+		Client: "WEB",
+		Status: "UNPLAYABLE",
+		Reason: "Video unavailable",
+		Detail: orchestrator.PlayabilityDetail{
+			Subreason:          "DRM protected",
+			AvailableCountries: []string{"US", "KR"},
+			DRMProtected:       true,
+			Unavailable:        true,
+		},
+	}
+	got := mapError(err)
+	if !errors.Is(got, ErrUnavailable) {
+		t.Fatalf("mapError() = %v, want %v", got, ErrUnavailable)
+	}
+	var detail *UnavailableDetailError
+	if !errors.As(got, &detail) {
+		t.Fatalf("mapError() should expose UnavailableDetailError")
+	}
+	if len(detail.Attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(detail.Attempts))
+	}
+	attempt := detail.Attempts[0]
+	if !attempt.DRMProtected || attempt.PlayabilitySubreason != "DRM protected" {
+		t.Fatalf("expected drm detail, got %+v", attempt)
+	}
+	if len(attempt.AvailableCountries) != 2 {
+		t.Fatalf("available countries count = %d, want 2", len(attempt.AvailableCountries))
 	}
 }

@@ -129,4 +129,29 @@ func TestParse_MissingAndInvalidFields(t *testing.T) {
 	if !f.HasAudio || f.HasVideo {
 		t.Fatalf("expected audio-only flags from mime+codec: hasAudio=%v hasVideo=%v", f.HasAudio, f.HasVideo)
 	}
+	if f.Protocol != "https" {
+		t.Fatalf("expected protocol from cipher url, got=%q", f.Protocol)
+	}
+}
+
+func TestParse_UnknownProtocolWhenURLSignalsMissing(t *testing.T) {
+	resp := &innertube.PlayerResponse{
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{
+				{
+					Itag:            249,
+					MimeType:        `audio/webm; codecs="opus"`,
+					SignatureCipher: "s=encrypted&sp=sig",
+				},
+			},
+		},
+	}
+
+	out := Parse(resp)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(out))
+	}
+	if out[0].Protocol != "unknown" {
+		t.Fatalf("expected unknown protocol, got=%q", out[0].Protocol)
+	}
 }

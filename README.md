@@ -4,7 +4,6 @@ Go-native YouTube extractor rewrite.
 
 ## Repo layout
 
-- `legacy/kkdai-youtube`: original kkdai/youtube snapshot for reference
 - `internal/*`: new extractor core
 - `cmd/ytv1`: executable entrypoint
 
@@ -49,10 +48,14 @@ func main() {
 `client.Config` 주요 필드:
 
 - `HTTPClient`: 사용자 정의 HTTP 클라이언트
-- `ProxyURL`: 프록시 URL
+- `ProxyURL`: 프록시 URL (`HTTPClient` 미지정 시 기본 클라이언트에 적용)
 - `PoTokenProvider`: PO token 공급자
+- `PoTokenFetchPolicy`: 프로토콜별 POT 정책(`required|recommended|never`)
 - `ClientOverrides`: Innertube 클라이언트 시도 순서 강제
 - `PlayerJSBaseURL` / `PlayerJSUserAgent` / `PlayerJSHeaders`: Player JS fetch 동작 제어
+- `Logger`: 비치명 경고 로깅 훅(`Warnf`)
+- `SessionCacheTTL` / `SessionCacheMaxEntries`: 세션 캐시 TTL/LRU 경계
+- `SubtitlePolicy`: 기본 자막 선택 정책(선호 언어/폴백/자동생성 선호)
 
 ### Public API
 
@@ -62,6 +65,10 @@ func main() {
 - `FetchDASHManifest(ctx, input)`: DASH manifest 원문 fetch
 - `FetchHLSManifest(ctx, input)`: HLS manifest 원문 fetch
 - `Download(ctx, input, options)`: 선택한 스트림을 파일로 다운로드
+- `OpenStream(ctx, input, options)`: 파일 저장 없이 `io.ReadCloser` 스트림 오픈
+- `OpenFormatStream(ctx, input, itag)`: 특정 itag 스트림 오픈
+- `GetSubtitleTracks(ctx, input)`: 자막 트랙 메타데이터 조회
+- `GetTranscript(ctx, input, languageCode)`: transcript 파싱 결과 조회
 
 ### Error Handling
 
@@ -73,16 +80,19 @@ func main() {
 - `client.ErrNoPlayableFormats`
 - `client.ErrChallengeNotSolved`
 - `client.ErrAllClientsFailed`
+- `client.ErrTranscriptParse`
 
 예시:
 
 ```go
 if err != nil {
-	switch err {
-	case client.ErrLoginRequired:
+	switch {
+	case errors.Is(err, client.ErrLoginRequired):
 		// 인증 필요
-	case client.ErrUnavailable:
+	case errors.Is(err, client.ErrUnavailable):
 		// 영상 비공개/차단/삭제 등
+	case errors.Is(err, client.ErrTranscriptParse):
+		// transcript 파싱 실패
 	default:
 		// 기타
 	}

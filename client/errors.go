@@ -17,6 +17,8 @@ var (
 	ErrAllClientsFailed = errors.New("all clients failed")
 	// ErrMP3TranscoderNotConfigured indicates mp3 mode was requested without a transcoder.
 	ErrMP3TranscoderNotConfigured = errors.New("mp3 transcoder not configured")
+	// ErrTranscriptParse indicates transcript payload could not be parsed.
+	ErrTranscriptParse = errors.New("transcript parse failed")
 )
 
 // InvalidInputDetailError preserves ErrInvalidInput while exposing parsing reason/context.
@@ -69,12 +71,23 @@ func (e *NoPlayableFormatsDetailError) Is(target error) bool {
 
 // AttemptDetail captures a single client attempt in the fallback matrix.
 type AttemptDetail struct {
-	Client       string
-	Stage        string
-	Reason       string
-	HTTPStatus   int
-	POTRequired  bool
-	POTAvailable bool
+	Client               string
+	Stage                string
+	Reason               string
+	HTTPStatus           int
+	POTRequired          bool
+	POTAvailable         bool
+	POTPolicy            string
+	POTProtocols         []string
+	PlayabilityStatus    string
+	PlayabilityReason    string
+	PlayabilitySubreason string
+	GeoRestricted        bool
+	LoginRequired        bool
+	AgeRestricted        bool
+	Unavailable          bool
+	DRMProtected         bool
+	AvailableCountries   []string
 }
 
 // AllClientsFailedDetailError preserves ErrAllClientsFailed while exposing attempt details.
@@ -114,6 +127,36 @@ func (e *UnavailableDetailError) Error() string {
 
 func (e *UnavailableDetailError) Is(target error) bool {
 	return target == ErrUnavailable
+}
+
+// TranscriptUnavailableDetailError preserves ErrUnavailable with transcript context.
+type TranscriptUnavailableDetailError struct {
+	VideoID      string
+	LanguageCode string
+	Reason       string
+}
+
+func (e *TranscriptUnavailableDetailError) Error() string {
+	return "transcript unavailable: " + e.Reason
+}
+
+func (e *TranscriptUnavailableDetailError) Is(target error) bool {
+	return target == ErrUnavailable
+}
+
+// TranscriptParseDetailError preserves ErrTranscriptParse with payload context.
+type TranscriptParseDetailError struct {
+	VideoID      string
+	LanguageCode string
+	Reason       string
+}
+
+func (e *TranscriptParseDetailError) Error() string {
+	return "transcript parse failed: " + e.Reason
+}
+
+func (e *TranscriptParseDetailError) Is(target error) bool {
+	return target == ErrTranscriptParse
 }
 
 // AttemptDetails extracts attempt matrix details from typed package errors.

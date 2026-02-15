@@ -10,18 +10,18 @@ type PlayerResponse struct {
 }
 
 type BrowseResponse struct {
-	Contents                    Contents                    `json:"contents"`
-	OnResponseReceivedActions   []OnResponseReceivedAction  `json:"onResponseReceivedActions"`
+	Contents                    Contents                     `json:"contents"`
+	OnResponseReceivedActions   []OnResponseReceivedAction   `json:"onResponseReceivedActions"`
 	OnResponseReceivedEndpoints []OnResponseReceivedEndpoint `json:"onResponseReceivedEndpoints"`
 }
 
 type OnResponseReceivedAction struct {
-	AppendContinuationItemsAction *AppendContinuationItemsAction `json:"appendContinuationItemsAction"`
+	AppendContinuationItemsAction  *AppendContinuationItemsAction  `json:"appendContinuationItemsAction"`
 	ReloadContinuationItemsCommand *ReloadContinuationItemsCommand `json:"reloadContinuationItemsCommand"`
 }
 
 type OnResponseReceivedEndpoint struct {
-	AppendContinuationItemsAction *AppendContinuationItemsAction `json:"appendContinuationItemsAction"`
+	AppendContinuationItemsAction  *AppendContinuationItemsAction  `json:"appendContinuationItemsAction"`
 	ReloadContinuationItemsCommand *ReloadContinuationItemsCommand `json:"reloadContinuationItemsCommand"`
 }
 
@@ -58,7 +58,7 @@ type SectionListRenderer struct {
 }
 
 type SectionListContent struct {
-	ItemSectionRenderer *ItemSectionRenderer `json:"itemSectionRenderer"`
+	ItemSectionRenderer      *ItemSectionRenderer      `json:"itemSectionRenderer"`
 	ContinuationItemRenderer *ContinuationItemRenderer `json:"continuationItemRenderer"`
 }
 
@@ -88,17 +88,19 @@ type ContinuationCommand struct {
 }
 
 type PlaylistVideoRenderer struct {
-	VideoID    string     `json:"videoId"`
-	Title      LangText   `json:"title"`
+	VideoID         string   `json:"videoId"`
+	Title           LangText `json:"title"`
 	ShortBylineText LangText `json:"shortBylineText"`
-	LengthText LangText   `json:"lengthText"`
+	LengthText      LangText `json:"lengthText"`
 }
 
 type PlayabilityStatus struct {
 	Status            string             `json:"status"`
 	Reason            string             `json:"reason"`
+	Subreason         string             `json:"subreason"`
 	PlayableInEmbed   bool               `json:"playableInEmbed"`
 	LiveStreamability *LiveStreamability `json:"liveStreamability"`
+	ErrorScreen       *ErrorScreen       `json:"errorScreen"`
 }
 
 func (p *PlayabilityStatus) IsOK() bool {
@@ -116,6 +118,15 @@ type LiveStreamability struct {
 type LiveStreamabilityRenderer struct {
 	VideoId     string `json:"videoId"`
 	PollDelayMs string `json:"pollDelayMs"`
+}
+
+type ErrorScreen struct {
+	PlayerErrorMessageRenderer *PlayerErrorMessageRenderer `json:"playerErrorMessageRenderer"`
+}
+
+type PlayerErrorMessageRenderer struct {
+	Reason    LangText `json:"reason"`
+	Subreason LangText `json:"subreason"`
 }
 
 type StreamingData struct {

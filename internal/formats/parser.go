@@ -33,7 +33,7 @@ type Format struct {
 	ProjectionType   string
 	AverageBitrate   int
 	ThisIsLive       bool
-	Protocol         string // "https", "dash", "hls"
+	Protocol         string // "https", "dash", "hls", "unknown"
 	HasAudio         bool
 	HasVideo         bool
 	Ciphered         bool
@@ -76,7 +76,7 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 				ProjectionType:   f.ProjectionType,
 				AverageBitrate:   f.AverageBitrate,
 				ThisIsLive:       isLive,
-				Protocol:         normalizeProtocol(f.URL),
+				Protocol:         deriveProtocol(f),
 				SignatureCipher:  f.SignatureCipher,
 				Cipher:           f.Cipher,
 				AudioSampleRate:  parseInt(f.AudioSampleRate),
@@ -182,14 +182,35 @@ func deriveMediaFlags(f Format, adaptive bool) (hasAudio bool, hasVideo bool) {
 	return hasAudio, hasVideo
 }
 
+func deriveProtocol(raw innertube.Format) string {
+	if p := normalizeProtocol(raw.URL); p != "unknown" {
+		return p
+	}
+
+	cipher := raw.SignatureCipher
+	if cipher == "" {
+		cipher = raw.Cipher
+	}
+	if cipher == "" {
+		return "unknown"
+	}
+
+	params, err := url.ParseQuery(cipher)
+	if err != nil {
+		return "unknown"
+	}
+
+	return normalizeProtocol(params.Get("url"))
+}
+
 func normalizeProtocol(rawURL string) string {
 	if rawURL == "" {
-		return "https"
+		return "unknown"
 	}
 
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "https"
+		return "unknown"
 	}
 
 	switch strings.ToLower(u.Scheme) {
@@ -200,6 +221,6 @@ func normalizeProtocol(rawURL string) string {
 	case "hls":
 		return "hls"
 	default:
-		return "https"
+		return "unknown"
 	}
 }

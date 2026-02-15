@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -11,6 +13,14 @@ import (
 
 	"github.com/famomatic/ytv1/internal/innertube"
 )
+
+type testLogger struct {
+	warnings []string
+}
+
+func (l *testLogger) Warnf(format string, args ...any) {
+	l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
+}
 
 func TestGetSubtitleTracks(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
@@ -131,6 +141,9 @@ func TestGetPlaylist(t *testing.T) {
 	if len(got.Items) != 2 {
 		t.Fatalf("items len=%d, want 2", len(got.Items))
 	}
+	if got.Items[0].DurationSec != 60 || got.Items[1].DurationSec != 120 {
+		t.Fatalf("unexpected parsed duration seconds: %+v", got.Items)
+	}
 }
 
 func TestGetPlaylist_ContinuationSkipsInvalidToken(t *testing.T) {
@@ -231,6 +244,74 @@ func TestGetPlaylist_ContinuationSkipsInvalidToken(t *testing.T) {
 	}
 }
 
+func TestGetPlaylist_ContinuationErrorUsesLogger(t *testing.T) {
+	html := `<html><script>var ytInitialData = {"responseContext":{"visitorData":"visitor"},"metadata":{"playlistMetadataRenderer":{"title":"My Playlist"}},"contents":[{"playlistVideoRenderer":{"videoId":"aaaaaaaaaaa","title":{"simpleText":"one"},"shortBylineText":{"runs":[{"text":"author1"}]},"lengthText":{"simpleText":"1:00"}}},{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"bad-token"}}}},{"continuationItemRenderer":{"continuationEndpoint":{"continuationCommand":{"token":"good-token"}}}}]};</script></html>`
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && r.URL.Path == "/playlist" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(html)),
+				}, nil
+			}
+			if r.Method == http.MethodPost && r.URL.Path == "/youtubei/v1/browse" {
+				var reqBody struct {
+					Continuation string `json:"continuation"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+					t.Fatalf("decode browse request: %v", err)
+				}
+				switch reqBody.Continuation {
+				case "bad-token":
+					return &http.Response{
+						StatusCode: http.StatusInternalServerError,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(bytes.NewBufferString(`internal`)),
+					}, nil
+				case "good-token":
+					return jsonResponse(t, map[string]any{
+						"onResponseReceivedActions": []any{
+							map[string]any{
+								"appendContinuationItemsAction": map[string]any{
+									"continuationItems": []any{
+										map[string]any{
+											"playlistVideoRenderer": map[string]any{
+												"videoId":         "bbbbbbbbbbb",
+												"title":           map[string]any{"simpleText": "two"},
+												"shortBylineText": map[string]any{"runs": []any{map[string]any{"text": "author2"}}},
+												"lengthText":      map[string]any{"simpleText": "2:00"},
+											},
+										},
+									},
+								},
+							},
+						},
+					}), nil
+				}
+			}
+			t.Fatalf("unexpected request: %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+	logger := &testLogger{}
+	c := &Client{
+		config:   Config{HTTPClient: httpClient},
+		logger:   logger,
+		sessions: map[string]videoSession{},
+	}
+	got, err := c.GetPlaylist(context.Background(), "https://www.youtube.com/playlist?list=PL1234567890")
+	if err != nil {
+		t.Fatalf("GetPlaylist() error = %v", err)
+	}
+	if len(got.Items) != 2 {
+		t.Fatalf("items len=%d, want 2", len(got.Items))
+	}
+	if len(logger.warnings) == 0 {
+		t.Fatalf("expected continuation warning to be logged")
+	}
+}
+
 func TestExtractPlaylistID(t *testing.T) {
 	id, err := ExtractPlaylistID("https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PLabc123")
 	if err != nil {
@@ -260,8 +341,14 @@ func TestFindContinuationTokens_Variants(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("tokens len=%d, want 3 (got=%v)", len(got), got)
 	}
-	if got[0] != "tok-a" || got[1] != "tok-b" || got[2] != "tok-c" {
-		t.Fatalf("unexpected token order: %v", got)
+	seen := map[string]struct{}{}
+	for _, token := range got {
+		seen[token] = struct{}{}
+	}
+	for _, want := range []string{"tok-a", "tok-b", "tok-c"} {
+		if _, ok := seen[want]; !ok {
+			t.Fatalf("missing token %q in %v", want, got)
+		}
 	}
 }
 
@@ -275,5 +362,125 @@ func jsonResponse(t *testing.T, payload any) *http.Response {
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(bytes.NewReader(raw)),
+	}
+}
+
+func TestParseDurationTextSeconds(t *testing.T) {
+	tests := []struct {
+		text string
+		want int64
+	}{
+		{text: "1:00", want: 60},
+		{text: "02:03", want: 123},
+		{text: "1:02:03", want: 3723},
+		{text: "", want: 0},
+		{text: "abc", want: 0},
+	}
+	for _, tt := range tests {
+		if got := parseDurationTextSeconds(tt.text); got != tt.want {
+			t.Fatalf("parseDurationTextSeconds(%q) = %d, want %d", tt.text, got, tt.want)
+		}
+	}
+}
+
+func TestChooseSubtitleTrack_PolicyPrefersManualFallback(t *testing.T) {
+	tracks := []SubtitleTrack{
+		{LanguageCode: "ko", Name: "Korean (auto)", AutoGenerated: true},
+		{LanguageCode: "en", Name: "English", AutoGenerated: false},
+		{LanguageCode: "ko", Name: "Korean", AutoGenerated: false},
+	}
+	track, ok := chooseSubtitleTrack(tracks, "", SubtitlePolicy{
+		PreferredLanguageCode: "ko",
+		PreferAutoGenerated:   false,
+	})
+	if !ok {
+		t.Fatalf("expected subtitle track")
+	}
+	if track.Name != "Korean" {
+		t.Fatalf("selected track = %q, want Korean", track.Name)
+	}
+}
+
+func TestGetTranscript_UnavailableTypedError(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasPrefix(r.URL.Host, "caption.local") {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`missing`)),
+				}, nil
+			}
+			t.Fatalf("unexpected request: %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+	c := &Client{
+		config: Config{HTTPClient: httpClient},
+		sessions: map[string]videoSession{
+			videoID: {
+				Response: &innertube.PlayerResponse{
+					VideoDetails: innertube.VideoDetails{VideoID: videoID},
+					Captions: innertube.Captions{
+						PlayerCaptionsTracklistRenderer: innertube.PlayerCaptionsTracklistRenderer{
+							CaptionTracks: []innertube.CaptionTrack{
+								{BaseURL: "https://caption.local/api?lang=en", LanguageCode: "en", Name: innertube.LangText{SimpleText: "English"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := c.GetTranscript(context.Background(), videoID, "en")
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+	var detail *TranscriptUnavailableDetailError
+	if !errors.As(err, &detail) {
+		t.Fatalf("expected TranscriptUnavailableDetailError")
+	}
+}
+
+func TestGetTranscript_ParseTypedError(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasPrefix(r.URL.Host, "caption.local") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`<bad xml>`)),
+				}, nil
+			}
+			t.Fatalf("unexpected request: %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+	c := &Client{
+		config: Config{HTTPClient: httpClient},
+		sessions: map[string]videoSession{
+			videoID: {
+				Response: &innertube.PlayerResponse{
+					VideoDetails: innertube.VideoDetails{VideoID: videoID},
+					Captions: innertube.Captions{
+						PlayerCaptionsTracklistRenderer: innertube.PlayerCaptionsTracklistRenderer{
+							CaptionTracks: []innertube.CaptionTrack{
+								{BaseURL: "https://caption.local/api?lang=en", LanguageCode: "en", Name: innertube.LangText{SimpleText: "English"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := c.GetTranscript(context.Background(), videoID, "en")
+	if !errors.Is(err, ErrTranscriptParse) {
+		t.Fatalf("error = %v, want ErrTranscriptParse", err)
+	}
+	var detail *TranscriptParseDetailError
+	if !errors.As(err, &detail) {
+		t.Fatalf("expected TranscriptParseDetailError")
 	}
 }

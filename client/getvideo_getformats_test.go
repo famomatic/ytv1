@@ -49,7 +49,24 @@ func newMockClientForPlayerJSON(t *testing.T, playerJSON string) *Client {
 func TestGetVideoOK(t *testing.T) {
 	c := newMockClientForPlayerJSON(t, `{
 		"playabilityStatus":{"status":"OK"},
-		"videoDetails":{"videoId":"jNQXAC9IVRw","title":"Me at the zoo","author":"jawed"},
+		"videoDetails":{
+			"videoId":"jNQXAC9IVRw",
+			"title":"Me at the zoo",
+			"author":"jawed",
+			"shortDescription":"hello world",
+			"lengthSeconds":"19",
+			"viewCount":"12345",
+			"channelId":"UC4QobU6STFB0P71PMvOGN5A",
+			"isLiveContent":false,
+			"keywords":["zoo","classic"]
+		},
+		"microformat":{
+			"playerMicroformatRenderer":{
+				"publishDate":"2005-04-23",
+				"uploadDate":"2005-04-23",
+				"category":"Pets & Animals"
+			}
+		},
 		"streamingData":{"formats":[{"itag":18,"url":"https://example.com/v.mp4","mimeType":"video/mp4","bitrate":1000}]}
 	}`)
 
@@ -62,6 +79,27 @@ func TestGetVideoOK(t *testing.T) {
 	}
 	if len(info.Formats) != 1 {
 		t.Fatalf("formats len = %d, want 1", len(info.Formats))
+	}
+	if info.Description != "hello world" {
+		t.Fatalf("description = %q", info.Description)
+	}
+	if info.DurationSec != 19 {
+		t.Fatalf("duration = %d, want 19", info.DurationSec)
+	}
+	if info.ViewCount != 12345 {
+		t.Fatalf("view count = %d, want 12345", info.ViewCount)
+	}
+	if info.ChannelID != "UC4QobU6STFB0P71PMvOGN5A" {
+		t.Fatalf("channel id = %q", info.ChannelID)
+	}
+	if info.PublishDate != "2005-04-23" || info.UploadDate != "2005-04-23" {
+		t.Fatalf("unexpected dates: publish=%q upload=%q", info.PublishDate, info.UploadDate)
+	}
+	if info.Category != "Pets & Animals" {
+		t.Fatalf("category = %q", info.Category)
+	}
+	if len(info.Keywords) != 2 {
+		t.Fatalf("keywords len = %d, want 2", len(info.Keywords))
 	}
 }
 

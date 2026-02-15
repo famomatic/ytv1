@@ -43,3 +43,22 @@ func TestDownload_NoPlayableFormatsDetailErrorForPoTokenDrops(t *testing.T) {
 		t.Fatalf("expected one skip reason")
 	}
 }
+
+func TestFilterFormatsByPoTokenPolicy_UnknownProtocolNotForcedToHTTPS(t *testing.T) {
+	formats := []FormatInfo{
+		{Itag: 18, Protocol: "unknown", HasAudio: true, HasVideo: true},
+	}
+	cfg := Config{
+		PoTokenFetchPolicy: map[innertube.VideoStreamingProtocol]innertube.PoTokenFetchPolicy{
+			innertube.StreamingProtocolHTTPS: innertube.PoTokenFetchPolicyRequired,
+		},
+	}
+
+	kept, skips := filterFormatsByPoTokenPolicy(formats, cfg)
+	if len(skips) != 0 {
+		t.Fatalf("unexpected skips for unknown protocol: %+v", skips)
+	}
+	if len(kept) != 1 || kept[0].Itag != 18 {
+		t.Fatalf("unexpected kept formats: %+v", kept)
+	}
+}

@@ -6,6 +6,7 @@ import "net/http"
 type VideoStreamingProtocol string
 
 const (
+	StreamingProtocolUnknown VideoStreamingProtocol = "unknown"
 	StreamingProtocolHTTPS VideoStreamingProtocol = "https"
 	StreamingProtocolDASH  VideoStreamingProtocol = "dash"
 	StreamingProtocolHLS   VideoStreamingProtocol = "hls"

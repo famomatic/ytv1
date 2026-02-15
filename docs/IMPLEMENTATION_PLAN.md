@@ -1,301 +1,398 @@
-# ytv1 Implementation Plan (Package-First)
+# ytv1 Implementation Plan (Package-First, Detailed)
 
 ## Status Legend
 
 - `[x]` done
 - `[-]` in progress
 - `[ ]` pending
+- `[!]` blocked
 
-## Current Snapshot (Update Every Work Session)
+---
 
-### Immediate Next Tasks (Execution Order)
+## 0. Planning Rules (Authoritative)
 
-1. `[x]` Rebuild format parser normalization (`internal/formats/parser.go`) from Innertube field matrix:
-   - Parse fps/quality/protocol/container/codec/audio-channel metadata deterministically.
-   - Preserve decipher-required fields explicitly (`Ciphered`, raw cipher params) instead of "assume URL".
-   - Add fixture tests for mixed `formats/adaptiveFormats`, missing fields, live/offline variants.
-2. `[x]` Replace "best first" download selection with explicit selection policy:
-   - Add package mode enum: `Best`, `MP4AV`, `MP4VideoOnly`, `AudioOnly`, `MP3`.
-   - Build deterministic selector (container, hasAudio/hasVideo, bitrate/resolution tie-breakers).
-   - Keep `itag` override as highest priority.
-3. `[x]` Implement MP3 pipeline as optional transcode layer:
-   - Add `Transcoder` interface in package config (default nil).
-   - If mode=`MP3` and no transcoder configured, return typed error.
-   - Stream download -> transcode to output writer/path (no temp shell command hard dependency in core).
-4. `[x]` Refactor PO token handling to yt-dlp-like per-protocol/per-format decision:
-   - Evaluate POT requirement at stream-protocol stage (HTTPS/DASH/HLS), not only request stage.
-   - Add provider fetch policy hooks: required/recommended/never.
-   - Emit structured skip reasons when formats are dropped due to missing POT.
-5. `[x]` Expand package error contract from coarse sentinels to typed detail errors:
-   - Add attempt matrix payload (client, stage, status, reason, http code, pot requirement).
-   - Keep sentinel compatibility via `errors.Is`, expose rich detail via `errors.As`.
-6. `[x]` Add resilient download transport features (package-level):
-   - Range-based chunk download with bounded concurrency and context cancellation.
-   - Retry/backoff for transient HTTP/network failures.
-   - Optional resume support when output exists.
-7. `[x]` Add package APIs for playlist/transcript/subtitle extraction:
-   - `GetPlaylist`, `GetTranscript`, subtitle track listing/fetch.
-   - Reuse Innertube context/policy stack (no CLI-only logic).
-8. `[x]` Expand client config surface to match package use-cases:
-   - Per-request headers, retry policy, timeout strategy, client skip/priority policy, POT strategy, selector knobs.
-   - No hidden hardcoded defaults without override path.
-9. `[x]` Strengthen playerjs robustness and regression strategy:
-   - Add real `base.js` fixture rotation workflow and parser fallback patterns.
-   - Add CI tests for signature/n-function extraction across multiple captured player revisions.
-10. `[x]` Harden input normalization:
-   - Support broader YouTube URL families and query combinations.
-   - Keep strict invalid-input typed errors with exact reason.
-11. `[x]` Keep explicit override investigation open:
-   - Reproduce `-clients android_vr,web,web_safari` -> `login required`.
-   - Capture per-client attempt diagnostics and decide fallback insertion policy for override mode.
-12. `[x]` Harden playlist continuation token selection:
-   - Avoid stopping at 100 items when non-playlist continuation tokens are present.
-   - Follow valid continuation chain(s) until exhausted.
-   - Add regression test for mixed valid/invalid continuation tokens.
+1. This document is the single source of truth for execution order.
+2. Do not start a task not listed here unless explicitly requested by user.
+3. Before substantial coding:
+   - mark current task as `[-]`
+   - ensure all prior tasks in order are `[x]` or `[!]`
+4. After substantial coding:
+   - mark completed tasks `[x]`
+   - update `Current Snapshot`
+   - append newly discovered tasks under `Immediate Next Tasks`
+5. Keep package API stable unless a dedicated task here explicitly allows breaking changes.
+6. CLI must remain adapter-only; extraction logic belongs in `client`/`internal`.
+7. Each task is merge-ready only if:
+   - `go test ./...` passes
+   - behavior is covered by tests or TODO with explicit reason
+   - no hidden hardcoded runtime behavior without config override
 
-### Implementation Logic (Gap Closure)
+---
 
-1. Format Parser Logic
-   - Move all field extraction to a single normalization table keyed by raw Innertube keys.
-   - Derive `HasAudio/HasVideo` from codec/channel/dimension signals instead of one-field heuristics.
-   - Normalize protocol source:
-     - direct URL => `https`
-     - dash manifest entry => `dash`
-     - hls manifest entry => `hls`
-   - Keep unresolved/ciphered entries in output with explicit flags; never silently drop.
+## 1. Current Snapshot (Update Every Session)
 
-2. Selection Logic
-   - Introduce ranking pipeline:
-     - filter by mode constraints
-     - hard filters: cipher solvable, protocol allowed, container allowed
-     - score by quality/bitrate/fps/audio presence depending on mode
-   - Return `ErrNoPlayableFormats` with mode-specific reason if filtered to zero.
+### 1.1 Session Date
+- `2026-02-16`
 
-3. Download/Transcode Logic
-   - Core downloader returns stream reader abstraction + metadata.
-   - Output writer layer handles file/path concerns.
-   - MP3 mode delegates to configured transcoder:
-     - input: audio stream + source mime/container
-     - output: encoded mp3 bytes to destination
-   - Keep transcoder pluggable to avoid mandatory external binary dependency.
+### 1.2 Verified Baseline
+- `go test ./...` is green at session start.
+- Existing major phases are marked done in previous plan, but behavior-gap audit identified remaining functional/quality debt.
 
-4. PO Token Logic
-   - Separate "request POT" and "stream POT" policy checks.
-   - Track POT state per client/protocol in attempt context.
-   - On missing recommended POT: keep format but mark warning.
-   - On missing required POT: skip format, continue other candidates.
+### 1.3 Immediate Next Tasks (Strict Execution Order)
 
-5. Error Mapping Logic
-   - Add internal error taxonomy:
-     - request failure, playability failure, pot-gated skip, decipher failure, transport failure
-   - Public mapping:
-     - sentinel error for compatibility
-     - attach typed detail struct for diagnostics and callers.
+1. `[x]` Rebuild plan and gap-driven execution queue (this task)
+2. `[x]` Fix direct URL `n` decipher bypass in `ResolveStreamURL`
+3. `[x]` Refine format protocol normalization to avoid false `https` fallback for manifest/cipher cases
+4. `[x]` Implement manifest expansion layer (DASH/HLS parse -> normalized `FormatInfo` candidates)
+5. `[x]` Add typed geo/DRM/playability detail model and map from Innertube responses
+6. `[x]` Strengthen PO token decision matrix (client+protocol+required/recommended context)
+7. `[x]` Remove package-side stdout logging and route through optional logger interface
+8. `[x]` Activate `ProxyURL` end-to-end or remove field (choose one and document)
+9. `[x]` Add bounded session cache strategy (TTL/LRU + config knobs)
+10. `[x]` Expand public metadata surface (`Description`, `DurationSec`, `ViewCount`, etc.)
+11. `[x]` Normalize playlist item duration type and semantics
+12. `[x]` Add stream-first package API (`OpenStream`/`OpenFormatStream`) for non-file consumers
+13. `[x]` Expand subtitles/transcript capability (track preference, fallback policy, richer metadata)
+14. `[x]` Add regression fixtures/tests for new branches (n-decipher, manifest parse, playability matrix)
+15. `[x]` Update README/API docs/examples for all changed behavior
+16. `[-]` Playlist continuation robustness v2 with typed diagnostics and loop guards
 
-6. Test Logic
-   - Add table tests for selector modes and tie-break rules.
-   - Add integration-like tests with recorded player responses covering:
-     - progressive-only
-     - adaptive-only
-     - cipher-required
-     - login-required fallback
-   - Add download tests for:
-     - chunk retries
-     - cancel propagation
-     - resume path
-     - mp3 missing-transcoder error.
+### 1.4 Known Risk Flags
 
-## 1. Positioning
+- Remaining debt is primarily deeper yt-dlp parity work (auth/cookies/live-chat/live edge cases).
 
-- `ytv1` is a Go library first.
-- CLI (`cmd/ytv1`) is only a thin adapter for manual smoke tests.
-- Success criteria are package-level API behavior and testability, not executable behavior.
+---
 
-## 2. Primary Deliverable
+## 2. Mission and Scope
 
-Provide a stable public package API:
+## 2.1 Mission
 
-- `client.New(config)`
-- `client.GetVideo(ctx, input)`
-- `client.GetFormats(ctx, input)`
-- `client.ResolveStreamURL(ctx, videoID, itag)`
+`ytv1` is a Go-native YouTube extraction library with package API as product.
 
-CLI is explicitly non-authoritative. If CLI works but package API is unstable, milestone is considered failed.
+## 2.2 Functional Scope (v1)
+
+Public API (must remain stable unless scheduled task says otherwise):
+
+1. `client.New(config)`
+2. `client.GetVideo(ctx, input)`
+3. `client.GetFormats(ctx, input)`
+4. `client.ResolveStreamURL(ctx, videoID, itag)`
+
+Additional package APIs currently in scope:
+
+1. `GetPlaylist`
+2. `GetTranscript`
+3. Subtitle track listing/fetch
+4. Download and transcode pathways
+
+## 2.3 Out of Scope (until explicitly added)
+
+- Full yt-dlp feature parity across every extractor flag.
+- Account-login emulation/cookie automation beyond documented config surface.
+- CLI-first feature additions.
+
+---
 
 ## 3. References and Porting Policy
 
-### 3.1 Source references
+Behavior references:
 
-- `legacy/kkdai-youtube`: transport/parsing reference only.
-- `d:/yt-dlp/yt_dlp/extractor/youtube`: extraction strategy reference.
+1. `legacy/kkdai-youtube`
+2. `D:/yt-dlp/yt_dlp/extractor/youtube`
 
-### 3.2 Porting rule
+Porting rule:
 
-- Port behavior, not structure.
-- No Python-style state flow in public package API.
-- Keep runtime dependencies pure Go.
+1. Port behavior, not source structure.
+2. Keep implementation idiomatic Go.
+3. Avoid hard dependency on Python runtime.
 
-## 4. Package Architecture
+---
 
-- `client` (public)
-  - public API, options, error contracts
-- `internal/orchestrator`
-  - client fallback orchestration
-- `internal/innertube`
-  - client registry, request builders, response types
-- `internal/policy`
-  - candidate client selection logic
-- `internal/playerjs`
-  - player JS fetch/cache + decipher helpers
-- `internal/formats`
-  - streamingData parsing + normalization
-- `internal/challenge`
-  - `s` / `n` challenge solve interfaces
-- `internal/httpx`
-  - shared HTTP abstraction
+## 4. Architecture Contract
 
-## 5. Public API Contract (v1)
+## 4.1 Public Layer
 
-### 5.1 Config
+- `client/*`: API, config, errors, orchestration wiring
 
-- `HTTPClient *http.Client`
-- `Logger` (optional)
-- `PoTokenProvider` (optional interface, no hard dependency)
-- `ClientOverrides []string` (optional, for debug/testing)
+## 4.2 Internal Layers
 
-### 5.2 Data contract
+- `internal/innertube`: request/response/client profiles
+- `internal/policy`: client selection order/skip/override
+- `internal/orchestrator`: request race/fallback/retry/error mapping
+- `internal/formats`: normalization + manifest expansion
+- `internal/playerjs`: player URL/js fetch/cache + decipher
+- `internal/challenge`: challenge solving interfaces
+- `internal/stream`: stream/challenge processing abstractions
+- `internal/httpx`: HTTP abstractions
 
-- `VideoInfo`
-  - `ID`, `Title`, `DurationSec`, `Author`
-  - `Formats []FormatInfo`
-- `FormatInfo`
-  - `Itag`, `MimeType`, `HasAudio`, `HasVideo`
-  - `Bitrate`, `Width`, `Height`, `FPS`
-  - `URL` (if directly playable)
-  - `Ciphered bool`
+## 4.3 Layering Rules
 
-### 5.3 Error contract
+1. `cmd/ytv1` must not contain extraction decisions.
+2. `client` may depend on `internal/*`; reverse is forbidden.
+3. `internal/*` modules should expose deterministic behavior with fixture tests.
 
-Typed errors (package-level):
+---
 
-- `ErrUnavailable`
-- `ErrLoginRequired`
-- `ErrNoPlayableFormats`
-- `ErrChallengeNotSolved`
-- `ErrAllClientsFailed` (with attempt details)
+## 5. Detailed Work Plan
 
-## 6. Execution Pipeline (Internal)
+## 5.1 Track A: Correctness and Extraction Fidelity
 
-1. Normalize input -> video ID.
-2. Policy selects candidate clients.
-3. Orchestrator requests `/youtubei/v1/player` per candidate.
-4. Collect first valid player responses and metadata.
-5. Parse formats from streamingData.
-6. If needed, resolve player JS and solve `s`/`n` challenges.
-7. Emit normalized `VideoInfo` and `FormatInfo`.
-
-## 7. Detailed Phases
-
-### Phase 1: API and Error freeze (package-first)
-
-- Target:
+### A1. ResolveStreamURL direct URL n-decipher correctness
+- Status: `[ ]`
+- Goal:
+  - Ensure direct URL path also applies `n` decipher when present.
+- Files:
   - `client/client.go`
-  - `client/types.go`
-  - `client/errors.go`
-- Outcome:
-  - Public API signatures fixed before internal changes.
+  - tests in `client/resolve_stream_url_test.go`
+- Acceptance:
+  - direct URL with `n` query is rewritten using playerjs decipher
+  - no regression for ciphered URL flows
 
-### Phase 2: Innertube core
-
-- Target:
-  - `internal/innertube/clients.go`
-  - `internal/innertube/request.go`
-  - `internal/innertube/response.go`
-- Outcome:
-  - Deterministic request building and response decoding.
-
-### Phase 3: Policy + Orchestrator
-
-- Target:
-  - `internal/policy/selector.go`
-  - `internal/orchestrator/engine.go`
-- Outcome:
-  - Predictable fallback and structured failure reporting.
-
-### Phase 4: Format parser
-
-- Target:
+### A2. Protocol normalization fidelity
+- Status: `[ ]`
+- Goal:
+  - Avoid over-classifying unknown/ciphered/manifest-derived formats as `https`.
+- Files:
   - `internal/formats/parser.go`
-- Outcome:
-  - Stable metadata extraction independent of stream playback.
+  - `internal/formats/parser_test.go`
+- Acceptance:
+  - protocol reflects source reliably (`https`/`dash`/`hls`/`unknown` as needed)
+  - PO token filter decisions use correct protocol
 
-### Phase 5: PlayerJS + Challenge
+### A3. Manifest expansion pipeline
+- Status: `[ ]`
+- Goal:
+  - Parse DASH/HLS manifests into normalized candidate formats, not raw string only.
+- Files:
+  - `internal/formats/dash.go`
+  - `internal/formats/hls.go`
+  - `client/client.go` integration
+  - tests: new fixture-driven parser tests
+- Acceptance:
+  - manifest URLs yield additional format candidates
+  - errors are typed and non-fatal when fallback candidates exist
 
-- Target:
-  - `internal/playerjs/*`
-  - `internal/challenge/*`
-- Outcome:
-  - URL resolution for ciphered formats.
+### A4. Playability detail taxonomy (geo/drm/login/unavailable)
+- Status: `[x]`
+- Goal:
+  - Replace string-only heuristics with structured detail fields while preserving sentinel compatibility.
+- Files:
+  - `internal/orchestrator/errors.go`
+  - `client/errors.go`
+  - `client/client.go`
+- Acceptance:
+  - `errors.Is` compatibility retained
+  - `errors.As` provides typed detail including geo/drm dimensions when available
 
-### Phase 6: Integration to public API
+---
 
-- Target:
-  - `client` package wiring
-- Outcome:
-  - `GetVideo/GetFormats/ResolveStreamURL` functional.
+## 5.2 Track B: Policy and Access Control
 
-### Phase 7: CLI as adapter (last)
+### B1. PO token matrix hardening
+- Status: `[x]`
+- Goal:
+  - Support required/recommended behavior with protocol-specific enforcement and diagnostics.
+- Files:
+  - `internal/orchestrator/engine.go`
+  - `client/pot_filter.go`
+  - tests in `client/pot_filter_test.go` + orchestrator tests
+- Acceptance:
+  - required policy drops/blocks appropriately
+  - recommended policy preserves formats with warning detail
+  - diagnostics include reason and protocol
 
-- Target:
-  - `cmd/ytv1/main.go`
-- Outcome:
-  - CLI delegates only to `client` package.
-  - No extraction logic allowed in CLI.
+### B2. ProxyURL effective behavior
+- Status: `[x]`
+- Decision task:
+  - Option 1: wire `ProxyURL` into transport builder
+  - Option 2: remove/deprecate `ProxyURL` and rely on provided `HTTPClient`
+- Files:
+  - `client/config.go`
+  - `internal/innertube/config.go`
+  - possibly transport helper additions
+- Acceptance:
+  - chosen behavior is real, tested, and documented
 
-## 8. Test Strategy
+---
 
-- Unit tests by package first.
-- Orchestrator tests with mocked HTTP responses.
-- Fixture-based parser tests for multiple playability shapes.
-- One smoke command allowed:
-  - `./ytv1.exe -v <id>`
-  - but this is verification only, not design target.
+## 5.3 Track C: Package Product Quality
 
-## 9. Current Immediate Fixes (before next feature work)
+### C1. Remove package stdout side effects
+- Status: `[x]`
+- Goal:
+  - Eliminate direct `fmt.Printf` from package logic.
+- Files:
+  - `client/playlist_transcript.go`
+  - config/logger surface if needed
+- Acceptance:
+  - library emits no uncontrolled stdout/stderr
+  - warnings exposed via error detail or optional logger
 
-1. `[x]` Make repository build green (`go test ./...`).
-2. `[x]` Remove unused imports in `internal/playerjs/*`.
-3. `[x]` Ensure selector/client config consistency (API key and fallback behavior).
-4. `[x]` Keep binary out of VCS (`ytv1.exe` in `.gitignore`).
+### C2. Session cache bounds
+- Status: `[x]`
+- Goal:
+  - Prevent unbounded growth of `sessions` map in long-lived processes.
+- Files:
+  - `client/client.go`
+  - `client/config.go`
+  - tests for eviction/TTL behavior
+- Acceptance:
+  - configurable bound or TTL implemented
+  - concurrent access remains race-safe
 
-## 10. Definition of Done (v1)
+### C3. Expand public metadata contract
+- Status: `[x]`
+- Goal:
+  - Add key fields expected from package consumers (Description, DurationSec, ViewCount, etc.).
+- Files:
+  - `client/types.go`
+  - `client/client.go`
+  - tests in `client/getvideo_getformats_test.go`
+- Acceptance:
+  - fields populated when available
+  - backward compatibility maintained for existing fields
 
-v1 is done when:
+### C4. Playlist item duration normalization
+- Status: `[x]`
+- Goal:
+  - Replace ambiguous string-only duration with structured representation.
+- Files:
+  - `client/types.go`
+  - `client/playlist_transcript.go`
+  - tests
+- Acceptance:
+  - machine-usable duration field added
+  - display text can remain separate optional field
 
-1. Public package API is stable and documented.
-2. `go test ./...` passes reliably.
-3. Package can return metadata for known sample IDs.
-4. Ciphered formats are either resolvable or return explicit typed errors.
-5. CLI remains a thin wrapper over package API.
+### C5. Stream-first API for package consumers
+- Status: `[x]`
+- Goal:
+  - Add reader-based API to avoid mandatory file download path.
+- Files:
+  - `client` package (new API + tests)
+- Acceptance:
+  - callers can resolve and consume stream via `io.ReadCloser`
+  - context cancellation and retry behavior documented
 
-## 11. Plan Update Rule (Mandatory)
+---
 
-Before starting any substantial change and after finishing it:
+## 5.4 Track D: Subtitles/Transcript/Playlist Depth
 
-1. Update `Current Snapshot` status markers.
-2. Move completed items from `Immediate Next Tasks` to done state.
-3. Add newly discovered work items with `[ ]`.
-4. Keep this file as the single source of truth for execution order.
+### D1. Subtitle track preference policy
+- Status: `[x]`
+- Goal:
+  - Add deterministic track selection with options (exact language, fallback, auto-gen preference).
+- Files:
+  - `client/playlist_transcript.go`
+  - `client/config.go` (if policy exposed globally)
+- Acceptance:
+  - no-language default is explicit policy, not first-track accident
 
-## 12. Regression Checklist
+### D2. Transcript robustness
+- Status: `[x]`
+- Goal:
+  - Improve parsing resilience and error typing for unavailable/disabled/malformed responses.
+- Files:
+  - `client/playlist_transcript.go`
+  - tests
+- Acceptance:
+  - caller can distinguish unavailable vs parsing failure
 
-Run this checklist for every YouTube breakage patch cycle:
+### D3. Playlist continuation robustness v2
+- Status: `[ ]`
+- Goal:
+  - Keep resilient token traversal and prevent duplicates/loops with typed diagnostics.
+- Files:
+  - `client/playlist_transcript.go`
+  - tests
+- Acceptance:
+  - stable traversal across mixed valid/invalid continuation tokens
 
-1. Confirm `go test ./...` is green before patch.
-2. Reproduce breakage with one known sample ID and store exact failing behavior.
-3. Verify player URL extraction still returns `/s/player/.../base.js`.
-4. Validate `s` decipher path with fixture and one live sample.
-5. Validate `n` decipher path for direct URL and manifest URL.
-6. Validate fallback behavior for `LOGIN_REQUIRED` and `UNPLAYABLE`.
-7. Validate PO token path: provider configured and missing-provider failure cases.
-8. Run `go test ./...` after patch and update plan status markers.
+---
+
+## 5.5 Track E: Testing and Regression Safety
+
+### E1. Fixture additions
+- Status: `[x]`
+- Add fixtures for:
+  - direct URL requiring `n` rewrite
+  - manifest-only videos (DASH/HLS)
+  - geo/login/drm playability variants
+  - subtitles track edge cases
+
+### E2. Integration-like behavior tests
+- Status: `[ ]`
+- Add tests for:
+  - fallback client behavior under override modes
+  - PO token required/recommended matrix
+  - session cache eviction behavior
+
+### E3. Non-functional checks
+- Status: `[ ]`
+- Ensure:
+  - `go test ./...` green
+  - race-risk areas covered by concurrency-sensitive tests where practical
+
+---
+
+## 6. Public API and Error Contract (v1 Snapshot)
+
+## 6.1 Stable APIs
+
+- `New`, `GetVideo`, `GetFormats`, `ResolveStreamURL`
+- existing playlist/transcript/subtitle APIs remain supported
+
+## 6.2 Error Compatibility Rules
+
+1. Sentinel compatibility via `errors.Is` must be preserved.
+2. Rich diagnostics via typed detail errors via `errors.As`.
+3. New typed errors must include migration-safe fallback to existing sentinels.
+
+---
+
+## 7. Definition of Done (Per Task)
+
+A task is complete only when all are true:
+
+1. Code implemented.
+2. Tests added/updated.
+3. `go test ./...` passes.
+4. Plan markers updated.
+5. README/docs updated if public behavior changed.
+
+---
+
+## 8. Session Checklist (Mandatory)
+
+Before work:
+1. Review `Current Snapshot`.
+2. Mark target task `[-]`.
+3. Confirm no earlier ordered task remains unresolved.
+
+After work:
+1. Mark completed task `[x]`.
+2. Move next task to `[-]` if continuing.
+3. Record newly discovered tasks in `Immediate Next Tasks`.
+4. Re-run `go test ./...`.
+
+---
+
+## 9. Immediate Backlog Notes (From Gap Audit)
+
+- yt-dlp parity still missing in:
+  - cookie-auth header generation flows
+  - live/post-live specific format handling
+  - richer subtitle translation/live-chat extraction
+- kkdai parity still missing in package ergonomics:
+  - richer metadata model
+  - stream-returning APIs for non-file consumers
+- Quality debt:
+  - stdout logging in package code
+  - unused/dead config fields (`ProxyURL` path validation required)
+
+---
+
+## 10. Change Log (Plan)
+
+- `2026-02-16`: Full plan rewrite from coarse “mostly done” checklist to gap-driven, ordered, testable execution plan.
+- `2026-02-16`: Completed Task 13~15 (subtitle policy + transcript typed errors + regression coverage + README/API refresh).

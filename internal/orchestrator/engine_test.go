@@ -255,6 +255,15 @@ func TestEngineFailsWithoutPoTokenWhenPolicyOverrideRequired(t *testing.T) {
 	if !errors.As(allErr.Attempts[0].Err, &poErr) {
 		t.Fatalf("expected PoTokenRequiredError, got %T", allErr.Attempts[0].Err)
 	}
+	if poErr.Policy != innertube.PoTokenFetchPolicyRequired {
+		t.Fatalf("policy = %q, want %q", poErr.Policy, innertube.PoTokenFetchPolicyRequired)
+	}
+	if poErr.ProviderAvailable {
+		t.Fatalf("expected ProviderAvailable=false")
+	}
+	if len(poErr.Protocols) != 1 || poErr.Protocols[0] != innertube.StreamingProtocolHTTPS {
+		t.Fatalf("unexpected protocols: %+v", poErr.Protocols)
+	}
 }
 
 func TestEngineProceedsWithoutPoTokenWhenProviderFails(t *testing.T) {
@@ -415,6 +424,67 @@ func TestEngineMixedFailureMatrixIncludesHTTPAndPlayability(t *testing.T) {
 	}
 	if !hasHTTP || !hasPlayability {
 		t.Fatalf("expected mixed failures (http=%v playability=%v)", hasHTTP, hasPlayability)
+	}
+}
+
+func TestEnginePlayabilityErrorIncludesTypedDetail(t *testing.T) {
+	web := innertube.WebClient
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body: io.NopCloser(bytes.NewBufferString(`{
+				"playabilityStatus":{
+					"status":"UNPLAYABLE",
+					"reason":"This video is not available in your country",
+					"errorScreen":{
+						"playerErrorMessageRenderer":{
+							"subreason":{"simpleText":"DRM protected stream"}
+						}
+					}
+				},
+				"microformat":{
+					"playerMicroformatRenderer":{
+						"availableCountries":["KR","US"]
+					}
+				}
+			}`)),
+			Header: make(http.Header),
+		}, nil
+	})
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{HTTPClient: &http.Client{Transport: tr}},
+	)
+
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+
+	var allErr *AllClientsFailedError
+	if !errors.As(err, &allErr) {
+		t.Fatalf("expected AllClientsFailedError, got %T", err)
+	}
+	if len(allErr.Attempts) == 0 {
+		t.Fatalf("expected at least one attempt")
+	}
+	var playErr *PlayabilityError
+	for _, attempt := range allErr.Attempts {
+		if errors.As(attempt.Err, &playErr) {
+			break
+		}
+	}
+	if playErr == nil {
+		t.Fatalf("expected a PlayabilityError in attempts")
+	}
+	if !playErr.IsGeoRestricted() {
+		t.Fatalf("expected geo restricted detail")
+	}
+	if !playErr.IsDRMProtected() {
+		t.Fatalf("expected drm protected detail")
+	}
+	if got := len(playErr.Detail.AvailableCountries); got != 2 {
+		t.Fatalf("available countries count = %d, want 2", got)
 	}
 }
 

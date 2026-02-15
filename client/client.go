@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/famomatic/ytv1/internal/formats"
 	"github.com/famomatic/ytv1/internal/innertube"
@@ -21,13 +24,16 @@ type Client struct {
 	config           Config
 	engine           *orchestrator.Engine
 	playerJSResolver playerjs.Resolver
+	logger           Logger
 	sessionsMu       sync.RWMutex
 	sessions         map[string]videoSession
 }
 
 type videoSession struct {
-	Response  *innertube.PlayerResponse
-	PlayerURL string
+	Response   *innertube.PlayerResponse
+	PlayerURL  string
+	CachedAt   time.Time
+	LastAccess time.Time
 }
 
 // New creates a new YouTube client.
@@ -38,7 +44,7 @@ func New(config Config) *Client {
 // NewClient creates a new YouTube client.
 func NewClient(config Config) *Client {
 	if config.HTTPClient == nil {
-		config.HTTPClient = http.DefaultClient
+		config.HTTPClient = defaultHTTPClient(config.ProxyURL)
 	}
 
 	registry := innertube.NewRegistry()
@@ -60,11 +66,16 @@ func NewClient(config Config) *Client {
 			PreferredLocale: innerCfg.PlayerJSPreferredLocale,
 		},
 	)
+	logger := config.Logger
+	if logger == nil {
+		logger = nopLogger{}
+	}
 
 	return &Client{
 		config:           config,
 		engine:           engine,
 		playerJSResolver: jsResolver,
+		logger:           logger,
 		sessions:         make(map[string]videoSession),
 	}
 }
@@ -95,6 +106,15 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		ID:              resp.VideoDetails.VideoID,
 		Title:           resp.VideoDetails.Title,
 		Author:          resp.VideoDetails.Author,
+		Description:     firstNonEmptyString(resp.VideoDetails.ShortDescription, resp.Microformat.PlayerMicroformatRenderer.Description.SimpleText),
+		DurationSec:     parseInt64String(firstNonEmptyString(resp.VideoDetails.LengthSeconds, resp.Microformat.PlayerMicroformatRenderer.LengthSeconds)),
+		ViewCount:       parseInt64String(firstNonEmptyString(resp.VideoDetails.ViewCount, resp.Microformat.PlayerMicroformatRenderer.ViewCount)),
+		ChannelID:       firstNonEmptyString(resp.VideoDetails.ChannelID, resp.Microformat.PlayerMicroformatRenderer.ExternalChannelId),
+		PublishDate:     resp.Microformat.PlayerMicroformatRenderer.PublishDate,
+		UploadDate:      resp.Microformat.PlayerMicroformatRenderer.UploadDate,
+		Category:        resp.Microformat.PlayerMicroformatRenderer.Category,
+		IsLive:          resp.VideoDetails.IsLiveContent || resp.PlayabilityStatus.IsLive(),
+		Keywords:        append([]string(nil), resp.VideoDetails.Keywords...),
 		Formats:         outFormats,
 		DashManifestURL: resp.StreamingData.DashManifestURL,
 		HLSManifestURL:  resp.StreamingData.HlsManifestURL,
@@ -103,12 +123,15 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 	playerURL, _ := c.playerJSResolver.GetPlayerURL(ctx, videoID)
 	info.DashManifestURL = c.resolveManifestURL(ctx, info.DashManifestURL, playerURL)
 	info.HLSManifestURL = c.resolveManifestURL(ctx, info.HLSManifestURL, playerURL)
-	c.sessionsMu.Lock()
-	c.sessions[videoID] = videoSession{
+
+	manifestFormats := c.loadManifestFormats(ctx, info.DashManifestURL, info.HLSManifestURL)
+	if len(manifestFormats) > 0 {
+		info.Formats = appendUniqueFormats(info.Formats, manifestFormats)
+	}
+	c.putSession(videoID, videoSession{
 		Response:  resp,
 		PlayerURL: playerURL,
-	}
-	c.sessionsMu.Unlock()
+	})
 
 	return info, nil
 }
@@ -195,7 +218,11 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 	}
 
 	if raw.URL != "" {
-		return raw.URL, nil
+		rewritten, err := c.resolveDirectURL(ctx, raw.URL, session.PlayerURL)
+		if err != nil {
+			return "", err
+		}
+		return rewritten, nil
 	}
 
 	cipher := raw.SignatureCipher
@@ -301,10 +328,7 @@ func mapError(err error) error {
 	var playabilityErr *orchestrator.PlayabilityError
 	if errors.As(err, &playabilityErr) {
 		attempts := []AttemptDetail{attemptDetailFromSingle(playabilityErr.Client, playabilityErr)}
-		if playabilityErr.RequiresLogin() {
-			return &LoginRequiredDetailError{Attempts: attempts}
-		}
-		if playabilityErr.IsAgeRestricted() {
+		if playabilityErr.RequiresLogin() || playabilityErr.IsAgeRestricted() {
 			return &LoginRequiredDetailError{Attempts: attempts}
 		}
 		return &UnavailableDetailError{Attempts: attempts}
@@ -367,6 +391,15 @@ func attemptDetailFromSingle(client string, err error) AttemptDetail {
 	if errors.As(err, &playabilityErr) {
 		d.Stage = "playability"
 		d.Reason = playabilityErr.Status + ": " + playabilityErr.Reason
+		d.PlayabilityStatus = playabilityErr.Status
+		d.PlayabilityReason = playabilityErr.Reason
+		d.PlayabilitySubreason = playabilityErr.Detail.Subreason
+		d.GeoRestricted = playabilityErr.IsGeoRestricted()
+		d.LoginRequired = playabilityErr.RequiresLogin()
+		d.AgeRestricted = playabilityErr.IsAgeRestricted()
+		d.Unavailable = playabilityErr.IsUnavailable()
+		d.DRMProtected = playabilityErr.IsDRMProtected()
+		d.AvailableCountries = append([]string(nil), playabilityErr.Detail.AvailableCountries...)
 		return d
 	}
 
@@ -381,7 +414,14 @@ func attemptDetailFromSingle(client string, err error) AttemptDetail {
 	if errors.As(err, &poTokenErr) {
 		d.Stage = "pot"
 		d.POTRequired = true
-		d.POTAvailable = false
+		d.POTAvailable = poTokenErr.ProviderAvailable
+		d.POTPolicy = string(poTokenErr.Policy)
+		if len(poTokenErr.Protocols) > 0 {
+			d.POTProtocols = make([]string, 0, len(poTokenErr.Protocols))
+			for _, protocol := range poTokenErr.Protocols {
+				d.POTProtocols = append(d.POTProtocols, string(protocol))
+			}
+		}
 		d.Reason = poTokenErr.Cause
 		return d
 	}
@@ -390,10 +430,80 @@ func attemptDetailFromSingle(client string, err error) AttemptDetail {
 }
 
 func (c *Client) getSession(videoID string) (videoSession, bool) {
-	c.sessionsMu.RLock()
-	defer c.sessionsMu.RUnlock()
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
 	s, ok := c.sessions[videoID]
+	if !ok {
+		return videoSession{}, false
+	}
+	now := time.Now()
+	if ttl := c.config.SessionCacheTTL; ttl > 0 && !s.CachedAt.IsZero() && now.Sub(s.CachedAt) > ttl {
+		delete(c.sessions, videoID)
+		return videoSession{}, false
+	}
+	s.LastAccess = now
+	c.sessions[videoID] = s
 	return s, ok
+}
+
+func (c *Client) putSession(videoID string, session videoSession) {
+	now := time.Now()
+	if session.CachedAt.IsZero() {
+		session.CachedAt = now
+	}
+	session.LastAccess = now
+
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+
+	if c.sessions == nil {
+		c.sessions = make(map[string]videoSession)
+	}
+	c.evictExpiredLocked(now)
+	c.sessions[videoID] = session
+	c.evictLRULocked()
+}
+
+func (c *Client) evictExpiredLocked(now time.Time) {
+	ttl := c.config.SessionCacheTTL
+	if ttl <= 0 {
+		return
+	}
+	for id, session := range c.sessions {
+		if session.CachedAt.IsZero() {
+			continue
+		}
+		if now.Sub(session.CachedAt) > ttl {
+			delete(c.sessions, id)
+		}
+	}
+}
+
+func (c *Client) evictLRULocked() {
+	maxEntries := c.config.SessionCacheMaxEntries
+	if maxEntries <= 0 {
+		return
+	}
+	for len(c.sessions) > maxEntries {
+		var oldestID string
+		var oldest time.Time
+		first := true
+		for id, session := range c.sessions {
+			candidate := session.LastAccess
+			if candidate.IsZero() {
+				candidate = session.CachedAt
+			}
+			if first || candidate.Before(oldest) {
+				first = false
+				oldestID = id
+				oldest = candidate
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(c.sessions, oldestID)
+	}
 }
 
 func (c *Client) ensureSession(ctx context.Context, input string) (videoSession, string, error) {
@@ -473,4 +583,98 @@ func rewriteURLParam(rawURL, key string, decoder func(string) (string, error)) (
 	q.Set(key, next)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func (c *Client) loadManifestFormats(ctx context.Context, dashURL, hlsURL string) []FormatInfo {
+	out := make([]FormatInfo, 0, 16)
+	if dashURL != "" {
+		if dash, err := formats.FetchDASHManifest(ctx, c.httpClient(), dashURL); err == nil {
+			for _, f := range dash.Formats {
+				out = append(out, toFormatInfo(f))
+			}
+		}
+	}
+	if hlsURL != "" {
+		if hls, err := formats.FetchHLSManifest(ctx, c.httpClient(), hlsURL); err == nil {
+			for _, f := range hls.Formats {
+				out = append(out, toFormatInfo(f))
+			}
+		}
+	}
+	return out
+}
+
+func appendUniqueFormats(base []FormatInfo, extras []FormatInfo) []FormatInfo {
+	if len(extras) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extras))
+	keyOf := func(f FormatInfo) string {
+		return fmt.Sprintf("%d|%s|%s", f.Itag, f.Protocol, f.URL)
+	}
+	out := make([]FormatInfo, 0, len(base)+len(extras))
+	for _, f := range base {
+		k := keyOf(f)
+		if _, exists := seen[k]; exists {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, f)
+	}
+	for _, f := range extras {
+		k := keyOf(f)
+		if _, exists := seen[k]; exists {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, f)
+	}
+	return out
+}
+
+func (c *Client) resolveDirectURL(ctx context.Context, rawURL string, playerURL string) (string, error) {
+	if rawURL == "" {
+		return "", ErrChallengeNotSolved
+	}
+	if !hasQueryParam(rawURL, "n") {
+		return rawURL, nil
+	}
+	if playerURL == "" {
+		return "", ErrChallengeNotSolved
+	}
+
+	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, playerURL)
+	if err != nil {
+		return "", ErrChallengeNotSolved
+	}
+	decipherer := playerjs.NewDecipherer(jsBody)
+	rewritten, err := rewriteURLParam(rawURL, "n", decipherer.DecipherN)
+	if err != nil {
+		return "", ErrChallengeNotSolved
+	}
+	return rewritten, nil
+}
+
+func (c *Client) warnf(format string, args ...any) {
+	if c == nil || c.logger == nil {
+		return
+	}
+	c.logger.Warnf(format, args...)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func parseInt64String(raw string) int64 {
+	v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }

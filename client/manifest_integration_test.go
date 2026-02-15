@@ -2,9 +2,11 @@ package client
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/famomatic/ytv1/internal/innertube"
@@ -118,6 +120,85 @@ func TestRewriteURLParamPreservesOtherQuery(t *testing.T) {
 	u, _ := url.Parse(out)
 	if u.Query().Get("foo") != "1" || u.Query().Get("bar") != "2" || u.Query().Get("n") != "bcd" {
 		t.Fatalf("unexpected query values: %s", u.RawQuery)
+	}
+}
+
+func TestGetVideo_ExpandsManifestFormats(t *testing.T) {
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"Me at the zoo","author":"jawed"},
+					"streamingData":{
+						"formats":[{"itag":18,"url":"https://example.com/v.mp4","mimeType":"video/mp4","bitrate":1000}],
+						"dashManifestUrl":"https://example.com/dash.mpd",
+						"hlsManifestUrl":"https://example.com/master.m3u8"
+					}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(body)),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				html := `<html><script>var ytcfg = {"INNERTUBE_API_KEY":"dynamic_key_123"};</script><script src="/s/player/1798f86c/player_es6.vflset/ko_KR/base.js"></script></html>`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(html)),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.String() == "https://example.com/dash.mpd":
+				dash := `<?xml version="1.0" encoding="UTF-8"?>
+<MPD><Period><AdaptationSet mimeType="audio/mp4" codecs="mp4a.40.2"><Representation id="140" bandwidth="128000"><BaseURL>https://cdn.example.com/a140.m4a</BaseURL></Representation></AdaptationSet></Period></MPD>`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(dash)),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.String() == "https://example.com/master.m3u8":
+				hls := `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.4d401f,mp4a.40.2"
+https://cdn.example.com/v/itag/22/prog.m3u8
+`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(hls)),
+				}, nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				return nil, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+	})
+
+	info, err := c.GetVideo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideo() error = %v", err)
+	}
+
+	// 1 direct format + DASH + HLS
+	if len(info.Formats) < 3 {
+		t.Fatalf("expected manifest-expanded formats, got len=%d", len(info.Formats))
+	}
+	var hasDash, hasHLS bool
+	for _, f := range info.Formats {
+		if f.Protocol == "dash" {
+			hasDash = true
+		}
+		if f.Protocol == "hls" {
+			hasHLS = true
+		}
+	}
+	if !hasDash || !hasHLS {
+		t.Fatalf("expected both dash and hls formats, got: %+v", info.Formats)
 	}
 }
 

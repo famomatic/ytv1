@@ -122,6 +122,41 @@ func TestResolveStreamURL_SAndN(t *testing.T) {
 	}
 }
 
+func TestResolveStreamURL_DirectURLWithN(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	format := innertube.Format{
+		Itag: 18,
+		URL:  "https://example.com/video?n=abcd&foo=1",
+	}
+	c := testClientWithSession(videoID, format, testPlayerJS())
+
+	out, err := c.ResolveStreamURL(context.Background(), videoID, 18)
+	if err != nil {
+		t.Fatalf("ResolveStreamURL() error = %v", err)
+	}
+	u, _ := url.Parse(out)
+	if got := u.Query().Get("n"); got != "bcd" {
+		t.Fatalf("n = %q, want %q", got, "bcd")
+	}
+}
+
+func TestResolveStreamURL_DirectURLWithNWithoutPlayerURL(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	format := innertube.Format{
+		Itag: 18,
+		URL:  "https://example.com/video?n=abcd&foo=1",
+	}
+	c := testClientWithSession(videoID, format, testPlayerJS())
+	session := c.sessions[videoID]
+	session.PlayerURL = ""
+	c.sessions[videoID] = session
+
+	_, err := c.ResolveStreamURL(context.Background(), videoID, 18)
+	if err != ErrChallengeNotSolved {
+		t.Fatalf("ResolveStreamURL() error = %v, want %v", err, ErrChallengeNotSolved)
+	}
+}
+
 func TestResolveStreamURL_MalformedCipher(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	format := innertube.Format{
