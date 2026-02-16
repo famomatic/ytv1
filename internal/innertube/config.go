@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+// ExtractionEvent represents one extraction-stage lifecycle event.
+type ExtractionEvent struct {
+	Stage  string
+	Phase  string
+	Client string
+	Detail string
+}
+
+// ExtractionEventHandler handles extraction events from orchestrator/client flows.
+type ExtractionEventHandler func(ExtractionEvent)
+
 // PoTokenProvider defines an interface for injecting PO Tokens.
 type PoTokenProvider interface {
 	GetToken(ctx context.Context, clientID string) (string, error)
@@ -29,6 +40,9 @@ type Config struct {
 	DisableFallbackClients        bool
 	MetadataTransport             MetadataTransportConfig
 	EnableDynamicAPIKeyResolution bool
+	UseAdPlaybackContext          bool
+	ClientHedgeDelay              time.Duration
+	OnExtractionEvent             ExtractionEventHandler
 }
 
 type MetadataTransportConfig struct {

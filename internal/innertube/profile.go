@@ -7,9 +7,9 @@ type VideoStreamingProtocol string
 
 const (
 	StreamingProtocolUnknown VideoStreamingProtocol = "unknown"
-	StreamingProtocolHTTPS VideoStreamingProtocol = "https"
-	StreamingProtocolDASH  VideoStreamingProtocol = "dash"
-	StreamingProtocolHLS   VideoStreamingProtocol = "hls"
+	StreamingProtocolHTTPS   VideoStreamingProtocol = "https"
+	StreamingProtocolDASH    VideoStreamingProtocol = "dash"
+	StreamingProtocolHLS     VideoStreamingProtocol = "hls"
 )
 
 // PoTokenPolicy defines the policy for Proof of Origin (PO) Tokens.
@@ -30,17 +30,22 @@ const (
 )
 
 type ClientProfile struct {
-	Name            string
-	Version         string
-	APIKey          string
-	UserAgent       string
-	ContextNameID   int
-	RequireJSPlayer bool
-	SupportsCookies bool
-	RequiresAuth    bool
-	Host            string
-	Headers         http.Header
-	Screen          string // e.g. "EMBED"
+	// ID is the registry/client alias used for policy and diagnostics
+	// (e.g. "web_safari"), distinct from Innertube clientName ("WEB").
+	ID                        string
+	Name                      string
+	Version                   string
+	APIKey                    string
+	UserAgent                 string
+	ContextNameID             int
+	RequireJSPlayer           bool
+	SupportsCookies           bool
+	SupportsAdPlaybackContext bool
+	RequiresAuth              bool
+	Host                      string
+	Headers                   http.Header
+	Screen                    string // e.g. "EMBED"
+	PlayerParams              string
 
 	// PoTokenPolicy map keyed by protocol (https, dash, hls).
 	PoTokenPolicy map[VideoStreamingProtocol]PoTokenPolicy

@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,12 +22,13 @@ import (
 
 // DownloadOptions controls stream download behavior.
 type DownloadOptions struct {
-	Itag           int
-	Mode           SelectionMode
-	FormatSelector string // e.g. "bestvideo+bestaudio", overrides Mode
-	OutputPath     string
-	Resume         bool
-	MergeOutput    bool
+	Itag                  int
+	Mode                  SelectionMode
+	FormatSelector        string // e.g. "bestvideo+bestaudio", overrides Mode
+	OutputPath            string
+	Resume                bool
+	MergeOutput           bool
+	KeepIntermediateFiles bool
 }
 
 // DownloadResult describes a completed file download.
@@ -51,9 +53,15 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// filters ...
 
-	info, err := c.GetVideo(ctx, videoID)
-	if err != nil {
-		return nil, err
+	var info *VideoInfo
+	if session, ok := c.getSession(videoID); ok && session.Info != nil {
+		info = cloneVideoInfo(session.Info)
+	}
+	if info == nil {
+		info, err = c.GetVideo(ctx, videoID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	formats := info.Formats
 
@@ -71,6 +79,9 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	// Filter unplayable formats (e.g. requiring PO Token)
 	filteredFormats, skipReasons := filterFormatsByPoTokenPolicy(formats, c.config)
 	if len(filteredFormats) == 0 && len(skipReasons) > 0 {
+		for _, skip := range skipReasons {
+			c.warnf("format skipped by po token policy: itag=%d protocol=%s reason=%s", skip.Itag, skip.Protocol, skip.Reason)
+		}
 		return nil, &NoPlayableFormatsDetailError{
 			Mode:  options.Mode, // Approximate
 			Skips: skipReasons,
@@ -109,6 +120,7 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// 2. Select Formats
 	var selected []types.FormatInfo
+	var parsedSelector *selector.Selector
 	if options.Itag > 0 {
 		for _, f := range formats {
 			if f.Itag == options.Itag {
@@ -124,6 +136,7 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		if err != nil {
 			return nil, fmt.Errorf("selector parse failed: %w", err)
 		}
+		parsedSelector = sel
 		selected, err = selector.Select(formats, sel)
 		if err != nil {
 			return nil, err
@@ -132,6 +145,24 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	if len(selected) == 0 {
 		return nil, errors.New("no formats found matching criteria")
+	}
+
+	// Prefer decipher-free selections when available to avoid hard failure
+	// if player JS challenge solve is partial.
+	if options.Itag == 0 && parsedSelector != nil && selectionHasCiphered(selected) {
+		nonCiphered := make([]types.FormatInfo, 0, len(formats))
+		for _, f := range formats {
+			if !f.Ciphered {
+				nonCiphered = append(nonCiphered, f)
+			}
+		}
+		if len(nonCiphered) > 0 {
+			if alt, err := selector.Select(nonCiphered, parsedSelector); err == nil && len(alt) > 0 {
+				if len(alt) >= len(selected) {
+					selected = alt
+				}
+			}
+		}
 	}
 
 	// 3. Fallback for Merge if Muxer missing
@@ -146,10 +177,68 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// 4. Download
 	if len(selected) == 1 {
-		return c.downloadSingle(ctx, videoID, selected[0], options.OutputPath, options)
+		res, err := c.downloadSingle(ctx, videoID, selected[0], options.OutputPath, options)
+		if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
+			c.warnf("challenge solve incomplete; retrying with fallback single-file format")
+			return c.downloadFallbackSingle(ctx, videoID, formats, options.OutputPath, options)
+		}
+		return res, err
 	}
 
-	return c.downloadAndMerge(ctx, videoID, selected, options, meta)
+	res, err := c.downloadAndMerge(ctx, videoID, selected, options, meta)
+	if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
+		c.warnf("challenge solve incomplete during merge selection; retrying with fallback single-file format")
+		return c.downloadFallbackSingle(ctx, videoID, formats, options.OutputPath, options)
+	}
+	return res, err
+}
+
+func selectionHasCiphered(selected []types.FormatInfo) bool {
+	for _, f := range selected {
+		if f.Ciphered {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) downloadFallbackSingle(
+	ctx context.Context,
+	videoID string,
+	formats []types.FormatInfo,
+	outputPath string,
+	options DownloadOptions,
+) (*DownloadResult, error) {
+	candidates := make([]types.FormatInfo, 0, len(formats))
+	for _, f := range formats {
+		if f.HasVideo && f.HasAudio {
+			candidates = append(candidates, f)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, ErrChallengeNotSolved
+	}
+
+	preferred := make([]types.FormatInfo, 0, len(candidates))
+	for _, f := range candidates {
+		if !f.Ciphered {
+			preferred = append(preferred, f)
+		}
+	}
+	if len(preferred) == 0 {
+		preferred = candidates
+	}
+
+	for _, f := range preferred {
+		res, err := c.downloadSingle(ctx, videoID, f, outputPath, options)
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, ErrChallengeNotSolved) {
+			return nil, err
+		}
+	}
+	return nil, ErrChallengeNotSolved
 }
 
 func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.FormatInfo, outputPath string, options DownloadOptions) (*DownloadResult, error) {
@@ -165,33 +254,42 @@ func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.For
 		return nil, &MP3TranscoderError{Mode: options.Mode}
 	}
 
-	streamURL, err := c.ResolveStreamURL(ctx, videoID, f.Itag)
+	streamURL, err := c.resolveSelectedFormatURL(ctx, videoID, f)
 	if err != nil {
 		return nil, err
 	}
+	c.emitDownloadEvent("download", "destination", videoID, outputPath, fmt.Sprintf("itag=%d", f.Itag))
 
 	// If MP3, we might need to download to temp then transcode, or stream transcode.
 	// Previous logic: transcodeURLToMP3 handles download.
 	if options.Mode == SelectionModeMP3 {
+		c.emitDownloadEvent("download", "start", videoID, outputPath, "transcode=mp3")
 		out, err := os.Create(outputPath)
 		if err != nil {
+			c.emitDownloadEvent("download", "failure", videoID, outputPath, err.Error())
 			return nil, err
 		}
 		defer out.Close()
 
 		bytes, err := transcodeURLToMP3(ctx, c.config.HTTPClient, c.config.MP3Transcoder, streamURL, MP3TranscodeMetadata{
 			VideoID: videoID, SourceItag: f.Itag, SourceMimeType: f.MimeType,
-		}, out)
+		}, out, c.config.RequestHeaders)
 		if err != nil {
+			c.emitDownloadEvent("download", "failure", videoID, outputPath, err.Error())
 			return nil, err
 		}
+		c.emitDownloadEvent("download", "complete", videoID, outputPath, fmt.Sprintf("bytes=%d", bytes))
 
 		return &DownloadResult{VideoID: videoID, Itag: f.Itag, OutputPath: outputPath, Bytes: bytes}, nil
 	}
 
+	c.emitDownloadEvent("download", "start", videoID, outputPath, fmt.Sprintf("itag=%d", f.Itag))
 	if err := c.downloadStream(ctx, videoID, streamURL, outputPath, f); err != nil {
-		return nil, err
+		attempt := downloadAttemptFromFormatAndURL(f, streamURL, err)
+		c.emitDownloadEvent("download", "failure", videoID, outputPath, formatDownloadFailureDetail(attempt))
+		return nil, wrapDownloadFailure(err, attempt)
 	}
+	c.emitDownloadEvent("download", "complete", videoID, outputPath, fmt.Sprintf("bytes=%d", getFileSize(outputPath)))
 
 	return &DownloadResult{
 		VideoID:    videoID,
@@ -235,31 +333,45 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 
 	videoPath := basePath + ".f" + strconv.Itoa(vidF.Itag) + ".video"
 	audioPath := basePath + ".f" + strconv.Itoa(audF.Itag) + ".audio"
+	keepIntermediates := options.KeepIntermediateFiles || c.config.KeepIntermediateFiles
 
 	// Video
-	vURL, err := c.ResolveStreamURL(ctx, videoID, vidF.Itag)
+	vURL, err := c.resolveSelectedFormatURL(ctx, videoID, vidF)
 	if err != nil {
 		return nil, err
 	}
+	c.emitDownloadEvent("download", "destination", videoID, videoPath, fmt.Sprintf("itag=%d", vidF.Itag))
+	c.emitDownloadEvent("download", "start", videoID, videoPath, fmt.Sprintf("itag=%d", vidF.Itag))
 	if err := c.downloadStream(ctx, videoID, vURL, videoPath, vidF); err != nil {
-		return nil, err
+		attempt := downloadAttemptFromFormatAndURL(vidF, vURL, err)
+		c.emitDownloadEvent("download", "failure", videoID, videoPath, formatDownloadFailureDetail(attempt))
+		return nil, wrapDownloadFailure(err, attempt)
 	}
-	defer os.Remove(videoPath)
+	c.emitDownloadEvent("download", "complete", videoID, videoPath, fmt.Sprintf("bytes=%d", getFileSize(videoPath)))
+	defer c.cleanupIntermediateFile(videoID, videoPath, keepIntermediates)
 
 	// Audio
-	aURL, err := c.ResolveStreamURL(ctx, videoID, audF.Itag)
+	aURL, err := c.resolveSelectedFormatURL(ctx, videoID, audF)
 	if err != nil {
 		return nil, err
 	}
+	c.emitDownloadEvent("download", "destination", videoID, audioPath, fmt.Sprintf("itag=%d", audF.Itag))
+	c.emitDownloadEvent("download", "start", videoID, audioPath, fmt.Sprintf("itag=%d", audF.Itag))
 	if err := c.downloadStream(ctx, videoID, aURL, audioPath, audF); err != nil {
-		return nil, err
+		attempt := downloadAttemptFromFormatAndURL(audF, aURL, err)
+		c.emitDownloadEvent("download", "failure", videoID, audioPath, formatDownloadFailureDetail(attempt))
+		return nil, wrapDownloadFailure(err, attempt)
 	}
-	defer os.Remove(audioPath)
+	c.emitDownloadEvent("download", "complete", videoID, audioPath, fmt.Sprintf("bytes=%d", getFileSize(audioPath)))
+	defer c.cleanupIntermediateFile(videoID, audioPath, keepIntermediates)
 
 	// Merge
+	c.emitDownloadEvent("merge", "start", videoID, basePath, fmt.Sprintf("video_itag=%d,audio_itag=%d", vidF.Itag, audF.Itag))
 	if err := c.config.Muxer.Merge(ctx, videoPath, audioPath, basePath, meta); err != nil {
+		c.emitDownloadEvent("merge", "failure", videoID, basePath, err.Error())
 		return nil, err
 	}
+	c.emitDownloadEvent("merge", "complete", videoID, basePath, fmt.Sprintf("bytes=%d", getFileSize(basePath)))
 
 	return &DownloadResult{
 		VideoID:    videoID,
@@ -278,7 +390,16 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 		_, err := c.downloadDASH(ctx, videoID, streamURL, outputPath, f)
 		return err
 	}
-	_, err := downloadURLToPath(ctx, c.config.HTTPClient, streamURL, outputPath, false, c.config.DownloadTransport)
+	_, err := downloadURLToPathWithHeaders(
+		ctx,
+		c.config.HTTPClient,
+		streamURL,
+		outputPath,
+		false,
+		c.config.DownloadTransport,
+		videoID,
+		c.config.RequestHeaders,
+	)
 	return err
 }
 
@@ -289,11 +410,13 @@ func transcodeURLToMP3(
 	streamURL string,
 	meta MP3TranscodeMetadata,
 	dst io.Writer,
+	requestHeaders http.Header,
 ) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return 0, err
 	}
+	applyMediaRequestHeaders(req, requestHeaders, meta.VideoID)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, err
@@ -307,7 +430,7 @@ func transcodeURLToMP3(
 }
 
 func downloadURLToWriter(ctx context.Context, httpClient *http.Client, streamURL string, w io.Writer) (int64, error) {
-	return downloadURLToWriterWithConfig(ctx, httpClient, streamURL, w, DownloadTransportConfig{})
+	return downloadURLToWriterWithConfigAndHeaders(ctx, httpClient, streamURL, w, DownloadTransportConfig{}, "", nil)
 }
 
 func downloadURLToWriterWithConfig(
@@ -317,10 +440,22 @@ func downloadURLToWriterWithConfig(
 	w io.Writer,
 	cfg DownloadTransportConfig,
 ) (int64, error) {
+	return downloadURLToWriterWithConfigAndHeaders(ctx, httpClient, streamURL, w, cfg, "", nil)
+}
+
+func downloadURLToWriterWithConfigAndHeaders(
+	ctx context.Context,
+	httpClient *http.Client,
+	streamURL string,
+	w io.Writer,
+	cfg DownloadTransportConfig,
+	videoID string,
+	requestHeaders http.Header,
+) (int64, error) {
 	effectiveCfg := normalizeDownloadTransportConfig(cfg)
 	var lastErr error
 	for attempt := 0; attempt <= effectiveCfg.MaxRetries; attempt++ {
-		n, err := downloadURLToWriterOnce(ctx, httpClient, streamURL, w)
+		n, err := downloadURLToWriterOnce(ctx, httpClient, streamURL, w, videoID, requestHeaders)
 		if err == nil {
 			return n, nil
 		}
@@ -338,11 +473,19 @@ func downloadURLToWriterWithConfig(
 	return 0, fmt.Errorf("download failed with unknown retry error")
 }
 
-func downloadURLToWriterOnce(ctx context.Context, httpClient *http.Client, streamURL string, w io.Writer) (int64, error) {
+func downloadURLToWriterOnce(
+	ctx context.Context,
+	httpClient *http.Client,
+	streamURL string,
+	w io.Writer,
+	videoID string,
+	requestHeaders http.Header,
+) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return 0, err
 	}
+	applyMediaRequestHeaders(req, requestHeaders, videoID)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, err
@@ -363,6 +506,19 @@ func downloadURLToPath(
 	resume bool,
 	cfg DownloadTransportConfig,
 ) (int64, error) {
+	return downloadURLToPathWithHeaders(ctx, httpClient, streamURL, outputPath, resume, cfg, "", nil)
+}
+
+func downloadURLToPathWithHeaders(
+	ctx context.Context,
+	httpClient *http.Client,
+	streamURL string,
+	outputPath string,
+	resume bool,
+	cfg DownloadTransportConfig,
+	videoID string,
+	requestHeaders http.Header,
+) (int64, error) {
 	effectiveCfg := normalizeDownloadTransportConfig(cfg)
 	startOffset := int64(0)
 	if resume {
@@ -372,7 +528,7 @@ func downloadURLToPath(
 	}
 
 	if startOffset > 0 {
-		n, err := downloadURLRangeAppend(ctx, httpClient, streamURL, outputPath, startOffset, effectiveCfg)
+		n, err := downloadURLRangeAppend(ctx, httpClient, streamURL, outputPath, startOffset, effectiveCfg, videoID, requestHeaders)
 		switch {
 		case err == nil:
 			return startOffset + n, nil
@@ -386,7 +542,7 @@ func downloadURLToPath(
 	}
 
 	if effectiveCfg.EnableChunked {
-		n, err := downloadURLChunked(ctx, httpClient, streamURL, outputPath, effectiveCfg)
+		n, err := downloadURLChunked(ctx, httpClient, streamURL, outputPath, effectiveCfg, videoID, requestHeaders)
 		switch {
 		case err == nil:
 			return n, nil
@@ -397,7 +553,7 @@ func downloadURLToPath(
 		}
 	}
 
-	return downloadURLFullRewrite(ctx, httpClient, streamURL, outputPath, effectiveCfg)
+	return downloadURLFullRewrite(ctx, httpClient, streamURL, outputPath, effectiveCfg, videoID, requestHeaders)
 }
 
 var (
@@ -413,6 +569,8 @@ func downloadURLRangeAppend(
 	outputPath string,
 	startOffset int64,
 	cfg effectiveDownloadTransportConfig,
+	videoID string,
+	requestHeaders http.Header,
 ) (int64, error) {
 	file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -422,7 +580,7 @@ func downloadURLRangeAppend(
 
 	var lastErr error
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
-		n, err := downloadRangeOnce(ctx, httpClient, streamURL, startOffset, file)
+		n, err := downloadRangeOnce(ctx, httpClient, streamURL, startOffset, file, videoID, requestHeaders)
 		if err == nil {
 			return n, nil
 		}
@@ -449,11 +607,14 @@ func downloadRangeOnce(
 	streamURL string,
 	startOffset int64,
 	w io.Writer,
+	videoID string,
+	requestHeaders http.Header,
 ) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return 0, err
 	}
+	applyMediaRequestHeaders(req, requestHeaders, videoID)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startOffset))
 
 	resp, err := httpClient.Do(req)
@@ -480,18 +641,20 @@ func downloadURLFullRewrite(
 	streamURL string,
 	outputPath string,
 	cfg effectiveDownloadTransportConfig,
+	videoID string,
+	requestHeaders http.Header,
 ) (int64, error) {
 	file, err := os.Create(outputPath)
 	if err != nil {
 		return 0, err
 	}
 	defer file.Close()
-	return downloadURLToWriterWithConfig(ctx, httpClient, streamURL, file, DownloadTransportConfig{
+	return downloadURLToWriterWithConfigAndHeaders(ctx, httpClient, streamURL, file, DownloadTransportConfig{
 		MaxRetries:       cfg.MaxRetries,
 		InitialBackoff:   cfg.InitialBackoff,
 		MaxBackoff:       cfg.MaxBackoff,
 		RetryStatusCodes: cfg.RetryStatusCodes,
-	})
+	}, videoID, requestHeaders)
 }
 
 type effectiveDownloadTransportConfig struct {
@@ -536,13 +699,21 @@ func normalizeDownloadTransportConfig(cfg DownloadTransportConfig) effectiveDown
 	if maxConcurrency <= 0 {
 		maxConcurrency = 4
 	}
+	enableChunked := cfg.EnableChunked
+	// Default to chunked transfer for direct media downloads when caller has
+	// not explicitly tuned chunking knobs. This improves throughput on servers
+	// that support byte ranges, and downloadURLToPath will gracefully fall back
+	// to single-stream mode when ranges are unsupported.
+	if !enableChunked && cfg.ChunkSize == 0 && cfg.MaxConcurrency == 0 {
+		enableChunked = true
+	}
 
 	return effectiveDownloadTransportConfig{
 		MaxRetries:       maxRetries,
 		InitialBackoff:   initialBackoff,
 		MaxBackoff:       maxBackoff,
 		RetryStatusCodes: statusCodes,
-		EnableChunked:    cfg.EnableChunked,
+		EnableChunked:    enableChunked,
 		ChunkSize:        chunkSize,
 		MaxConcurrency:   maxConcurrency,
 	}
@@ -603,8 +774,10 @@ func downloadURLChunked(
 	streamURL string,
 	outputPath string,
 	cfg effectiveDownloadTransportConfig,
+	videoID string,
+	requestHeaders http.Header,
 ) (int64, error) {
-	total, err := probeContentLengthWithRange(ctx, httpClient, streamURL)
+	total, err := probeContentLengthWithRange(ctx, httpClient, streamURL, videoID, requestHeaders)
 	if err != nil {
 		return 0, err
 	}
@@ -644,7 +817,7 @@ func downloadURLChunked(
 			}
 			defer func() { <-sem }()
 
-			if err := downloadChunkWithRetry(ctx, httpClient, streamURL, file, chunk[0], chunk[1], cfg); err != nil {
+			if err := downloadChunkWithRetry(ctx, httpClient, streamURL, file, chunk[0], chunk[1], cfg, videoID, requestHeaders); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -663,11 +836,18 @@ func downloadURLChunked(
 	}
 }
 
-func probeContentLengthWithRange(ctx context.Context, httpClient *http.Client, streamURL string) (int64, error) {
+func probeContentLengthWithRange(
+	ctx context.Context,
+	httpClient *http.Client,
+	streamURL string,
+	videoID string,
+	requestHeaders http.Header,
+) (int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return 0, err
 	}
+	applyMediaRequestHeaders(req, requestHeaders, videoID)
 	req.Header.Set("Range", "bytes=0-0")
 
 	resp, err := httpClient.Do(req)
@@ -716,10 +896,12 @@ func downloadChunkWithRetry(
 	start int64,
 	end int64,
 	cfg effectiveDownloadTransportConfig,
+	videoID string,
+	requestHeaders http.Header,
 ) error {
 	var lastErr error
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
-		err := downloadChunkOnce(ctx, httpClient, streamURL, file, start, end)
+		err := downloadChunkOnce(ctx, httpClient, streamURL, file, start, end, videoID, requestHeaders)
 		if err == nil {
 			return nil
 		}
@@ -741,11 +923,14 @@ func downloadChunkOnce(
 	file *os.File,
 	start int64,
 	end int64,
+	videoID string,
+	requestHeaders http.Header,
 ) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		return err
 	}
+	applyMediaRequestHeaders(req, requestHeaders, videoID)
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 
 	resp, err := httpClient.Do(req)
@@ -801,7 +986,19 @@ func defaultOutputPath(videoID string, itag int, mimeType string, mode Selection
 }
 
 func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
-	dl := downloader.NewHLSDownloader(c.config.HTTPClient, streamURL)
+	headers := buildMediaRequestHeaders(c.config.RequestHeaders, videoID)
+	transport := downloader.TransportConfig{
+		MaxRetries:               c.config.DownloadTransport.MaxRetries,
+		InitialBackoff:           c.config.DownloadTransport.InitialBackoff,
+		MaxBackoff:               c.config.DownloadTransport.MaxBackoff,
+		RetryStatusCodes:         append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+		MaxConcurrency:           c.config.DownloadTransport.MaxConcurrency,
+		SkipUnavailableFragments: c.config.DownloadTransport.SkipUnavailableFragments,
+		MaxSkippedFragments:      c.config.DownloadTransport.MaxSkippedFragments,
+	}
+	dl := downloader.NewHLSDownloader(c.config.HTTPClient, streamURL).
+		WithRequestHeaders(headers).
+		WithTransportConfig(transport)
 
 	f, err := os.Create(outputPath)
 	if err != nil {
@@ -831,7 +1028,19 @@ func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath
 
 func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
 	repID := fmt.Sprintf("%d", format.Itag)
-	dl := downloader.NewDASHDownloader(c.config.HTTPClient, streamURL, repID)
+	headers := buildMediaRequestHeaders(c.config.RequestHeaders, videoID)
+	transport := downloader.TransportConfig{
+		MaxRetries:               c.config.DownloadTransport.MaxRetries,
+		InitialBackoff:           c.config.DownloadTransport.InitialBackoff,
+		MaxBackoff:               c.config.DownloadTransport.MaxBackoff,
+		RetryStatusCodes:         append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+		MaxConcurrency:           c.config.DownloadTransport.MaxConcurrency,
+		SkipUnavailableFragments: c.config.DownloadTransport.SkipUnavailableFragments,
+		MaxSkippedFragments:      c.config.DownloadTransport.MaxSkippedFragments,
+	}
+	dl := downloader.NewDASHDownloader(c.config.HTTPClient, streamURL, repID).
+		WithRequestHeaders(headers).
+		WithTransportConfig(transport)
 
 	f, err := os.Create(outputPath)
 	if err != nil {
@@ -865,4 +1074,96 @@ func getFileSize(path string) int64 {
 		return 0
 	}
 	return info.Size()
+}
+
+func (c *Client) cleanupIntermediateFile(videoID, path string, keep bool) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if keep {
+		c.emitDownloadEvent("cleanup", "skip", videoID, path, "keep_intermediate=true")
+		return
+	}
+	c.emitDownloadEvent("cleanup", "delete", videoID, path, "")
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		c.emitDownloadEvent("cleanup", "failure", videoID, path, err.Error())
+		return
+	}
+	c.emitDownloadEvent("cleanup", "complete", videoID, path, "")
+}
+
+func (c *Client) emitDownloadEvent(stage, phase, videoID, path, detail string) {
+	if c == nil || c.config.OnDownloadEvent == nil {
+		return
+	}
+	c.config.OnDownloadEvent(DownloadEvent{
+		Stage:   stage,
+		Phase:   phase,
+		VideoID: videoID,
+		Path:    path,
+		Detail:  detail,
+	})
+}
+
+func wrapDownloadFailure(err error, attempt AttemptDetail) error {
+	if err == nil {
+		return nil
+	}
+	return errors.Join(err, &DownloadFailureDetailError{
+		Attempts: []AttemptDetail{attempt},
+	})
+}
+
+func formatDownloadFailureDetail(attempt AttemptDetail) string {
+	parts := []string{attempt.Reason}
+	if attempt.HTTPStatus != 0 {
+		parts = append(parts, fmt.Sprintf("http=%d", attempt.HTTPStatus))
+	}
+	if attempt.Protocol != "" {
+		parts = append(parts, "proto="+attempt.Protocol)
+	}
+	if attempt.Itag != 0 {
+		parts = append(parts, fmt.Sprintf("itag=%d", attempt.Itag))
+	}
+	if attempt.URLHost != "" {
+		parts = append(parts, "host="+attempt.URLHost)
+	}
+	if attempt.URLHasN {
+		parts = append(parts, "has_n=true")
+	}
+	if attempt.URLHasPOT {
+		parts = append(parts, "has_pot=true")
+	}
+	if attempt.URLHasSignature {
+		parts = append(parts, "has_sig=true")
+	}
+	if attempt.Client != "" {
+		parts = append(parts, "client="+attempt.Client)
+	}
+	return strings.Join(parts, " ")
+}
+
+func downloadAttemptFromFormatAndURL(f types.FormatInfo, rawURL string, err error) AttemptDetail {
+	d := AttemptDetail{
+		Client:   f.SourceClient,
+		Stage:    "download",
+		Reason:   err.Error(),
+		Itag:     f.Itag,
+		Protocol: strings.TrimSpace(f.Protocol),
+	}
+	if d.Protocol == "" {
+		d.Protocol = "unknown"
+	}
+	if u, parseErr := url.Parse(rawURL); parseErr == nil {
+		d.URLHost = u.Host
+		q := u.Query()
+		d.URLHasN = q.Get("n") != ""
+		d.URLHasPOT = q.Get("pot") != "" || strings.Contains(u.Path, "/pot/")
+		d.URLHasSignature = q.Get("sig") != "" || q.Get("signature") != "" || q.Get("lsig") != ""
+	}
+	var statusErr *downloadHTTPStatusError
+	if errors.As(err, &statusErr) {
+		d.HTTPStatus = statusErr.StatusCode
+	}
+	return d
 }

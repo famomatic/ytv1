@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/famomatic/ytv1/internal/innertube"
 )
 
 func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -24,6 +26,11 @@ func applyRequestHeaders(req *http.Request, headers http.Header) {
 	}
 }
 
+func applyMediaRequestHeaders(req *http.Request, headers http.Header, videoID string) {
+	merged := buildMediaRequestHeaders(headers, videoID)
+	applyRequestHeaders(req, merged)
+}
+
 func cloneHeader(h http.Header) http.Header {
 	if h == nil {
 		return nil
@@ -35,6 +42,29 @@ func cloneHeader(h http.Header) http.Header {
 		out[k] = cp
 	}
 	return out
+}
+
+func buildMediaRequestHeaders(headers http.Header, videoID string) http.Header {
+	merged := cloneHeader(headers)
+	if merged == nil {
+		merged = make(http.Header)
+	}
+
+	if merged.Get("User-Agent") == "" {
+		merged.Set("User-Agent", innertube.WebClient.UserAgent)
+	}
+	if merged.Get("Origin") == "" {
+		merged.Set("Origin", "https://www.youtube.com")
+	}
+	if merged.Get("Referer") == "" {
+		if videoID != "" {
+			merged.Set("Referer", "https://www.youtube.com/watch?v="+videoID)
+		} else {
+			merged.Set("Referer", "https://www.youtube.com/")
+		}
+	}
+
+	return merged
 }
 
 func mergeHeaders(dst http.Header, src http.Header) {

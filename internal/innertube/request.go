@@ -5,6 +5,7 @@ import "strings"
 type PlayerRequest struct {
 	Context                    Context                     `json:"context"`
 	VideoID                    string                      `json:"videoId"`
+	Params                     string                      `json:"params,omitempty"`
 	CPN                        string                      `json:"cpn,omitempty"`
 	ContentCheckOk             bool                        `json:"contentCheckOk,omitempty"`
 	RacyCheckOk                bool                        `json:"racyCheckOk,omitempty"`
@@ -13,15 +14,15 @@ type PlayerRequest struct {
 }
 
 type BrowseRequest struct {
-	Context       Context `json:"context"`
-	BrowseID      string  `json:"browseId,omitempty"`
-	Continuation  string  `json:"continuation,omitempty"`
-	Params        string  `json:"params,omitempty"`
-	CurrentUrl    string  `json:"currentUrl,omitempty"`
-	IsAudioOnly   bool    `json:"isAudioOnly,omitempty"`
-	TunerSetting  string  `json:"tunerSetting,omitempty"`
-	ContentCheckOk bool   `json:"contentCheckOk,omitempty"`
-	RacyCheckOk    bool   `json:"racyCheckOk,omitempty"`
+	Context        Context `json:"context"`
+	BrowseID       string  `json:"browseId,omitempty"`
+	Continuation   string  `json:"continuation,omitempty"`
+	Params         string  `json:"params,omitempty"`
+	CurrentUrl     string  `json:"currentUrl,omitempty"`
+	IsAudioOnly    bool    `json:"isAudioOnly,omitempty"`
+	TunerSetting   string  `json:"tunerSetting,omitempty"`
+	ContentCheckOk bool    `json:"contentCheckOk,omitempty"`
+	RacyCheckOk    bool    `json:"racyCheckOk,omitempty"`
 }
 
 type Context struct {
@@ -61,6 +62,7 @@ type RequestContext struct {
 
 type PlaybackContext struct {
 	ContentPlaybackContext ContentPlaybackContext `json:"contentPlaybackContext"`
+	AdPlaybackContext      *AdPlaybackContext     `json:"adPlaybackContext,omitempty"`
 }
 
 type ContentPlaybackContext struct {
@@ -72,12 +74,19 @@ type ContentPlaybackContext struct {
 	SignatureTimestamp    int    `json:"signatureTimestamp,omitempty"`
 }
 
+type AdPlaybackContext struct {
+	Pyv bool `json:"pyv"`
+}
+
 type ServiceIntegrityDimensions struct {
 	PoToken string `json:"poToken,omitempty"`
 }
 
 type PlayerRequestOptions struct {
-	VisitorData string
+	VisitorData        string
+	SignatureTimestamp int
+	UseAdPlayback      bool
+	PlayerParams       string
 }
 
 func NewPlayerRequest(profile ClientProfile, videoID string, opts ...PlayerRequestOptions) *PlayerRequest {
@@ -114,6 +123,15 @@ func NewPlayerRequest(profile ClientProfile, videoID string, opts ...PlayerReque
 				Lact:            10000, // Dummy value
 			},
 		},
+	}
+	if options.SignatureTimestamp > 0 {
+		req.PlaybackContext.ContentPlaybackContext.SignatureTimestamp = options.SignatureTimestamp
+	}
+	if options.UseAdPlayback {
+		req.PlaybackContext.AdPlaybackContext = &AdPlaybackContext{Pyv: true}
+	}
+	if options.PlayerParams != "" {
+		req.Params = options.PlayerParams
 	}
 
 	if profile.Screen == "EMBED" {

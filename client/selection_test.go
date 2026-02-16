@@ -75,3 +75,18 @@ func TestSelectDownloadFormat_NoModeMatch(t *testing.T) {
 		t.Fatal("selectDownloadFormat() found format, want none")
 	}
 }
+
+func TestSelectDownloadFormat_PrefersKnownProtocolOverUnknown(t *testing.T) {
+	formats := []FormatInfo{
+		{Itag: 300, MimeType: "video/mp4", Protocol: "unknown", HasVideo: true, Height: 1080, FPS: 60, Bitrate: 4_000_000},
+		{Itag: 299, MimeType: "video/mp4", Protocol: "https", HasVideo: true, Height: 1080, FPS: 60, Bitrate: 3_500_000},
+	}
+
+	got, ok := selectDownloadFormat(formats, DownloadOptions{Mode: SelectionModeMP4VideoOnly})
+	if !ok {
+		t.Fatal("selectDownloadFormat() not found")
+	}
+	if got.Itag != 299 {
+		t.Fatalf("mp4videoonly mode selected itag=%d, want 299", got.Itag)
+	}
+}

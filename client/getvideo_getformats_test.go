@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -32,6 +33,12 @@ func newMockClientForPlayerJSON(t *testing.T, playerJSON string) *Client {
 					StatusCode: http.StatusOK,
 					Header:     make(http.Header),
 					Body:       io.NopCloser(bytes.NewBufferString(html)),
+				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s/player/"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`var cfg={signatureTimestamp:20494};`)),
 				}, nil
 			default:
 				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
@@ -137,5 +144,96 @@ func TestGetFormatsNoPlayable(t *testing.T) {
 	_, err := c.GetFormats(context.Background(), "jNQXAC9IVRw")
 	if !errors.Is(err, ErrNoPlayableFormats) {
 		t.Fatalf("GetFormats() error = %v, want %v", err, ErrNoPlayableFormats)
+	}
+}
+
+func TestGetVideoEmitsExtractionEventsForWebpageAndManifest(t *testing.T) {
+	playerJSON := `{
+		"playabilityStatus":{"status":"OK"},
+		"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+		"streamingData":{
+			"formats":[{"itag":18,"url":"https://example.com/v.mp4","mimeType":"video/mp4","bitrate":1000}],
+						"dashManifestUrl":"https://example.com/manifest.mpd?n=abcd",
+			"hlsManifestUrl":"https://example.com/manifest.m3u8"
+		}
+	}`
+
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(playerJSON)),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				html := `<html><script src="/s/player/1798f86c/player_es6.vflset/ko_KR/base.js"></script></html>`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(html)),
+				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s/player/"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`var cfg={signatureTimestamp:20494};`)),
+				}, nil
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, ".mpd"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"></MPD>`)),
+				}, nil
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, ".m3u8"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`#EXTM3U`)),
+				}, nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+				return nil, nil
+			}
+		}),
+	}
+
+	var mu sync.Mutex
+	var events []ExtractionEvent
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+		OnExtractionEvent: func(evt ExtractionEvent) {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, evt)
+		},
+	})
+
+	_, err := c.GetVideo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideo() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var hasWebpageStart, hasWebpageSuccess, hasManifestStart bool
+	for _, evt := range events {
+		if evt.Stage == "webpage" && evt.Phase == "start" {
+			hasWebpageStart = true
+		}
+		if evt.Stage == "webpage" && evt.Phase == "success" {
+			hasWebpageSuccess = true
+		}
+		if evt.Stage == "manifest" && evt.Phase == "start" {
+			hasManifestStart = true
+		}
+	}
+	if !hasWebpageStart || !hasWebpageSuccess {
+		t.Fatalf("expected webpage start/success events, got=%v", events)
+	}
+	if !hasManifestStart {
+		t.Fatalf("expected manifest start event, got=%v", events)
 	}
 }

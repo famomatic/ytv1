@@ -149,6 +149,12 @@ func TestGetVideo_ExpandsManifestFormats(t *testing.T) {
 					Header:     make(http.Header),
 					Body:       io.NopCloser(strings.NewReader(html)),
 				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s/player/"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`var cfg={signatureTimestamp:20494};`)),
+				}, nil
 			case r.Method == http.MethodGet && r.URL.String() == "https://example.com/dash.mpd":
 				dash := `<?xml version="1.0" encoding="UTF-8"?>
 <MPD><Period><AdaptationSet mimeType="audio/mp4" codecs="mp4a.40.2"><Representation id="140" bandwidth="128000"><BaseURL>https://cdn.example.com/a140.m4a</BaseURL></Representation></AdaptationSet></Period></MPD>`

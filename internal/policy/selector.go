@@ -13,12 +13,13 @@ type Selector interface {
 }
 
 type defaultSelector struct {
-	registry    innertube.Registry
-	clientOrder []string
-	clientSkip  map[string]struct{}
+	registry           innertube.Registry
+	clientOrder        []string
+	clientSkip         map[string]struct{}
+	preferAuthDefaults bool
 }
 
-func NewSelector(registry innertube.Registry, clientOrder []string, clientSkip []string) Selector {
+func NewSelector(registry innertube.Registry, clientOrder []string, clientSkip []string, preferAuthDefaults bool) Selector {
 	skip := make(map[string]struct{}, len(clientSkip))
 	for _, name := range clientSkip {
 		normalized := strings.ToLower(strings.TrimSpace(name))
@@ -28,9 +29,10 @@ func NewSelector(registry innertube.Registry, clientOrder []string, clientSkip [
 		skip[normalized] = struct{}{}
 	}
 	return &defaultSelector{
-		registry:    registry,
-		clientOrder: clientOrder,
-		clientSkip:  skip,
+		registry:           registry,
+		clientOrder:        clientOrder,
+		clientSkip:         skip,
+		preferAuthDefaults: preferAuthDefaults,
 	}
 }
 
@@ -41,17 +43,7 @@ func (s *defaultSelector) Registry() innertube.Registry {
 func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 	clients := s.clientOrder
 	if len(clients) == 0 {
-		// Default strategy follows yt-dlp style priority before fallback clients.
-		clients = []string{
-			"android_vr",
-			"web",
-			"web_safari",
-			"android",
-			"ios",
-			"mweb",
-			"web_embedded",
-			"tv",
-		}
+		clients = s.defaultClientOrder()
 	}
 
 	var profiles []innertube.ClientProfile
@@ -75,7 +67,7 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 
 	// If overrides were provided but all invalid, fall back to defaults.
 	if len(profiles) == 0 && len(s.clientOrder) > 0 {
-		defaults := []string{"android_vr", "web", "web_safari", "android", "ios", "mweb", "web_embedded", "tv"}
+		defaults := s.defaultClientOrder()
 		for _, name := range defaults {
 			if _, skipped := s.clientSkip[name]; skipped {
 				continue
@@ -87,4 +79,15 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 	}
 
 	return profiles
+}
+
+func (s *defaultSelector) defaultClientOrder() []string {
+	// Mirrors yt-dlp practical defaults:
+	// - unauthenticated: android_vr, web, web_safari
+	// - authenticated: tv_downgraded, web, web_safari
+	// We currently map tv_downgraded to tv profile behavior.
+	if s.preferAuthDefaults {
+		return []string{"tv_downgraded", "web", "web_safari"}
+	}
+	return []string{"android_vr", "web", "web_safari"}
 }

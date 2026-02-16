@@ -1,6 +1,7 @@
 package playerjs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -40,6 +41,8 @@ const defaultPlayerJSUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 const defaultPlayerJSLocale = "en_US"
 
 var playerURLPattern = regexp.MustCompile(`(/s/player/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]*/base\.js)`)
+var playerJSURLCfgPattern = regexp.MustCompile(`(?i)["']PLAYER_JS_URL["']\s*:\s*["']([^"']+)["']`)
+var webPlayerContextJSURLPattern = regexp.MustCompile(`(?i)["']jsUrl["']\s*:\s*["']([^"']+/base\.js)["']`)
 var playerPathPattern = regexp.MustCompile(`^/s/player/([A-Za-z0-9_-]+)/(.+)$`)
 var localePathPattern = regexp.MustCompile(`(?i)(player(?:_[a-z0-9]+)?\.vflset)/[a-z]{2,3}_[a-z]{2,3}/base\.js$`)
 var nonAlnumPattern = regexp.MustCompile(`[^a-zA-Z0-9]+`)
@@ -175,11 +178,65 @@ func (r *defaultResolver) GetPlayerURL(ctx context.Context, videoID string) (str
 		return "", fmt.Errorf("failed to read body: %w", err)
 	}
 
-	m := playerURLPattern.FindSubmatch(body)
-	if len(m) < 2 {
-		return "", fmt.Errorf("player url not found")
+	if extracted := extractPlayerURLFromWatchPage(body); extracted != "" {
+		return extracted, nil
 	}
-	return string(m[1]), nil
+	if bytes.Contains(body, []byte("iframe_api")) {
+		if fallback := r.fetchIframeAPIPlayerURL(ctx, baseURL); fallback != "" {
+			return fallback, nil
+		}
+	}
+	return "", fmt.Errorf("player url not found")
+}
+
+func extractPlayerURLFromWatchPage(body []byte) string {
+	for _, re := range []*regexp.Regexp{playerJSURLCfgPattern, webPlayerContextJSURLPattern, playerURLPattern} {
+		m := re.FindSubmatch(body)
+		if len(m) < 2 {
+			continue
+		}
+		candidate := strings.TrimSpace(string(m[1]))
+		if candidate == "" {
+			continue
+		}
+		candidate = strings.ReplaceAll(candidate, `\/`, "/")
+		if strings.HasPrefix(candidate, "//") {
+			return "https:" + candidate
+		}
+		return candidate
+	}
+	return ""
+}
+
+func (r *defaultResolver) fetchIframeAPIPlayerURL(ctx context.Context, baseURL string) string {
+	urlToFetch := strings.TrimRight(baseURL, "/") + "/iframe_api"
+	req, err := http.NewRequestWithContext(ctx, "GET", urlToFetch, nil)
+	if err != nil {
+		return ""
+	}
+	ua := r.config.UserAgent
+	if ua == "" {
+		ua = defaultPlayerJSUserAgent
+	}
+	req.Header.Set("User-Agent", ua)
+	for k, values := range r.config.Headers {
+		for _, v := range values {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return extractPlayerURLFromWatchPage(body)
 }
 
 func (r *defaultResolver) normalizePlayerPath(playerURL string) string {

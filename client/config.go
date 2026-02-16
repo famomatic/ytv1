@@ -62,6 +62,14 @@ type Config struct {
 	// Default is false (dynamic resolution enabled).
 	DisableDynamicAPIKeyResolution bool
 
+	// UseAdPlaybackContext enables `playbackContext.adPlaybackContext.pyv=true`
+	// when the selected client supports ad playback context.
+	UseAdPlaybackContext bool
+
+	// ClientHedgeDelay delays lower-priority client requests during extraction.
+	// Zero means immediate parallel start for all selected clients.
+	ClientHedgeDelay time.Duration
+
 	// RequestHeaders are applied to package-level outgoing HTTP requests.
 	RequestHeaders http.Header
 
@@ -92,6 +100,18 @@ type Config struct {
 	// Logger receives non-fatal package warnings (optional).
 	// If nil, warnings are suppressed.
 	Logger Logger
+
+	// OnExtractionEvent receives extraction lifecycle events (optional).
+	// If nil, extraction events are suppressed.
+	OnExtractionEvent func(ExtractionEvent)
+
+	// OnDownloadEvent receives download lifecycle events (optional).
+	// If nil, download events are suppressed.
+	OnDownloadEvent func(DownloadEvent)
+
+	// KeepIntermediateFiles keeps intermediate video/audio files after merge download.
+	// Default is false (remove intermediates on successful/failed merge attempt).
+	KeepIntermediateFiles bool
 
 	// SessionCacheTTL expires in-memory video sessions after this duration.
 	// Zero disables TTL-based expiration.
@@ -124,13 +144,15 @@ type Muxer interface {
 
 // DownloadTransportConfig controls retry/backoff behavior for direct stream downloads.
 type DownloadTransportConfig struct {
-	MaxRetries       int
-	InitialBackoff   time.Duration
-	MaxBackoff       time.Duration
-	RetryStatusCodes []int
-	EnableChunked    bool
-	ChunkSize        int64
-	MaxConcurrency   int
+	MaxRetries               int
+	InitialBackoff           time.Duration
+	MaxBackoff               time.Duration
+	RetryStatusCodes         []int
+	EnableChunked            bool
+	ChunkSize                int64
+	MaxConcurrency           int
+	SkipUnavailableFragments bool
+	MaxSkippedFragments      int
 }
 
 // MetadataTransportConfig controls retry/backoff for Innertube player metadata requests.
@@ -146,6 +168,18 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 	disableFallback := c.DisableFallbackClients
 	if !disableFallback && len(c.ClientOverrides) > 0 && !c.AppendFallbackOnClientOverrides {
 		disableFallback = true
+	}
+
+	var extractionHandler innertube.ExtractionEventHandler
+	if c.OnExtractionEvent != nil {
+		extractionHandler = func(evt innertube.ExtractionEvent) {
+			c.OnExtractionEvent(ExtractionEvent{
+				Stage:  evt.Stage,
+				Phase:  evt.Phase,
+				Client: evt.Client,
+				Detail: evt.Detail,
+			})
+		}
 	}
 
 	return innertube.Config{
@@ -165,5 +199,8 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 		DisableFallbackClients:        disableFallback,
 		MetadataTransport:             innertube.MetadataTransportConfig(c.MetadataTransport),
 		EnableDynamicAPIKeyResolution: !c.DisableDynamicAPIKeyResolution,
+		UseAdPlaybackContext:          c.UseAdPlaybackContext,
+		ClientHedgeDelay:              c.ClientHedgeDelay,
+		OnExtractionEvent:             extractionHandler,
 	}
 }
