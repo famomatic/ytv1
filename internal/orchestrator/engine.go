@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,7 +101,10 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			}
 
 			req := innertube.NewPlayerRequest(p, videoID, innertube.PlayerRequestOptions{
-				VisitorData: e.config.VisitorData,
+				VisitorData:        e.resolveVisitorData(ctx, p, videoID),
+				SignatureTimestamp: e.resolveSignatureTimestamp(ctx, p, videoID),
+				UseAdPlayback:      e.config.UseAdPlaybackContext && p.SupportsAdPlaybackContext,
+				PlayerParams:       strings.TrimSpace(p.PlayerParams),
 			})
 			if err := e.applyPoToken(ctx, req, p); err != nil {
 				select {
@@ -111,7 +113,7 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 				}
 				return
 			}
-			resp, err := e.fetch(ctx, req, p)
+			resp, err := e.fetch(ctx, req, p, videoID)
 
 			select {
 			case results <- extractionResult{response: resp, err: err, client: clientLabel, order: order}:
@@ -125,36 +127,46 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 		close(results)
 	}()
 
-	type indexedAttempt struct {
+	type orderedResult struct {
 		order   int
-		attempt AttemptError
+		client  string
+		resp    *innertube.PlayerResponse
+		err     error
 	}
-	var indexed []indexedAttempt
+	pending := make(map[int]orderedResult, len(clients))
+	nextOrder := 0
+	attempts := make([]AttemptError, 0, len(clients))
+
+	// Deterministic client-order selection:
+	// keep parallel requests for latency, but only commit a success when all
+	// earlier-order clients have already completed (success/failure).
 	for res := range results {
-		if res.err == nil {
-			res.response.SourceClient = res.client
-			e.emitExtractionEvent("player_api_json", "success", res.client, "")
-			cancel()
-			sort.Slice(indexed, func(i, j int) bool { return indexed[i].order < indexed[j].order })
-			attempts := make([]AttemptError, 0, len(indexed))
-			for _, item := range indexed {
-				attempts = append(attempts, item.attempt)
-			}
-			return res.response, attempts
+		pending[res.order] = orderedResult{
+			order:  res.order,
+			client: res.client,
+			resp:   res.response,
+			err:    res.err,
 		}
-		e.emitExtractionEvent("player_api_json", "failure", res.client, res.err.Error())
-		indexed = append(indexed, indexedAttempt{
-			order: res.order,
-			attempt: AttemptError{
-				Client: res.client,
-				Err:    res.err,
-			},
-		})
-	}
-	sort.Slice(indexed, func(i, j int) bool { return indexed[i].order < indexed[j].order })
-	attempts := make([]AttemptError, 0, len(indexed))
-	for _, item := range indexed {
-		attempts = append(attempts, item.attempt)
+		for {
+			current, ok := pending[nextOrder]
+			if !ok {
+				break
+			}
+			delete(pending, nextOrder)
+			nextOrder++
+
+			if current.err == nil {
+				current.resp.SourceClient = current.client
+				e.emitExtractionEvent("player_api_json", "success", current.client, "")
+				cancel()
+				return current.resp, attempts
+			}
+			e.emitExtractionEvent("player_api_json", "failure", current.client, current.err.Error())
+			attempts = append(attempts, AttemptError{
+				Client: current.client,
+				Err:    current.err,
+			})
+		}
 	}
 	return nil, attempts
 }
@@ -368,9 +380,9 @@ func shouldRunFallbackPhase(attempts []AttemptError) bool {
 	return false
 }
 
-func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) (*innertube.PlayerResponse, error) {
+func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile, videoID string) (*innertube.PlayerResponse, error) {
 	// Construct URL
-	apiKey := e.resolveAPIKey(ctx, profile)
+	apiKey := e.resolveAPIKey(ctx, profile, videoID)
 	url := "https://" + profile.Host + "/youtubei/v1/player"
 	if apiKey != "" {
 		url += "?key=" + neturl.QueryEscape(apiKey)
@@ -402,6 +414,14 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 	}
 	if req.Context.Client.VisitorData != "" {
 		httpReq.Header.Set("X-Goog-Visitor-Id", req.Context.Client.VisitorData)
+	}
+	if profile.SupportsCookies {
+		cookieAuth := innertube.BuildCookieAuthHeaders(e.config.HTTPClient, profile.Host, time.Now(), e.resolveCookieAuthContext(ctx, profile, videoID))
+		for k, values := range cookieAuth {
+			for _, val := range values {
+				httpReq.Header.Add(k, val)
+			}
+		}
 	}
 	// Add other headers from profile
 	for k, v := range profile.Headers {
@@ -435,15 +455,44 @@ func (e *Engine) fetch(ctx context.Context, req *innertube.PlayerRequest, profil
 	return nil, lastErr
 }
 
-func (e *Engine) resolveAPIKey(ctx context.Context, profile innertube.ClientProfile) string {
+func (e *Engine) resolveAPIKey(ctx context.Context, profile innertube.ClientProfile, videoID string) string {
 	if e.apiKeyResolver == nil {
 		return profile.APIKey
 	}
-	key, err := e.apiKeyResolver.Resolve(ctx, profile)
+	key, err := e.apiKeyResolver.Resolve(ctx, profile, videoID)
 	if err != nil {
 		return profile.APIKey
 	}
 	return key
+}
+
+func (e *Engine) resolveVisitorData(ctx context.Context, profile innertube.ClientProfile, videoID string) string {
+	if configured := strings.TrimSpace(e.config.VisitorData); configured != "" {
+		return configured
+	}
+	if cookie := innertube.ResolveVisitorData(e.config.HTTPClient, profile.Host, ""); cookie != "" {
+		return cookie
+	}
+	if e.apiKeyResolver != nil {
+		if fromWatch := strings.TrimSpace(e.apiKeyResolver.ResolveVisitorData(ctx, profile, videoID)); fromWatch != "" {
+			return fromWatch
+		}
+	}
+	return ""
+}
+
+func (e *Engine) resolveCookieAuthContext(ctx context.Context, profile innertube.ClientProfile, videoID string) innertube.CookieAuthContext {
+	if e.apiKeyResolver == nil {
+		return innertube.CookieAuthContext{}
+	}
+	return e.apiKeyResolver.ResolveCookieAuthContext(ctx, profile, videoID)
+}
+
+func (e *Engine) resolveSignatureTimestamp(ctx context.Context, profile innertube.ClientProfile, videoID string) int {
+	if e.apiKeyResolver == nil {
+		return 0
+	}
+	return e.apiKeyResolver.ResolveSignatureTimestamp(ctx, profile, videoID)
 }
 
 func (e *Engine) fetchOnce(ctx context.Context, template *http.Request, profile innertube.ClientProfile) (*innertube.PlayerResponse, error) {

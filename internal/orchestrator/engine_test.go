@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -519,19 +521,36 @@ func TestEngineResolvesAPIKeyFromWatchPageWhenEnabled(t *testing.T) {
 	web.APIKey = "stale_fallback_key"
 
 	var sawDynamicKey int32
+	var sawVisitorData int32
+	var sawAuthUser int32
+	var sawPageID int32
+	var sawSTS int32
 	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/watch":
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body: io.NopCloser(bytes.NewBufferString(
-					`<script>ytcfg.set({"INNERTUBE_API_KEY":"dynamic_watch_key_789"});</script>`,
+					`<script>ytcfg.set({"INNERTUBE_API_KEY":"dynamic_watch_key_789","VISITOR_DATA":"visitor_from_watch","SESSION_INDEX":4,"DELEGATED_SESSION_ID":"delegated_watch","USER_SESSION_ID":"user_watch","STS":20731});</script>`,
 				)),
 				Header: make(http.Header),
 			}, nil
 		case r.Method == http.MethodPost && r.URL.Path == "/youtubei/v1/player":
 			if r.URL.Query().Get("key") == "dynamic_watch_key_789" {
 				atomic.StoreInt32(&sawDynamicKey, 1)
+			}
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), `"visitorData":"visitor_from_watch"`) {
+				atomic.StoreInt32(&sawVisitorData, 1)
+			}
+			if strings.Contains(string(body), `"signatureTimestamp":20731`) {
+				atomic.StoreInt32(&sawSTS, 1)
+			}
+			if r.Header.Get("X-Goog-AuthUser") == "4" {
+				atomic.StoreInt32(&sawAuthUser, 1)
+			}
+			if r.Header.Get("X-Goog-PageId") == "delegated_watch" {
+				atomic.StoreInt32(&sawPageID, 1)
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -561,6 +580,18 @@ func TestEngineResolvesAPIKeyFromWatchPageWhenEnabled(t *testing.T) {
 	}
 	if atomic.LoadInt32(&sawDynamicKey) == 0 {
 		t.Fatalf("expected player request to use dynamically resolved API key")
+	}
+	if atomic.LoadInt32(&sawVisitorData) == 0 {
+		t.Fatalf("expected player request to use watch-page visitorData fallback")
+	}
+	if atomic.LoadInt32(&sawAuthUser) == 0 {
+		t.Fatalf("expected player request to use watch-page session index in X-Goog-AuthUser")
+	}
+	if atomic.LoadInt32(&sawPageID) == 0 {
+		t.Fatalf("expected player request to use watch-page delegated session id in X-Goog-PageId")
+	}
+	if atomic.LoadInt32(&sawSTS) == 0 {
+		t.Fatalf("expected player request to use watch-page STS in playback context")
 	}
 }
 
@@ -644,6 +675,103 @@ func TestEngineAppliesInnertubeIdentityHeaders(t *testing.T) {
 	}
 	if atomic.LoadInt32(&sawXOrigin) == 0 {
 		t.Fatalf("expected X-Origin header")
+	}
+}
+
+func TestEngineAppliesAdPlaybackContextAndPlayerParams(t *testing.T) {
+	web := innertube.WebClient
+	web.PlayerParams = "test_player_params"
+
+	var sawAdPlayback int32
+	var sawParams int32
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost && r.URL.Path == "/youtubei/v1/player" {
+			body, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(body), `"adPlaybackContext":{"pyv":true}`) {
+				atomic.StoreInt32(&sawAdPlayback, 1)
+			}
+			if strings.Contains(string(body), `"params":"test_player_params"`) {
+				atomic.StoreInt32(&sawParams, 1)
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient:           &http.Client{Transport: tr},
+			UseAdPlaybackContext: true,
+		},
+	)
+	_, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&sawAdPlayback) == 0 {
+		t.Fatalf("expected adPlaybackContext for supported client")
+	}
+	if atomic.LoadInt32(&sawParams) == 0 {
+		t.Fatalf("expected top-level player params to be sent")
+	}
+}
+
+func TestEngineAppliesCookieAuthHeadersAndVisitorFallback(t *testing.T) {
+	web := innertube.WebClient
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error = %v", err)
+	}
+	u, _ := url.Parse("https://www.youtube.com")
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "VISITOR_INFO1_LIVE", Value: "visitor-from-cookie", Domain: ".youtube.com", Path: "/"},
+		{Name: "SAPISID", Value: "sid-value", Domain: ".youtube.com", Path: "/"},
+		{Name: "LOGIN_INFO", Value: "logged-in", Domain: ".youtube.com", Path: "/"},
+	})
+
+	var sawVisitor int32
+	var sawAuth int32
+	var sawBootstrap int32
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("X-Goog-Visitor-Id") == "visitor-from-cookie" {
+			atomic.StoreInt32(&sawVisitor, 1)
+		}
+		if strings.HasPrefix(r.Header.Get("Authorization"), "SAPISIDHASH ") {
+			atomic.StoreInt32(&sawAuth, 1)
+		}
+		if r.Header.Get("X-Youtube-Bootstrap-Logged-In") == "true" {
+			atomic.StoreInt32(&sawBootstrap, 1)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{web}},
+		innertube.Config{
+			HTTPClient: &http.Client{Transport: tr, Jar: jar},
+		},
+	)
+	_, err = engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if atomic.LoadInt32(&sawVisitor) == 0 {
+		t.Fatalf("expected visitor fallback from cookie")
+	}
+	if atomic.LoadInt32(&sawAuth) == 0 {
+		t.Fatalf("expected cookie auth header")
+	}
+	if atomic.LoadInt32(&sawBootstrap) == 0 {
+		t.Fatalf("expected bootstrap logged-in header")
 	}
 }
 

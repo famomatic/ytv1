@@ -62,6 +62,10 @@ type Config struct {
 	// Default is false (dynamic resolution enabled).
 	DisableDynamicAPIKeyResolution bool
 
+	// UseAdPlaybackContext enables `playbackContext.adPlaybackContext.pyv=true`
+	// when the selected client supports ad playback context.
+	UseAdPlaybackContext bool
+
 	// RequestHeaders are applied to package-level outgoing HTTP requests.
 	RequestHeaders http.Header
 
@@ -189,6 +193,7 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 		DisableFallbackClients:        disableFallback,
 		MetadataTransport:             innertube.MetadataTransportConfig(c.MetadataTransport),
 		EnableDynamicAPIKeyResolution: !c.DisableDynamicAPIKeyResolution,
+		UseAdPlaybackContext:          c.UseAdPlaybackContext,
 		OnExtractionEvent:             extractionHandler,
 	}
 }

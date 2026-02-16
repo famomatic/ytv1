@@ -40,6 +40,7 @@ type Config struct {
 	DisableFallbackClients        bool
 	MetadataTransport             MetadataTransportConfig
 	EnableDynamicAPIKeyResolution bool
+	UseAdPlaybackContext          bool
 	OnExtractionEvent             ExtractionEventHandler
 }
 

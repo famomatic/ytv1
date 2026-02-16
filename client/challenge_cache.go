@@ -40,6 +40,8 @@ func (c *Client) primeChallengeSolutions(
 	}
 
 	failures := 0
+	nFailures := 0
+	sigFailures := 0
 	for challenge := range nChallenges {
 		if _, ok := c.getChallengeN(playerURL, challenge); ok {
 			continue
@@ -47,6 +49,7 @@ func (c *Client) primeChallengeSolutions(
 		decoded, err := decipherer.DecipherN(challenge)
 		if err != nil {
 			failures++
+			nFailures++
 			continue
 		}
 		c.setChallengeN(playerURL, challenge, decoded)
@@ -59,13 +62,19 @@ func (c *Client) primeChallengeSolutions(
 		decoded, err := decipherer.DecipherSignature(challenge)
 		if err != nil {
 			failures++
+			sigFailures++
 			continue
 		}
 		c.setChallengeSig(playerURL, challenge, decoded)
 	}
 
 	if failures > 0 {
-		c.emitExtractionEvent("challenge", "partial", "web", "unsolved="+itoa(failures))
+		c.emitExtractionEvent(
+			"challenge",
+			"partial",
+			"web",
+			"unsolved="+itoa(failures)+",n="+itoa(nFailures)+",sig="+itoa(sigFailures),
+		)
 		return
 	}
 	c.emitExtractionEvent("challenge", "success", "web", "n="+itoa(len(nChallenges))+",sig="+itoa(len(sigChallenges)))

@@ -503,3 +503,154 @@ func TestDownloadFailureProvidesAttemptDetails(t *testing.T) {
 		t.Fatalf("expected source client in attempt details, got: %+v", a)
 	}
 }
+
+func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{
+						"adaptiveFormats":[
+							{"itag":248,"signatureCipher":"url=https%3A%2F%2Fmedia.example%2Fcipher-video.webm&s=abc&sp=sig","mimeType":"video/webm","bitrate":2000000},
+							{"itag":251,"signatureCipher":"url=https%3A%2F%2Fmedia.example%2Fcipher-audio.webm&s=xyz&sp=sig","mimeType":"audio/webm","bitrate":192000},
+							{"itag":135,"url":"https://media.example/plain-video.mp4","mimeType":"video/mp4","bitrate":700000},
+							{"itag":140,"url":"https://media.example/plain-audio.m4a","mimeType":"audio/mp4","bitrate":128000}
+						]
+					}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/player_ias.vflset/en_US/base.js"></script></html>`)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/s/player/test/player_ias.vflset/en_US/base.js":
+				// Intentionally broken JS: if ciphered selection is attempted, resolve should fail.
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`var broken = true;`)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.String() == "https://media.example/plain-video.mp4":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("video")),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.String() == "https://media.example/plain-audio.m4a":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("audio")),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && strings.Contains(r.URL.String(), "cipher-video.webm"):
+				t.Fatalf("ciphered video should not be selected")
+				return nil, nil
+			case r.Method == http.MethodGet && strings.Contains(r.URL.String(), "cipher-audio.webm"):
+				t.Fatalf("ciphered audio should not be selected")
+				return nil, nil
+			default:
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("not found")),
+					Header:     make(http.Header),
+				}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+		Muxer:           testMuxer{},
+	})
+
+	out := filepath.Join(t.TempDir(), "merged.mp4")
+	res, err := c.Download(context.Background(), videoID, DownloadOptions{
+		Mode:       SelectionModeBest,
+		OutputPath: out,
+	})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if res.OutputPath != out {
+		t.Fatalf("output path=%q want=%q", res.OutputPath, out)
+	}
+}
+
+func TestDownloadFallsBackToSingleWhenMergeChallengeUnsolved(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{
+						"formats":[{"itag":18,"url":"https://media.example/muxed.mp4","mimeType":"video/mp4","bitrate":120000}],
+						"adaptiveFormats":[
+							{"itag":248,"signatureCipher":"url=https%3A%2F%2Fmedia.example%2Fcipher-video.webm&s=abc&sp=sig","mimeType":"video/webm","bitrate":2000000},
+							{"itag":251,"signatureCipher":"url=https%3A%2F%2Fmedia.example%2Fcipher-audio.webm&s=xyz&sp=sig","mimeType":"audio/webm","bitrate":192000}
+						]
+					}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/player_ias.vflset/en_US/base.js"></script></html>`)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/s/player/test/player_ias.vflset/en_US/base.js":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`var broken = true;`)),
+					Header:     make(http.Header),
+				}, nil
+			case r.Method == http.MethodGet && r.URL.String() == "https://media.example/muxed.mp4":
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("muxed")),
+					Header:     make(http.Header),
+				}, nil
+			default:
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("not found")),
+					Header:     make(http.Header),
+				}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+		Muxer:           testMuxer{},
+	})
+	out := filepath.Join(t.TempDir(), "fallback.mp4")
+	res, err := c.Download(context.Background(), videoID, DownloadOptions{
+		Mode:       SelectionModeBest,
+		OutputPath: out,
+	})
+	if err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if res.Itag != 18 {
+		t.Fatalf("expected fallback muxed itag=18, got %d", res.Itag)
+	}
+}

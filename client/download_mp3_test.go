@@ -66,6 +66,8 @@ func TestDownload_MP3ModeWithTranscoder(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/watch":
 			html := `<html><script src="/s/player/1798f86c/player_es6.vflset/ko_KR/base.js"></script></html>`
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(html))}, nil
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s/player/"):
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`var cfg={signatureTimestamp:20494};`))}, nil
 		case r.Method == http.MethodGet && r.URL.Host == "media.local" && r.URL.Path == "/audio":
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString("source-audio"))}, nil
 		default:

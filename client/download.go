@@ -53,9 +53,15 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// filters ...
 
-	info, err := c.GetVideo(ctx, videoID)
-	if err != nil {
-		return nil, err
+	var info *VideoInfo
+	if session, ok := c.getSession(videoID); ok && session.Info != nil {
+		info = cloneVideoInfo(session.Info)
+	}
+	if info == nil {
+		info, err = c.GetVideo(ctx, videoID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	formats := info.Formats
 
@@ -111,6 +117,7 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// 2. Select Formats
 	var selected []types.FormatInfo
+	var parsedSelector *selector.Selector
 	if options.Itag > 0 {
 		for _, f := range formats {
 			if f.Itag == options.Itag {
@@ -126,6 +133,7 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		if err != nil {
 			return nil, fmt.Errorf("selector parse failed: %w", err)
 		}
+		parsedSelector = sel
 		selected, err = selector.Select(formats, sel)
 		if err != nil {
 			return nil, err
@@ -134,6 +142,24 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	if len(selected) == 0 {
 		return nil, errors.New("no formats found matching criteria")
+	}
+
+	// Prefer decipher-free selections when available to avoid hard failure
+	// if player JS challenge solve is partial.
+	if options.Itag == 0 && parsedSelector != nil && selectionHasCiphered(selected) {
+		nonCiphered := make([]types.FormatInfo, 0, len(formats))
+		for _, f := range formats {
+			if !f.Ciphered {
+				nonCiphered = append(nonCiphered, f)
+			}
+		}
+		if len(nonCiphered) > 0 {
+			if alt, err := selector.Select(nonCiphered, parsedSelector); err == nil && len(alt) > 0 {
+				if len(alt) >= len(selected) {
+					selected = alt
+				}
+			}
+		}
 	}
 
 	// 3. Fallback for Merge if Muxer missing
@@ -148,10 +174,68 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// 4. Download
 	if len(selected) == 1 {
-		return c.downloadSingle(ctx, videoID, selected[0], options.OutputPath, options)
+		res, err := c.downloadSingle(ctx, videoID, selected[0], options.OutputPath, options)
+		if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
+			c.warnf("challenge solve incomplete; retrying with fallback single-file format")
+			return c.downloadFallbackSingle(ctx, videoID, formats, options.OutputPath, options)
+		}
+		return res, err
 	}
 
-	return c.downloadAndMerge(ctx, videoID, selected, options, meta)
+	res, err := c.downloadAndMerge(ctx, videoID, selected, options, meta)
+	if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
+		c.warnf("challenge solve incomplete during merge selection; retrying with fallback single-file format")
+		return c.downloadFallbackSingle(ctx, videoID, formats, options.OutputPath, options)
+	}
+	return res, err
+}
+
+func selectionHasCiphered(selected []types.FormatInfo) bool {
+	for _, f := range selected {
+		if f.Ciphered {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) downloadFallbackSingle(
+	ctx context.Context,
+	videoID string,
+	formats []types.FormatInfo,
+	outputPath string,
+	options DownloadOptions,
+) (*DownloadResult, error) {
+	candidates := make([]types.FormatInfo, 0, len(formats))
+	for _, f := range formats {
+		if f.HasVideo && f.HasAudio {
+			candidates = append(candidates, f)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, ErrChallengeNotSolved
+	}
+
+	preferred := make([]types.FormatInfo, 0, len(candidates))
+	for _, f := range candidates {
+		if !f.Ciphered {
+			preferred = append(preferred, f)
+		}
+	}
+	if len(preferred) == 0 {
+		preferred = candidates
+	}
+
+	for _, f := range preferred {
+		res, err := c.downloadSingle(ctx, videoID, f, outputPath, options)
+		if err == nil {
+			return res, nil
+		}
+		if !errors.Is(err, ErrChallengeNotSolved) {
+			return nil, err
+		}
+	}
+	return nil, ErrChallengeNotSolved
 }
 
 func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.FormatInfo, outputPath string, options DownloadOptions) (*DownloadResult, error) {
@@ -612,13 +696,21 @@ func normalizeDownloadTransportConfig(cfg DownloadTransportConfig) effectiveDown
 	if maxConcurrency <= 0 {
 		maxConcurrency = 4
 	}
+	enableChunked := cfg.EnableChunked
+	// Default to chunked transfer for direct media downloads when caller has
+	// not explicitly tuned chunking knobs. This improves throughput on servers
+	// that support byte ranges, and downloadURLToPath will gracefully fall back
+	// to single-stream mode when ranges are unsupported.
+	if !enableChunked && cfg.ChunkSize == 0 && cfg.MaxConcurrency == 0 {
+		enableChunked = true
+	}
 
 	return effectiveDownloadTransportConfig{
 		MaxRetries:       maxRetries,
 		InitialBackoff:   initialBackoff,
 		MaxBackoff:       maxBackoff,
 		RetryStatusCodes: statusCodes,
-		EnableChunked:    cfg.EnableChunked,
+		EnableChunked:    enableChunked,
 		ChunkSize:        chunkSize,
 		MaxConcurrency:   maxConcurrency,
 	}

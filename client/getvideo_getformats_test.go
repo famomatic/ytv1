@@ -34,6 +34,12 @@ func newMockClientForPlayerJSON(t *testing.T, playerJSON string) *Client {
 					Header:     make(http.Header),
 					Body:       io.NopCloser(bytes.NewBufferString(html)),
 				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s/player/"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`var cfg={signatureTimestamp:20494};`)),
+				}, nil
 			default:
 				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 				return nil, nil
@@ -167,6 +173,12 @@ func TestGetVideoEmitsExtractionEventsForWebpageAndManifest(t *testing.T) {
 					StatusCode: http.StatusOK,
 					Header:     make(http.Header),
 					Body:       io.NopCloser(bytes.NewBufferString(html)),
+				}, nil
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/s/player/"):
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewBufferString(`var cfg={signatureTimestamp:20494};`)),
 				}, nil
 			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, ".mpd"):
 				return &http.Response{

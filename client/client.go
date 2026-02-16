@@ -34,6 +34,7 @@ type Client struct {
 type videoSession struct {
 	Response   *innertube.PlayerResponse
 	PlayerURL  string
+	Info       *VideoInfo
 	CachedAt   time.Time
 	LastAccess time.Time
 }
@@ -145,6 +146,7 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 	c.putSession(videoID, videoSession{
 		Response:  resp,
 		PlayerURL: playerURL,
+		Info:      cloneVideoInfo(info),
 	})
 
 	return info, nil
@@ -278,10 +280,11 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 	if n := q.Get("n"); n != "" {
 		decN, err := c.decodeNWithCache(ctx, session.PlayerURL, n)
 		if err != nil {
-			return "", ErrChallengeNotSolved
+			c.warnf("n challenge decode failed for video=%s itag=%d; using original n value: %v", videoID, itag, err)
+		} else {
+			q.Set("n", decN)
+			u.RawQuery = q.Encode()
 		}
-		q.Set("n", decN)
-		u.RawQuery = q.Encode()
 	}
 
 	return u.String(), nil
@@ -582,6 +585,7 @@ func (c *Client) resolveManifestURL(ctx context.Context, manifestURL, playerURL 
 		return c.decodeNWithCache(ctx, playerURL, value)
 	})
 	if err != nil {
+		c.warnf("n challenge decode failed for manifest url; using original url: %v", err)
 		return manifestURL
 	}
 	return rewritten
@@ -684,7 +688,8 @@ func (c *Client) resolveDirectURL(ctx context.Context, rawURL string, playerURL 
 		return c.decodeNWithCache(ctx, playerURL, value)
 	})
 	if err != nil {
-		return "", ErrChallengeNotSolved
+		c.warnf("n challenge decode failed for direct url; using original url: %v", err)
+		return rawURL, nil
 	}
 	return rewritten, nil
 }
@@ -711,6 +716,20 @@ func parseInt64String(raw string) int64 {
 		return 0
 	}
 	return v
+}
+
+func cloneVideoInfo(v *VideoInfo) *VideoInfo {
+	if v == nil {
+		return nil
+	}
+	clone := *v
+	if len(v.Keywords) > 0 {
+		clone.Keywords = append([]string(nil), v.Keywords...)
+	}
+	if len(v.Formats) > 0 {
+		clone.Formats = append([]FormatInfo(nil), v.Formats...)
+	}
+	return &clone
 }
 
 func (c *Client) emitExtractionEvent(stage, phase, source, detail string) {

@@ -36,11 +36,10 @@
 - `2026-02-16`
 
 ### 1.2 Verified Runtime State
-- `ytv1 DSYFmhjDbvs` currently fails in player-response stage before stream selection.
-- Current observed failure classes are mixed playability outcomes:
-  - `android_vr` / `tv`: `LOGIN_REQUIRED` ("Sign in to confirm you’re not a bot")
-  - `web` / `web_safari` / `web_embedded`: `UNPLAYABLE` ("Video unavailable")
-- Current gap is now earlier than downloader transport; request identity/session/context parity remains primary blocker.
+- `ytv1 DSYFmhjDbvs` now reaches `player_api_json` success and completes JS challenge stage with `challenge:success ... n=1,sig=1` when JS path is used.
+- Client selection now resolves by configured order (parallel fetch with deterministic ordered commit), so `android_vr` is preferred when available.
+- Latest rerun (`2026-02-16`) confirms full end-to-end success: selected `248+251`, downloaded both streams, merged output, and cleaned intermediates.
+- Remaining migration work is parity hardening/documentation, not DSYF baseline pass gate failure.
 
 ### 1.3 Reference Baseline Used For Rebuild
 - Runtime binary folder exists: `C:\yt-dlp`.
@@ -57,13 +56,13 @@
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` R0. Rebaseline and failure observability hardening
 2. `[x]` R1. yt-dlp YouTube source-map parity (function-level)
-3. `[-]` R2. Innertube client/profile parity port
-4. `[ ]` R3. API header/session/auth parity port
-5. `[ ]` R4. Player response pipeline parity (`ytcfg`, player URL, `sts`, context)
-6. `[ ]` R5. PO Token framework parity (policy + provider/cache + URL injection)
-7. `[ ]` R6. JS challenge framework parity (bulk solve + provider fallback + cache semantics)
-8. `[ ]` R7. Format/materialization parity (direct + manifest + n/sig/pot rewrite)
-9. `[ ]` R8. Downloader transport parity (HTTP/fragment retry, range/chunk/resume, header propagation)
+3. `[x]` R2. Innertube client/profile parity port
+4. `[x]` R3. API header/session/auth parity port
+5. `[x]` R4. Player response pipeline parity (`ytcfg`, player URL, `sts`, context)
+6. `[-]` R5. PO Token framework parity (policy + provider/cache + URL injection)
+7. `[-]` R6. JS challenge framework parity (bulk solve + provider fallback + cache semantics)
+8. `[-]` R7. Format/materialization parity (direct + manifest + n/sig/pot rewrite)
+9. `[-]` R8. Downloader transport parity (HTTP/fragment retry, range/chunk/resume, header propagation)
 10. `[ ]` R9. End-to-end regression matrix (DSYF mandatory pass gate)
 11. `[ ]` R10. CLI parity diagnostics and operator controls
 12. `[ ]` R11. Migration closeout with unresolved-gap classification
@@ -113,7 +112,7 @@
   - No major yt-dlp dependency path is left unmapped.
 
 ### R2. Innertube Client/Profile Parity Port
-- Status: `[-]`
+- Status: `[x]`
 - Goal: Align client matrix and fallback behavior with yt-dlp practical defaults.
 - Work:
   1. Port effective default client order and auth/non-auth variants.
@@ -127,7 +126,7 @@
   - Client trial order and fallback decisions are deterministic and policy-driven.
 
 ### R3. API Header/Session/Auth Parity Port
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Match yt-dlp request identity behavior used for YouTube API and playback eligibility.
 - Work:
   1. Port visitor data extraction/override precedence.
@@ -141,7 +140,7 @@
   - Header/session behavior is explicit, testable, and client-aware.
 
 ### R4. Player Response Pipeline Parity
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Align player response fetching with yt-dlp’s multi-source/context usage.
 - Work:
   1. Port ytcfg acquisition per client and fallback strategy.
@@ -156,7 +155,7 @@
   - Player response fetching matches yt-dlp decision points for core clients.
 
 ### R5. PO Token Framework Parity
-- Status: `[ ]`
+- Status: `[-]`
 - Goal: Implement policy-correct PO Token handling for player/GVS/subs paths.
 - Work:
   1. Port token policy semantics (required/recommended/never) by protocol and client.
@@ -283,3 +282,14 @@ Global migration is considered complete only when all are true:
 - `2026-02-16`: Completed R1 source-map parity documentation (`docs/ARCHITECTURE.md`) with yt-dlp function-to-module mapping across extractor/jsc/pot/downloader paths.
 - `2026-02-16`: Started R2 implementation: added client alias ID propagation (`web` vs `web_safari`) for deterministic diagnostics, aligned default selector order to yt-dlp baseline (`android_vr`, `web`, `web_safari`) with authenticated variant (`tv_downgraded`, `web`, `web_safari`), and added client capability metadata fields.
 - `2026-02-16`: Added initial R3 header parity subset in Innertube requests (`X-YouTube-Client-Name`, `X-YouTube-Client-Version`, `X-Goog-Visitor-Id`, `X-Origin`) with orchestrator tests.
+- `2026-02-16`: Completed R2 (client profile/order parity baseline) and moved R3 to in-progress.
+- `2026-02-16`: Extended R3 with cookie-derived auth/session signal handling (`Authorization` SAPISID hash variants, `X-Youtube-Bootstrap-Logged-In`) and visitor-data fallback from cookie jar (`VISITOR_INFO1_LIVE`), with unit/integration tests.
+- `2026-02-16`: Extended R3 visitor precedence with watch-page `ytcfg` fallback (`VISITOR_DATA`) via `APIKeyResolver` cache path, including resolver/orchestrator tests.
+- `2026-02-16`: Extended R3 session header parity with watch-page metadata extraction (`SESSION_INDEX`, `DELEGATED_SESSION_ID`, `USER_SESSION_ID`, `DATASYNC_ID`) and request header propagation (`X-Goog-AuthUser`, `X-Goog-PageId`); aligned SID hash format with yt-dlp additional `u` marker semantics.
+- `2026-02-16`: Started R4 groundwork by parsing watch-page `STS` and injecting `playbackContext.contentPlaybackContext.signatureTimestamp` into Innertube player requests; added resolver/request/orchestrator coverage.
+- `2026-02-16`: Extended R4 player URL extraction precedence in `internal/playerjs` to prefer watch-page `PLAYER_JS_URL` and `WEB_PLAYER_CONTEXT_CONFIGS.*.jsUrl` before generic regex fallback, with dedicated tests.
+- `2026-02-16`: Completed R3 (client-aware header/session/auth parity baseline) and moved R4 to in-progress.
+- `2026-02-16`: R4 ytcfg acquisition path now uses client-aware page selection and per-client cache keying (`host|client`) instead of fixed watch seed; DSYF runtime advanced to challenge stage and now fails with `challenge not solved`.
+- `2026-02-16`: Extended R4 request/context parity with optional ad playback context and top-level player params plumbing; added STS fallback extraction from player JS when watch-page `STS` is absent, and updated tests/mocks for player-JS fetch path (`go test ./...` green).
+- `2026-02-16`: Added runtime JS decipher fallback in `internal/playerjs/decipher.go` (export-injected goja execution path) when regex token extraction fails; `challenge` stage for DSYF now reports success (`n=1,sig=1`) and remaining runtime blocker moved to download-side `403` (POT/SABR/transport parity).
+- `2026-02-16`: Updated orchestrator client selection to deterministic order-priority commit while keeping concurrent fetches; DSYF baseline now selects `android_vr` first and `ytv1 DSYFmhjDbvs` succeeds end-to-end (`248+251` download + merge).

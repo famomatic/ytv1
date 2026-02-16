@@ -45,6 +45,7 @@ type ClientProfile struct {
 	Host                      string
 	Headers                   http.Header
 	Screen                    string // e.g. "EMBED"
+	PlayerParams              string
 
 	// PoTokenPolicy map keyed by protocol (https, dash, hls).
 	PoTokenPolicy map[VideoStreamingProtocol]PoTokenPolicy

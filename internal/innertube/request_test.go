@@ -58,3 +58,30 @@ func TestSetPoToken(t *testing.T) {
 		t.Fatalf("unexpected poToken: %q", req.ServiceIntegrityDimensions.PoToken)
 	}
 }
+
+func TestNewPlayerRequestIncludesSignatureTimestamp(t *testing.T) {
+	req := NewPlayerRequest(WebClient, "jNQXAC9IVRw", PlayerRequestOptions{
+		SignatureTimestamp: 20480,
+	})
+	if req.PlaybackContext.ContentPlaybackContext.SignatureTimestamp != 20480 {
+		t.Fatalf("signatureTimestamp=%d, want 20480", req.PlaybackContext.ContentPlaybackContext.SignatureTimestamp)
+	}
+}
+
+func TestNewPlayerRequestIncludesAdPlaybackContext(t *testing.T) {
+	req := NewPlayerRequest(WebClient, "jNQXAC9IVRw", PlayerRequestOptions{
+		UseAdPlayback: true,
+	})
+	if req.PlaybackContext.AdPlaybackContext == nil || !req.PlaybackContext.AdPlaybackContext.Pyv {
+		t.Fatalf("adPlaybackContext should be set with pyv=true")
+	}
+}
+
+func TestNewPlayerRequestIncludesPlayerParams(t *testing.T) {
+	req := NewPlayerRequest(WebClient, "jNQXAC9IVRw", PlayerRequestOptions{
+		PlayerParams: "test-player-params",
+	})
+	if req.Params != "test-player-params" {
+		t.Fatalf("params=%q, want test-player-params", req.Params)
+	}
+}
