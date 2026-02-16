@@ -362,11 +362,24 @@ func runPlaylistItems(
 
 func printFormats(info *client.VideoInfo) {
 	fmt.Printf("Title: %s\n", info.Title)
-	fmt.Println("ID | Ext | Resolution | FPS | Bitrate | Proto | Codec")
-	fmt.Println("---|-----|------------|-----|---------|-------|------")
+	fmt.Println("ID | Ext | Resolution | FPS | Bitrate | Proto | Codec | Note")
+	fmt.Println("---|-----|------------|-----|---------|-------|-------|------")
 	for _, f := range info.Formats {
-		fmt.Printf("%3d|%4s|%4dx%-4d|%3d|%6dk|%5s|%s\n",
-			f.Itag, mimeExt(f.MimeType), f.Width, f.Height, f.FPS, f.Bitrate/1000, f.Protocol, f.MimeType)
+		fmt.Printf("%3d|%4s|%4dx%-4d|%3d|%6dk|%5s|%s|%s\n",
+			f.Itag, mimeExt(f.MimeType), f.Width, f.Height, f.FPS, f.Bitrate/1000, f.Protocol, f.MimeType, formatTrackNote(f))
+	}
+}
+
+func formatTrackNote(f client.FormatInfo) string {
+	switch {
+	case f.HasAudio && !f.HasVideo:
+		return "audio only"
+	case f.HasVideo && !f.HasAudio:
+		return "video only"
+	case f.HasAudio && f.HasVideo:
+		return "av"
+	default:
+		return ""
 	}
 }
 

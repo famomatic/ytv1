@@ -68,6 +68,7 @@
 - B10 compatibility follow-up landed: parser now accepts yt-dlp subtitle write alias `--write-srt` (including `-write-srt`) and maps it to subtitle write flow while forcing `sub-format=srt`.
 - B10 compatibility follow-up landed: added `--dump-single-json` mode with yt-dlp-style single-entry payload (`url`, `webpage_url`, `formats`) for tool compatibility (including mpv ytdl hook expectations).
 - B10 compatibility follow-up landed: `--print-json` (`-J`, `-j`, `--dump-json`) now emits yt-dlp-style single-entry payload for external tool compatibility, while retaining shared JSON failure payload contract.
+- B11 completion increment landed: `-F` format list now emits explicit `Note` labels (`audio only`/`video only`/`av`) so operators can pick direct audio formats without relying on `0x0` inference.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -81,6 +82,7 @@
 9. `[x]` B8. Substitute-grade regression matrix and scorecard
 10. `[x]` B9. Cycle B closeout and release checklist
 11. `[x]` B10. Post-closeout yt-dlp CLI compatibility aliases (`--flat-playlist` and related common flags)
+12. `[x]` B11. Format list UX parity (`-F` note column with explicit audio/video-only labels)
 
 ---
 

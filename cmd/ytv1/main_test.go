@@ -125,6 +125,56 @@ func TestBuildDownloadOptions_CustomSelectorPassthrough(t *testing.T) {
 	}
 }
 
+func TestFormatTrackNote(t *testing.T) {
+	cases := []struct {
+		name string
+		in   client.FormatInfo
+		want string
+	}{
+		{
+			name: "audio only",
+			in: client.FormatInfo{
+				HasAudio: true,
+				HasVideo: false,
+			},
+			want: "audio only",
+		},
+		{
+			name: "video only",
+			in: client.FormatInfo{
+				HasAudio: false,
+				HasVideo: true,
+			},
+			want: "video only",
+		},
+		{
+			name: "av",
+			in: client.FormatInfo{
+				HasAudio: true,
+				HasVideo: true,
+			},
+			want: "av",
+		},
+		{
+			name: "none",
+			in: client.FormatInfo{
+				HasAudio: false,
+				HasVideo: false,
+			},
+			want: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatTrackNote(tc.in)
+			if got != tc.want {
+				t.Fatalf("formatTrackNote()=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildDownloadOptions_NumericItag(t *testing.T) {
 	got := buildDownloadOptions(cli.Options{
 		FormatSelector: "251",
