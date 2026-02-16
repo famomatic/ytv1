@@ -139,27 +139,28 @@ type StreamingData struct {
 }
 
 type Format struct {
-	Itag             int    `json:"itag"`
-	URL              string `json:"url"`
-	MimeType         string `json:"mimeType"`
-	Bitrate          int    `json:"bitrate"`
-	Width            int    `json:"width"`
-	Height           int    `json:"height"`
-	FPS              int    `json:"fps"`
-	InitRange        *Range `json:"initRange"`
-	IndexRange       *Range `json:"indexRange"`
-	LastModified     string `json:"lastModified"`
-	ContentLength    string `json:"contentLength"`
-	Quality          string `json:"quality"`
-	QualityLabel     string `json:"qualityLabel"`
-	ProjectionType   string `json:"projectionType"`
-	AverageBitrate   int    `json:"averageBitrate"`
-	AudioQuality     string `json:"audioQuality"`
-	ApproxDurationMs string `json:"approxDurationMs"`
-	AudioSampleRate  string `json:"audioSampleRate"`
-	AudioChannels    int    `json:"audioChannels"`
-	SignatureCipher  string `json:"signatureCipher"`
-	Cipher           string `json:"cipher"` // Legacy
+	Itag             int      `json:"itag"`
+	URL              string   `json:"url"`
+	MimeType         string   `json:"mimeType"`
+	Bitrate          int      `json:"bitrate"`
+	Width            int      `json:"width"`
+	Height           int      `json:"height"`
+	FPS              int      `json:"fps"`
+	InitRange        *Range   `json:"initRange"`
+	IndexRange       *Range   `json:"indexRange"`
+	LastModified     string   `json:"lastModified"`
+	ContentLength    string   `json:"contentLength"`
+	Quality          string   `json:"quality"`
+	QualityLabel     string   `json:"qualityLabel"`
+	ProjectionType   string   `json:"projectionType"`
+	AverageBitrate   int      `json:"averageBitrate"`
+	AudioQuality     string   `json:"audioQuality"`
+	ApproxDurationMs string   `json:"approxDurationMs"`
+	AudioSampleRate  string   `json:"audioSampleRate"`
+	AudioChannels    int      `json:"audioChannels"`
+	SignatureCipher  string   `json:"signatureCipher"`
+	Cipher           string   `json:"cipher"` // Legacy
+	DRMFamilies      []string `json:"drmFamilies"`
 }
 
 type Range struct {

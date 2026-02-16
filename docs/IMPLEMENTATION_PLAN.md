@@ -39,6 +39,17 @@
 - `ytv1 DSYFmhjDbvs` now reaches `player_api_json` success and completes JS challenge stage with `challenge:success ... n=1,sig=1` when JS path is used.
 - Client selection now resolves by configured order (parallel fetch with deterministic ordered commit), so `android_vr` is preferred when available.
 - Latest rerun (`2026-02-16`) confirms full end-to-end success: selected `248+251`, downloaded both streams, merged output, and cleaned intermediates.
+- R5 parity increment landed: POT provider now has in-process reuse cache, source-client-aware POT policy evaluation is applied in format filtering, and resolved direct/manifest URLs can receive POT query injection under policy.
+- R6 groundwork started: `internal/challenge` now includes provider-backed batch solver primitives, and client challenge priming now executes through bulk solver path instead of per-challenge direct loops.
+- R6 parity increment landed: challenge cache key now canonicalizes player locale path (`.../ko_KR/base.js` == `.../en_US/base.js`) to improve cache hit stability, partial solve path emits explicit warning logs, and provider fallback chain is enabled for bulk solve resilience.
+- R7 parity increment landed: normalized format model now marks `is_drm` and `is_damaged` candidates, and client-side format filtering deterministically skips these before selection/materialization.
+- R7 parity increment landed: format ranking now deprioritizes `unknown` protocol candidates versus known media protocols (`https`/`dash`/`hls`) to reduce invalid materialization picks.
+- R8 parity increment landed: downloader manifest/segment requests now support explicit media-header propagation for HLS/DASH paths (including default UA/Origin/Referer synthesis) with dedicated transport tests.
+- R8 parity increment landed: fragmented downloader paths now honor retry/backoff policy with shared HTTP retry transport (including `Retry-After` throttle hint handling for status retries such as `429`).
+- R8 parity increment landed: live/dynamic fragment downloads now support controlled unavailable-fragment skipping (`404`/`410`) with bounded skip limits to mirror practical degraded-stream behavior without hanging on missing edges.
+- R8 parity increment landed: DASH static fragment path now supports bounded parallel fetch with ordered materialization (concurrency controlled by transport config), while dynamic/live paths retain sequential semantics.
+- R10 parity increment landed: CLI now supports explicit static POT override input via `--po-token` (wired to `client.Config.PoTokenProvider`), and runtime diagnostics emit actionable remediation hints for policy-sensitive failures.
+- R11 closeout verification (`2026-02-16`) passed: `go test ./...` green, live-gated E2E suite green, and runtime gate `go run ./cmd/ytv1 --verbose DSYFmhjDbvs` succeeded with download+merge completion.
 - Remaining migration work is parity hardening/documentation, not DSYF baseline pass gate failure.
 
 ### 1.3 Reference Baseline Used For Rebuild
@@ -59,13 +70,13 @@
 3. `[x]` R2. Innertube client/profile parity port
 4. `[x]` R3. API header/session/auth parity port
 5. `[x]` R4. Player response pipeline parity (`ytcfg`, player URL, `sts`, context)
-6. `[-]` R5. PO Token framework parity (policy + provider/cache + URL injection)
-7. `[-]` R6. JS challenge framework parity (bulk solve + provider fallback + cache semantics)
-8. `[-]` R7. Format/materialization parity (direct + manifest + n/sig/pot rewrite)
-9. `[-]` R8. Downloader transport parity (HTTP/fragment retry, range/chunk/resume, header propagation)
-10. `[ ]` R9. End-to-end regression matrix (DSYF mandatory pass gate)
-11. `[ ]` R10. CLI parity diagnostics and operator controls
-12. `[ ]` R11. Migration closeout with unresolved-gap classification
+6. `[x]` R5. PO Token framework parity (policy + provider/cache + URL injection)
+7. `[x]` R6. JS challenge framework parity (bulk solve + provider fallback + cache semantics)
+8. `[x]` R7. Format/materialization parity (direct + manifest + n/sig/pot rewrite)
+9. `[x]` R8. Downloader transport parity (HTTP/fragment retry, range/chunk/resume, header propagation)
+10. `[x]` R9. End-to-end regression matrix (DSYF mandatory pass gate)
+11. `[x]` R10. CLI parity diagnostics and operator controls
+12. `[x]` R11. Migration closeout with unresolved-gap classification
 
 ---
 
@@ -155,7 +166,7 @@
   - Player response fetching matches yt-dlp decision points for core clients.
 
 ### R5. PO Token Framework Parity
-- Status: `[-]`
+- Status: `[x]`
 - Goal: Implement policy-correct PO Token handling for player/GVS/subs paths.
 - Work:
   1. Port token policy semantics (required/recommended/never) by protocol and client.
@@ -171,7 +182,7 @@
   - Missing/available POT behavior is deterministic and visible in diagnostics.
 
 ### R6. JS Challenge Framework Parity
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Align challenge solve behavior with yt-dlp’s batch/provider model.
 - Work:
   1. Port first-pass challenge inventory across direct/cipher/manifest URLs.
@@ -186,7 +197,7 @@
   - Challenge solving is bulk-first, cached, and failure-mode compatible.
 
 ### R7. Format/Materialization Parity
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Align final URL materialization and format filtering decisions.
 - Work:
   1. Port direct and signatureCipher URL handling details.
@@ -201,7 +212,7 @@
   - Selected formats translate into valid downloadable URLs under real conditions.
 
 ### R8. Downloader Transport Parity
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Match yt-dlp download transport behavior needed to avoid 403 and transient failures.
 - Work:
   1. Port per-request media header propagation strategy.
@@ -216,7 +227,7 @@
   - DSYF selected format download no longer fails with immediate 403 under baseline environment.
 
 ### R9. End-to-End Regression Matrix
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Replace synthetic confidence with real parity confidence.
 - Work:
   1. Keep fixture tests for deterministic unit behavior.
@@ -228,9 +239,13 @@
   - `docs/IMPLEMENTATION_PLAN.md`
 - Acceptance:
   - Regression suite catches known extraction/download parity regressions.
+  - Verification checklist:
+    1. `go test ./...` is green in default mode.
+    2. `YTV1_E2E=1 go test ./client -run TestE2E_ -count=1` passes against live endpoint.
+    3. DSYF mandatory gate passes in runtime: `go run ./cmd/ytv1 --verbose DSYFmhjDbvs`.
 
 ### R10. CLI Diagnostics and Operator Controls
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Make parity gaps operable without moving logic into CLI.
 - Work:
   1. Expose extraction/download diagnostics clearly in verbose mode.
@@ -244,7 +259,7 @@
   - User can identify and adjust policy-sensitive failures from CLI output alone.
 
 ### R11. Migration Closeout
-- Status: `[ ]`
+- Status: `[x]`
 - Goal: Finalize with explicit pass/fail truth.
 - Work:
   1. Run full test sweep and targeted runtime validation.
@@ -293,3 +308,20 @@ Global migration is considered complete only when all are true:
 - `2026-02-16`: Extended R4 request/context parity with optional ad playback context and top-level player params plumbing; added STS fallback extraction from player JS when watch-page `STS` is absent, and updated tests/mocks for player-JS fetch path (`go test ./...` green).
 - `2026-02-16`: Added runtime JS decipher fallback in `internal/playerjs/decipher.go` (export-injected goja execution path) when regex token extraction fails; `challenge` stage for DSYF now reports success (`n=1,sig=1`) and remaining runtime blocker moved to download-side `403` (POT/SABR/transport parity).
 - `2026-02-16`: Updated orchestrator client selection to deterministic order-priority commit while keeping concurrent fetches; DSYF baseline now selects `android_vr` first and `ytv1 DSYFmhjDbvs` succeeds end-to-end (`248+251` download + merge).
+- `2026-02-16`: Completed R5 baseline parity increment: added cached POT provider wrapper (`internal/challenge`), source-client-aware POT policy resolution in client format filtering, POT URL injection for direct/manifest materialization paths, and warning visibility for POT-required skip reasons (`go test ./...` green).
+- `2026-02-16`: Started R6 implementation by adding provider-style batch challenge solver abstractions/tests in `internal/challenge` and wiring client challenge priming to bulk solve semantics (`go test ./...` green).
+- `2026-02-16`: Extended R6 cache semantics by canonicalizing challenge cache keys per player identity (locale-insensitive base.js path) and adding explicit partial-solve warning log surface (`go test ./...` green).
+- `2026-02-16`: Completed R6 by adding fallback provider-chain bulk solver semantics and wiring client challenge priming to try canonicalized provider fallback path when primary solve path fails (`go test ./...` green); moved R7 to in-progress.
+- `2026-02-16`: Extended R7 with format-quality guardrails: parsed formats now carry `is_drm`/`is_damaged` signals (including cipher-url integrity check), and `filterFormatsByPoTokenPolicy` now drops DRM/damaged candidates with typed skip reasons (`go test ./...` green).
+- `2026-02-16`: Extended R7 ranking policy by adding protocol-awareness in selector tie-breaks so `unknown` protocol formats are deprioritized against known protocols under equivalent mode/quality classes (`go test ./...` green).
+- `2026-02-16`: Completed R7 after porting direct/cipher URL materialization, n/sig rewrite flow, manifest n+POT handling, and skip/deprioritize policy hardening (`go test ./...` green); moved R8 to in-progress.
+- `2026-02-16`: Started R8 transport parity increment by wiring request-header propagation into HLS/DASH downloader fetch paths and adding coverage for manifest+segment header forwarding (`go test ./...` green).
+- `2026-02-16`: Extended R8 transport retry parity by introducing shared downloader retry transport config for HLS/DASH (manifest/segment/key paths), mapping package transport config into fragmented downloads, and adding retries + `Retry-After` coverage tests (`go test ./...` green).
+- `2026-02-16`: Hardened R8 fragmented transport control by propagating caller context into HLS key-fetch path (replacing background context) so cancellation/deadline semantics remain consistent during live/fragmented retries (`go test ./...` green).
+- `2026-02-16`: Extended R8 fragment policy parity by adding optional unavailable-fragment skip semantics for HLS live and DASH dynamic flows (bounded by max-skip guard) and wiring new transport knobs through package config (`go test ./...` green).
+- `2026-02-16`: Extended R8 concurrency parity by plumbing transport max-concurrency into fragmented downloader config and enabling ordered parallel segment fetch for DASH static manifests, with dedicated ordering coverage (`go test ./...` green).
+- `2026-02-16`: Completed R8 with baseline runtime verification (`go run ./cmd/ytv1 --verbose -o r8_dsyf_check.mp4 DSYFmhjDbvs`) confirming DSYF extraction/download/merge success without immediate `403`; moved R9 to in-progress.
+- `2026-02-16`: Started R9 by adding controlled live integration smoke coverage (`client/e2e_integration_test.go`) gated behind `YTV1_E2E=1` (default CI-safe skip) for DSYF/override video download regression checks.
+- `2026-02-16`: Completed R9 by extending controlled live integration coverage (`GetVideo/GetFormats`, `ResolveStreamURL`, `Download`) and validating both default suite (`go test ./...`) and live-gated suite (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1`); moved R10 to in-progress.
+- `2026-02-16`: Completed R10 by adding CLI POT override input (`--po-token` -> static provider wiring), enabling diagnostics emission in verbose failure paths, adding actionable remediation hints (login/POT/challenge/throttle/input), updating CLI README guidance, and validating with `go test ./...`; moved R11 to in-progress.
+- `2026-02-16`: Completed R11 closeout verification: full suite `go test ./...` passed, live-gated E2E (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`) passed, and runtime DSYF gate (`go run ./cmd/ytv1 --verbose DSYFmhjDbvs`) passed end-to-end (extract/download/merge); all tracks now complete.

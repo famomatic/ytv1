@@ -37,6 +37,8 @@ type Format struct {
 	HasAudio         bool
 	HasVideo         bool
 	Ciphered         bool
+	IsDRM            bool
+	IsDamaged        bool
 	SignatureCipher  string
 	Cipher           string
 	SourceClient     string
@@ -80,6 +82,7 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 				Protocol:         deriveProtocol(f),
 				SignatureCipher:  f.SignatureCipher,
 				Cipher:           f.Cipher,
+				IsDRM:            len(f.DRMFamilies) > 0,
 				SourceClient:     resp.SourceClient,
 				AudioSampleRate:  parseInt(f.AudioSampleRate),
 				ApproxDurationMs: parseInt64(f.ApproxDurationMs),
@@ -89,6 +92,7 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 			}
 
 			parsed.Ciphered = parsed.URL == "" && (parsed.SignatureCipher != "" || parsed.Cipher != "")
+			parsed.IsDamaged = strings.TrimSpace(parsed.URL) == "" && !hasCipherURL(f)
 			parsed.HasAudio, parsed.HasVideo = deriveMediaFlags(parsed, adaptive)
 
 			formats = append(formats, parsed)
@@ -203,6 +207,28 @@ func deriveProtocol(raw innertube.Format) string {
 	}
 
 	return normalizeProtocol(params.Get("url"))
+}
+
+func hasCipherURL(raw innertube.Format) bool {
+	cipher := raw.SignatureCipher
+	if cipher == "" {
+		cipher = raw.Cipher
+	}
+	if strings.TrimSpace(cipher) == "" {
+		return false
+	}
+	params, err := url.ParseQuery(cipher)
+	if err != nil {
+		return false
+	}
+	rawURL := strings.TrimSpace(params.Get("url"))
+	if rawURL == "" {
+		return false
+	}
+	if _, err := url.Parse(rawURL); err != nil {
+		return false
+	}
+	return true
 }
 
 func normalizeProtocol(rawURL string) string {

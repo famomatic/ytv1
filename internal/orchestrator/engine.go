@@ -90,15 +90,25 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	var wg sync.WaitGroup
 
 	for idx, profile := range clients {
-		e.emitExtractionEvent("player_api_json", "start", profileIDOrName(profile), "")
 		wg.Add(1)
 		go func(order int, p innertube.ClientProfile) {
 			defer wg.Done()
 			clientLabel := profileIDOrName(p)
 
+			if order > 0 && e.config.ClientHedgeDelay > 0 {
+				timer := time.NewTimer(time.Duration(order) * e.config.ClientHedgeDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+
 			if ctx.Err() != nil {
 				return
 			}
+			e.emitExtractionEvent("player_api_json", "start", clientLabel, "")
 
 			req := innertube.NewPlayerRequest(p, videoID, innertube.PlayerRequestOptions{
 				VisitorData:        e.resolveVisitorData(ctx, p, videoID),
@@ -128,10 +138,10 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	}()
 
 	type orderedResult struct {
-		order   int
-		client  string
-		resp    *innertube.PlayerResponse
-		err     error
+		order  int
+		client string
+		resp   *innertube.PlayerResponse
+		err    error
 	}
 	pending := make(map[int]orderedResult, len(clients))
 	nextOrder := 0

@@ -3,9 +3,11 @@ package client
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/famomatic/ytv1/internal/challenge"
 	"github.com/famomatic/ytv1/internal/innertube"
 	"github.com/famomatic/ytv1/internal/playerjs"
 )
@@ -14,6 +16,8 @@ type challengeSolutions struct {
 	n   map[string]string
 	sig map[string]string
 }
+
+var playerLocalePathPattern = regexp.MustCompile(`(?i)(/s/player/[A-Za-z0-9_-]+/player(?:_[a-z0-9]+)?\.vflset)/[a-z]{2,3}_[a-z]{2,3}(/base\.js)$`)
 
 func (c *Client) primeChallengeSolutions(
 	ctx context.Context,
@@ -33,8 +37,32 @@ func (c *Client) primeChallengeSolutions(
 
 	c.emitExtractionEvent("challenge", "start", "web", playerURL)
 
-	decipherer, err := c.loadDecipherer(ctx, playerURL)
-	if err != nil {
+	providers := []challenge.DeciphererProvider{
+		challengeProviderFunc(func(ctx context.Context, playerURL string) (challenge.Decipherer, error) {
+			return c.loadDecipherer(ctx, playerURL)
+		}),
+	}
+	if canonical := canonicalPlayerCacheKey(playerURL); canonical != "" && canonical != playerURL {
+		providers = append(providers, challengeProviderFunc(func(ctx context.Context, _ string) (challenge.Decipherer, error) {
+			return c.loadDecipherer(ctx, canonical)
+		}))
+	}
+	solver := challenge.NewFallbackProviderBatchSolver(providers...)
+
+	for challenge := range nChallenges {
+		if _, ok := c.getChallengeN(playerURL, challenge); ok {
+			continue
+		}
+		solver.AddN(challenge)
+	}
+	for challenge := range sigChallenges {
+		if _, ok := c.getChallengeSig(playerURL, challenge); ok {
+			continue
+		}
+		solver.AddSig(challenge)
+	}
+
+	if err := solver.Solve(ctx, playerURL); err != nil {
 		c.emitExtractionEvent("challenge", "failure", "web", err.Error())
 		return
 	}
@@ -46,8 +74,8 @@ func (c *Client) primeChallengeSolutions(
 		if _, ok := c.getChallengeN(playerURL, challenge); ok {
 			continue
 		}
-		decoded, err := decipherer.DecipherN(challenge)
-		if err != nil {
+		decoded, ok := solver.N(challenge)
+		if !ok {
 			failures++
 			nFailures++
 			continue
@@ -59,8 +87,8 @@ func (c *Client) primeChallengeSolutions(
 		if _, ok := c.getChallengeSig(playerURL, challenge); ok {
 			continue
 		}
-		decoded, err := decipherer.DecipherSignature(challenge)
-		if err != nil {
+		decoded, ok := solver.Sig(challenge)
+		if !ok {
 			failures++
 			sigFailures++
 			continue
@@ -69,6 +97,7 @@ func (c *Client) primeChallengeSolutions(
 	}
 
 	if failures > 0 {
+		c.warnf("challenge partial solve: player=%s unsolved=%d n=%d sig=%d", playerURL, failures, nFailures, sigFailures)
 		c.emitExtractionEvent(
 			"challenge",
 			"partial",
@@ -78,6 +107,12 @@ func (c *Client) primeChallengeSolutions(
 		return
 	}
 	c.emitExtractionEvent("challenge", "success", "web", "n="+itoa(len(nChallenges))+",sig="+itoa(len(sigChallenges)))
+}
+
+type challengeProviderFunc func(ctx context.Context, playerURL string) (challenge.Decipherer, error)
+
+func (f challengeProviderFunc) Load(ctx context.Context, playerURL string) (challenge.Decipherer, error) {
+	return f(ctx, playerURL)
 }
 
 func (c *Client) decodeNWithCache(ctx context.Context, playerURL, challenge string) (string, error) {
@@ -124,9 +159,10 @@ func (c *Client) loadDecipherer(ctx context.Context, playerURL string) (*playerj
 }
 
 func (c *Client) getChallengeN(playerURL, challenge string) (string, bool) {
+	key := canonicalPlayerCacheKey(playerURL)
 	c.challengesMu.RLock()
 	defer c.challengesMu.RUnlock()
-	s, ok := c.challenges[playerURL]
+	s, ok := c.challenges[key]
 	if !ok || s.n == nil {
 		return "", false
 	}
@@ -135,9 +171,10 @@ func (c *Client) getChallengeN(playerURL, challenge string) (string, bool) {
 }
 
 func (c *Client) getChallengeSig(playerURL, challenge string) (string, bool) {
+	key := canonicalPlayerCacheKey(playerURL)
 	c.challengesMu.RLock()
 	defer c.challengesMu.RUnlock()
-	s, ok := c.challenges[playerURL]
+	s, ok := c.challenges[key]
 	if !ok || s.sig == nil {
 		return "", false
 	}
@@ -146,31 +183,33 @@ func (c *Client) getChallengeSig(playerURL, challenge string) (string, bool) {
 }
 
 func (c *Client) setChallengeN(playerURL, challenge, decoded string) {
+	key := canonicalPlayerCacheKey(playerURL)
 	c.challengesMu.Lock()
 	defer c.challengesMu.Unlock()
 	if c.challenges == nil {
 		c.challenges = make(map[string]challengeSolutions)
 	}
-	s := c.challenges[playerURL]
+	s := c.challenges[key]
 	if s.n == nil {
 		s.n = make(map[string]string)
 	}
 	s.n[challenge] = decoded
-	c.challenges[playerURL] = s
+	c.challenges[key] = s
 }
 
 func (c *Client) setChallengeSig(playerURL, challenge, decoded string) {
+	key := canonicalPlayerCacheKey(playerURL)
 	c.challengesMu.Lock()
 	defer c.challengesMu.Unlock()
 	if c.challenges == nil {
 		c.challenges = make(map[string]challengeSolutions)
 	}
-	s := c.challenges[playerURL]
+	s := c.challenges[key]
 	if s.sig == nil {
 		s.sig = make(map[string]string)
 	}
 	s.sig[challenge] = decoded
-	c.challenges[playerURL] = s
+	c.challenges[key] = s
 }
 
 func collectStreamChallenges(resp *innertube.PlayerResponse, dashManifestURL, hlsManifestURL string) (map[string]struct{}, map[string]struct{}) {
@@ -223,4 +262,22 @@ func collectNFromURL(rawURL string, out map[string]struct{}) {
 
 func itoa(v int) string {
 	return strconv.Itoa(v)
+}
+
+func canonicalPlayerCacheKey(playerURL string) string {
+	raw := strings.TrimSpace(playerURL)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil {
+		if strings.TrimSpace(u.Path) != "" {
+			raw = u.Path
+		}
+	}
+	raw = strings.ReplaceAll(raw, `\/`, "/")
+	raw = strings.TrimSpace(raw)
+	if m := playerLocalePathPattern.FindStringSubmatch(raw); len(m) == 3 {
+		return m[1] + "/en_US" + m[2]
+	}
+	return raw
 }

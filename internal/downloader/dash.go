@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,10 +15,13 @@ type DASHDownloader struct {
 	Client           *http.Client
 	ManifestURL      string
 	RepresentationID string
+	Headers          http.Header
+	Transport        TransportConfig
 
 	// State
-	seenSegments map[string]bool
-	lastSeq      int64
+	seenSegments     map[string]bool
+	lastSeq          int64
+	skippedFragments int
 }
 
 func NewDASHDownloader(client *http.Client, manifestURL, representationID string) *DASHDownloader {
@@ -28,6 +32,16 @@ func NewDASHDownloader(client *http.Client, manifestURL, representationID string
 		seenSegments:     make(map[string]bool),
 		lastSeq:          -1,
 	}
+}
+
+func (d *DASHDownloader) WithRequestHeaders(headers http.Header) *DASHDownloader {
+	d.Headers = cloneHeader(headers)
+	return d
+}
+
+func (d *DASHDownloader) WithTransportConfig(cfg TransportConfig) *DASHDownloader {
+	d.Transport = cfg
+	return d
 }
 
 // ... helper structs (dashMPD, dashPeriod, etc. as defined before) ...
@@ -105,6 +119,14 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 			return err
 		}
 
+		isDynamic := mpd.Type == "dynamic"
+		if !isDynamic && len(segments) > 1 && normalizeTransportConfig(d.Transport).MaxConcurrency > 1 {
+			if err := d.downloadSegmentsConcurrent(ctx, segments, w); err != nil {
+				return err
+			}
+			return nil
+		}
+
 		// Download new segments
 		for _, seg := range segments {
 			if seg.Seq <= d.lastSeq && d.lastSeq != -1 {
@@ -115,6 +137,15 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 			}
 
 			if err := d.downloadSegment(ctx, seg, w); err != nil {
+				if isDynamic && shouldSkipFragmentError(err, d.Transport) {
+					d.skippedFragments++
+					if limit := d.Transport.MaxSkippedFragments; limit > 0 && d.skippedFragments > limit {
+						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
+					}
+					d.lastSeq = seg.Seq
+					d.seenSegments[seg.URL] = true
+					continue
+				}
 				return err
 			}
 
@@ -122,7 +153,7 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 			d.seenSegments[seg.URL] = true
 		}
 
-		if mpd.Type != "dynamic" {
+		if !isDynamic {
 			return nil
 		}
 
@@ -142,20 +173,62 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 	}
 }
 
+func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
+	type item struct {
+		index int
+		seq   int64
+		url   string
+		body  []byte
+		err   error
+	}
+	cfg := normalizeTransportConfig(d.Transport)
+	sem := make(chan struct{}, cfg.MaxConcurrency)
+	out := make([]item, len(segments))
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for i, seg := range segments {
+		wg.Add(1)
+		i, seg := i, seg
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			body, err := doGETBytesWithRetry(ctx, d.Client, seg.URL, d.Headers, d.Transport)
+			out[i] = item{
+				index: i,
+				seq:   seg.Seq,
+				url:   seg.URL,
+				body:  body,
+				err:   err,
+			}
+			if err != nil {
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, it := range out {
+		if it.err != nil {
+			return fmt.Errorf("failed to download segment seq=%d: %w", it.seq, it.err)
+		}
+		if _, err := w.Write(it.body); err != nil {
+			return err
+		}
+		d.lastSeq = it.seq
+		d.seenSegments[it.url] = true
+	}
+	return nil
+}
+
 func (d *DASHDownloader) fetchManifest(ctx context.Context) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", d.ManifestURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("DASH manifest fetch failed: %d", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
+	return doGETBytesWithRetry(ctx, d.Client, d.ManifestURL, d.Headers, d.Transport)
 }
 
 func parseDASH(data []byte) (*dashMPD, error) {
@@ -265,19 +338,11 @@ func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Dura
 }
 
 func (d *DASHDownloader) downloadSegment(ctx context.Context, seg dashSegment, w io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", seg.URL, nil)
+	body, err := doGETBytesWithRetry(ctx, d.Client, seg.URL, d.Headers, d.Transport)
 	if err != nil {
 		return err
 	}
-	resp, err := d.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("segment fetch failed: %d", resp.StatusCode)
-	}
-	_, err = io.Copy(w, resp.Body)
+	_, err = w.Write(body)
 	return err
 }
 

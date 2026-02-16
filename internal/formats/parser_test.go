@@ -88,6 +88,9 @@ func TestParse_NormalizesFormatsDeterministically(t *testing.T) {
 	if audioOnly.Protocol != "https" {
 		t.Fatalf("protocol mismatch: got=%q", audioOnly.Protocol)
 	}
+	if audioOnly.IsDamaged {
+		t.Fatal("expected valid cipher url format not to be marked damaged")
+	}
 }
 
 func TestParse_MissingAndInvalidFields(t *testing.T) {
@@ -153,5 +156,31 @@ func TestParse_UnknownProtocolWhenURLSignalsMissing(t *testing.T) {
 	}
 	if out[0].Protocol != "unknown" {
 		t.Fatalf("expected unknown protocol, got=%q", out[0].Protocol)
+	}
+	if !out[0].IsDamaged {
+		t.Fatal("expected missing cipher url format to be marked damaged")
+	}
+}
+
+func TestParse_DRMFamiliesSetsDRMFlag(t *testing.T) {
+	resp := &innertube.PlayerResponse{
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{
+				{
+					Itag:        999,
+					URL:         "https://example.com/protected",
+					MimeType:    `video/mp4; codecs="avc1.64001F"`,
+					DRMFamilies: []string{"WIDEVINE"},
+				},
+			},
+		},
+	}
+
+	out := Parse(resp)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 format, got %d", len(out))
+	}
+	if !out[0].IsDRM {
+		t.Fatal("expected DRM families to map to IsDRM")
 	}
 }

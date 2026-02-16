@@ -22,12 +22,12 @@ import (
 
 // DownloadOptions controls stream download behavior.
 type DownloadOptions struct {
-	Itag           int
-	Mode           SelectionMode
-	FormatSelector string // e.g. "bestvideo+bestaudio", overrides Mode
-	OutputPath     string
-	Resume         bool
-	MergeOutput    bool
+	Itag                  int
+	Mode                  SelectionMode
+	FormatSelector        string // e.g. "bestvideo+bestaudio", overrides Mode
+	OutputPath            string
+	Resume                bool
+	MergeOutput           bool
 	KeepIntermediateFiles bool
 }
 
@@ -79,6 +79,9 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	// Filter unplayable formats (e.g. requiring PO Token)
 	filteredFormats, skipReasons := filterFormatsByPoTokenPolicy(formats, c.config)
 	if len(filteredFormats) == 0 && len(skipReasons) > 0 {
+		for _, skip := range skipReasons {
+			c.warnf("format skipped by po token policy: itag=%d protocol=%s reason=%s", skip.Itag, skip.Protocol, skip.Reason)
+		}
 		return nil, &NoPlayableFormatsDetailError{
 			Mode:  options.Mode, // Approximate
 			Skips: skipReasons,
@@ -983,7 +986,19 @@ func defaultOutputPath(videoID string, itag int, mimeType string, mode Selection
 }
 
 func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
-	dl := downloader.NewHLSDownloader(c.config.HTTPClient, streamURL)
+	headers := buildMediaRequestHeaders(c.config.RequestHeaders, videoID)
+	transport := downloader.TransportConfig{
+		MaxRetries:               c.config.DownloadTransport.MaxRetries,
+		InitialBackoff:           c.config.DownloadTransport.InitialBackoff,
+		MaxBackoff:               c.config.DownloadTransport.MaxBackoff,
+		RetryStatusCodes:         append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+		MaxConcurrency:           c.config.DownloadTransport.MaxConcurrency,
+		SkipUnavailableFragments: c.config.DownloadTransport.SkipUnavailableFragments,
+		MaxSkippedFragments:      c.config.DownloadTransport.MaxSkippedFragments,
+	}
+	dl := downloader.NewHLSDownloader(c.config.HTTPClient, streamURL).
+		WithRequestHeaders(headers).
+		WithTransportConfig(transport)
 
 	f, err := os.Create(outputPath)
 	if err != nil {
@@ -1013,7 +1028,19 @@ func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath
 
 func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
 	repID := fmt.Sprintf("%d", format.Itag)
-	dl := downloader.NewDASHDownloader(c.config.HTTPClient, streamURL, repID)
+	headers := buildMediaRequestHeaders(c.config.RequestHeaders, videoID)
+	transport := downloader.TransportConfig{
+		MaxRetries:               c.config.DownloadTransport.MaxRetries,
+		InitialBackoff:           c.config.DownloadTransport.InitialBackoff,
+		MaxBackoff:               c.config.DownloadTransport.MaxBackoff,
+		RetryStatusCodes:         append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+		MaxConcurrency:           c.config.DownloadTransport.MaxConcurrency,
+		SkipUnavailableFragments: c.config.DownloadTransport.SkipUnavailableFragments,
+		MaxSkippedFragments:      c.config.DownloadTransport.MaxSkippedFragments,
+	}
+	dl := downloader.NewDASHDownloader(c.config.HTTPClient, streamURL, repID).
+		WithRequestHeaders(headers).
+		WithTransportConfig(transport)
 
 	f, err := os.Create(outputPath)
 	if err != nil {

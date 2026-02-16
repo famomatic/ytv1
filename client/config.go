@@ -66,6 +66,10 @@ type Config struct {
 	// when the selected client supports ad playback context.
 	UseAdPlaybackContext bool
 
+	// ClientHedgeDelay delays lower-priority client requests during extraction.
+	// Zero means immediate parallel start for all selected clients.
+	ClientHedgeDelay time.Duration
+
 	// RequestHeaders are applied to package-level outgoing HTTP requests.
 	RequestHeaders http.Header
 
@@ -140,13 +144,15 @@ type Muxer interface {
 
 // DownloadTransportConfig controls retry/backoff behavior for direct stream downloads.
 type DownloadTransportConfig struct {
-	MaxRetries       int
-	InitialBackoff   time.Duration
-	MaxBackoff       time.Duration
-	RetryStatusCodes []int
-	EnableChunked    bool
-	ChunkSize        int64
-	MaxConcurrency   int
+	MaxRetries               int
+	InitialBackoff           time.Duration
+	MaxBackoff               time.Duration
+	RetryStatusCodes         []int
+	EnableChunked            bool
+	ChunkSize                int64
+	MaxConcurrency           int
+	SkipUnavailableFragments bool
+	MaxSkippedFragments      int
 }
 
 // MetadataTransportConfig controls retry/backoff for Innertube player metadata requests.
@@ -194,6 +200,7 @@ func (c Config) ToInnerTubeConfig() innertube.Config {
 		MetadataTransport:             innertube.MetadataTransportConfig(c.MetadataTransport),
 		EnableDynamicAPIKeyResolution: !c.DisableDynamicAPIKeyResolution,
 		UseAdPlaybackContext:          c.UseAdPlaybackContext,
+		ClientHedgeDelay:              c.ClientHedgeDelay,
 		OnExtractionEvent:             extractionHandler,
 	}
 }

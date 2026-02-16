@@ -6,8 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sync"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -153,7 +153,7 @@ func TestGetVideoEmitsExtractionEventsForWebpageAndManifest(t *testing.T) {
 		"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
 		"streamingData":{
 			"formats":[{"itag":18,"url":"https://example.com/v.mp4","mimeType":"video/mp4","bitrate":1000}],
-			"dashManifestUrl":"https://example.com/manifest.mpd",
+						"dashManifestUrl":"https://example.com/manifest.mpd?n=abcd",
 			"hlsManifestUrl":"https://example.com/manifest.m3u8"
 		}
 	}`

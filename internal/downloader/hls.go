@@ -20,10 +20,13 @@ import (
 type HLSDownloader struct {
 	Client      *http.Client
 	PlaylistURL string
+	Headers     http.Header
+	Transport   TransportConfig
 
 	// State
-	seenSegments map[string]bool
-	lastSeq      int
+	seenSegments     map[string]bool
+	lastSeq          int
+	skippedFragments int
 }
 
 type hlsSegment struct {
@@ -54,6 +57,16 @@ func NewHLSDownloader(client *http.Client, playlistURL string) *HLSDownloader {
 	}
 }
 
+func (h *HLSDownloader) WithRequestHeaders(headers http.Header) *HLSDownloader {
+	h.Headers = cloneHeader(headers)
+	return h
+}
+
+func (h *HLSDownloader) WithTransportConfig(cfg TransportConfig) *HLSDownloader {
+	h.Transport = cfg
+	return h
+}
+
 func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 	for {
 		select {
@@ -69,10 +82,11 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 		}
 
 		// 2. Parse Segments
-		segments, targetDuration, err := h.parseSegments(manifest, h.PlaylistURL)
+		segments, targetDuration, err := h.parseSegments(ctx, manifest, h.PlaylistURL)
 		if err != nil {
 			return err
 		}
+		isLive := !strings.Contains(manifest, "#EXT-X-ENDLIST")
 
 		// 3. Process new segments
 		newSegments := 0
@@ -87,6 +101,15 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 			}
 
 			if err := h.downloadSegment(ctx, seg, w); err != nil {
+				if isLive && shouldSkipFragmentError(err, h.Transport) {
+					h.skippedFragments++
+					if limit := h.Transport.MaxSkippedFragments; limit > 0 && h.skippedFragments > limit {
+						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
+					}
+					h.lastSeq = seg.Seq
+					h.seenSegments[seg.URL] = true
+					continue
+				}
 				return fmt.Errorf("failed to download segment seq=%d: %w", seg.Seq, err)
 			}
 
@@ -96,7 +119,7 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 		}
 
 		// 4. Check for End List
-		if strings.Contains(manifest, "#EXT-X-ENDLIST") {
+		if !isLive {
 			return nil
 		}
 
@@ -120,28 +143,14 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 }
 
 func (h *HLSDownloader) fetchManifest(ctx context.Context, url string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := h.Client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("manifest fetch failed: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := doGETBytesWithRetry(ctx, h.Client, url, h.Headers, h.Transport)
 	if err != nil {
 		return "", err
 	}
 	return string(body), nil
 }
 
-func (h *HLSDownloader) parseSegments(manifest, manifestURL string) ([]hlsSegment, float64, error) {
+func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL string) ([]hlsSegment, float64, error) {
 	scanner := bufio.NewScanner(strings.NewReader(manifest))
 	var segments []hlsSegment
 	var currentKey *hlsKey
@@ -195,7 +204,7 @@ func (h *HLSDownloader) parseSegments(manifest, manifestURL string) ([]hlsSegmen
 
 				// Fetch Key if needed
 				if currentKey != nil && currentKey.Method == "AES-128" && len(currentKey.Key) == 0 {
-					keyBytes, err := h.fetchKey(context.Background(), currentKey.URI) // TODO: pass ctx
+					keyBytes, err := h.fetchKey(ctx, currentKey.URI)
 					if err != nil {
 						return nil, 0, fmt.Errorf("failed to fetch key: %w", err)
 					}
@@ -216,22 +225,10 @@ func (h *HLSDownloader) parseSegments(manifest, manifestURL string) ([]hlsSegmen
 }
 
 func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", seg.URL, nil)
+	body, err := doGETBytesWithRetry(ctx, h.Client, seg.URL, h.Headers, h.Transport)
 	if err != nil {
 		return err
 	}
-	resp, err := h.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("segment fetch failed: %d", resp.StatusCode)
-	}
-
-	var reader io.Reader = resp.Body
-
 	// Decrypt if needed
 	if seg.Key != nil && seg.Key.Method == "AES-128" {
 		if len(seg.Key.Key) == 0 {
@@ -242,50 +239,33 @@ func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w i
 			return err
 		}
 		cbc := cipher.NewCBCDecrypter(block, seg.Key.IV)
-
-		data, err := io.ReadAll(reader)
-		if err != nil {
-			return err
-		}
-		if len(data) == 0 {
+		if len(body) == 0 {
 			return nil
 		}
-		if len(data)%aes.BlockSize != 0 {
+		if len(body)%aes.BlockSize != 0 {
 			return fmt.Errorf("encrypted data not block aligned")
 		}
-		cbc.CryptBlocks(data, data)
+		cbc.CryptBlocks(body, body)
 		// Remove padding (PKCS7)
-		padding := int(data[len(data)-1])
-		if padding > len(data) || padding == 0 {
+		padding := int(body[len(body)-1])
+		if padding > len(body) || padding == 0 {
 			// This happens if key is wrong or data is corrupt.
 			// For now, return error or maybe just warn and write raw?
 			// Return error to be safe.
 			return fmt.Errorf("invalid padding")
 		}
-		data = data[:len(data)-padding]
+		body = body[:len(body)-padding]
 
-		_, err = w.Write(data)
+		_, err = w.Write(body)
 		return err
 	}
 
-	_, err = io.Copy(w, reader)
+	_, err = w.Write(body)
 	return err
 }
 
 func (h *HLSDownloader) fetchKey(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := h.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("key fetch failed: %d", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
+	return doGETBytesWithRetry(ctx, h.Client, url, h.Headers, h.Transport)
 }
 
 func parseKey(attrs, manifestURL string) (*hlsKey, error) {

@@ -33,6 +33,9 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	}
 	filteredFormats, skipReasons := filterFormatsByPoTokenPolicy(formats, c.config)
 	if len(filteredFormats) == 0 && len(skipReasons) > 0 {
+		for _, skip := range skipReasons {
+			c.warnf("format skipped by po token policy: itag=%d protocol=%s reason=%s", skip.Itag, skip.Protocol, skip.Reason)
+		}
 		return nil, FormatInfo{}, &NoPlayableFormatsDetailError{
 			Mode:  normalizeSelectionMode(options.Mode),
 			Skips: skipReasons,

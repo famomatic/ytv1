@@ -62,3 +62,38 @@ func TestFilterFormatsByPoTokenPolicy_UnknownProtocolNotForcedToHTTPS(t *testing
 		t.Fatalf("unexpected kept formats: %+v", kept)
 	}
 }
+
+func TestFilterFormatsByPoTokenPolicy_SourceClientPolicyDefaultsNonBlocking(t *testing.T) {
+	formats := []FormatInfo{
+		{Itag: 18, Protocol: "https", SourceClient: "web", HasAudio: true, HasVideo: true},
+	}
+	cfg := Config{}
+
+	kept, skips := filterFormatsByPoTokenPolicy(formats, cfg)
+	if len(skips) != 0 {
+		t.Fatalf("unexpected skips for source-client default policy: %+v", skips)
+	}
+	if len(kept) != 1 || kept[0].Itag != 18 {
+		t.Fatalf("unexpected kept formats: %+v", kept)
+	}
+}
+
+func TestFilterFormatsByPoTokenPolicy_DropsDRMAndDamagedFormats(t *testing.T) {
+	formats := []FormatInfo{
+		{Itag: 18, Protocol: "https", IsDRM: true, HasAudio: true, HasVideo: true},
+		{Itag: 22, Protocol: "https", IsDamaged: true, HasAudio: true, HasVideo: true},
+		{Itag: 140, Protocol: "https", HasAudio: true},
+	}
+	cfg := Config{}
+
+	kept, skips := filterFormatsByPoTokenPolicy(formats, cfg)
+	if len(kept) != 1 || kept[0].Itag != 140 {
+		t.Fatalf("unexpected kept formats: %+v", kept)
+	}
+	if len(skips) != 2 {
+		t.Fatalf("unexpected skip count: %+v", skips)
+	}
+	if skips[0].Reason != "drm_protected" || skips[1].Reason != "damaged_format" {
+		t.Fatalf("unexpected skip reasons: %+v", skips)
+	}
+}

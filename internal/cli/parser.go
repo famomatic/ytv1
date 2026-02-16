@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/famomatic/ytv1/client"
 	"github.com/famomatic/ytv1/internal/cookies"
@@ -46,7 +48,9 @@ type Options struct {
 	OverrideAppend      bool   // --override-append-fallback
 	OverrideDiagnostics bool   // --override-diagnostics
 	VisitorData         string // --visitor-data
+	PoToken             string // --po-token
 	FFmpegLocation      string // --ffmpeg-location
+	ClientHedgeMS       int    // --client-hedge-ms
 
 	// Verbosity / Debug
 	Verbose         bool
@@ -90,7 +94,9 @@ func ParseFlags() Options {
 	flag.BoolVar(&opts.OverrideAppend, "override-append-fallback", false, "When -clients is set, keep fallback auto-append enabled")
 	flag.BoolVar(&opts.OverrideDiagnostics, "override-diagnostics", false, "Print per-client attempt diagnostics on metadata failure")
 	flag.StringVar(&opts.VisitorData, "visitor-data", "", "VISITOR_INFO1_LIVE value override")
+	flag.StringVar(&opts.PoToken, "po-token", "", "Static PO token override (applied to POT-required requests)")
 	flag.StringVar(&opts.FFmpegLocation, "ffmpeg-location", "", "Path to ffmpeg binary")
+	flag.IntVar(&opts.ClientHedgeMS, "client-hedge-ms", 350, "Delay(ms) before launching lower-priority fallback clients")
 
 	// Custom usage
 	flag.Usage = func() {
@@ -126,6 +132,12 @@ func ToClientConfig(opts Options) (client.Config, error) {
 	cfg := client.Config{
 		ProxyURL:    opts.ProxyURL,
 		VisitorData: opts.VisitorData,
+	}
+	if opts.ClientHedgeMS > 0 {
+		cfg.ClientHedgeDelay = time.Duration(opts.ClientHedgeMS) * time.Millisecond
+	}
+	if strings.TrimSpace(opts.PoToken) != "" {
+		cfg.PoTokenProvider = staticPoTokenProvider(strings.TrimSpace(opts.PoToken))
 	}
 
 	// Muxer check (ffmpeg)
@@ -187,4 +199,10 @@ func ToClientConfig(opts Options) (client.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+type staticPoTokenProvider string
+
+func (p staticPoTokenProvider) GetToken(_ context.Context, _ string) (string, error) {
+	return string(p), nil
 }

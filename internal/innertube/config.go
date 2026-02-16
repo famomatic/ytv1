@@ -41,6 +41,7 @@ type Config struct {
 	MetadataTransport             MetadataTransportConfig
 	EnableDynamicAPIKeyResolution bool
 	UseAdPlaybackContext          bool
+	ClientHedgeDelay              time.Duration
 	OnExtractionEvent             ExtractionEventHandler
 }
 

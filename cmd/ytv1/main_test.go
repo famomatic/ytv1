@@ -1,7 +1,9 @@
 package main
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/famomatic/ytv1/client"
 )
@@ -33,3 +35,67 @@ func TestFormatDownloadEvent(t *testing.T) {
 	}
 }
 
+func TestLifecyclePrinter_ExtractionElapsed(t *testing.T) {
+	clock := []time.Time{
+		time.Unix(0, 0),
+		time.Unix(0, int64(125*time.Millisecond)),
+	}
+	i := 0
+	lp := newLifecyclePrinter(func() time.Time {
+		v := clock[i]
+		i++
+		return v
+	})
+
+	_ = lp.formatExtractionEvent(client.ExtractionEvent{
+		Stage:  "player_api_json",
+		Phase:  "start",
+		Client: "web",
+	})
+	got := lp.formatExtractionEvent(client.ExtractionEvent{
+		Stage:  "player_api_json",
+		Phase:  "success",
+		Client: "web",
+		Detail: "ok",
+	})
+	if !strings.Contains(got, "elapsed_ms=125") {
+		t.Fatalf("expected elapsed_ms in output: %q", got)
+	}
+}
+
+func TestLifecyclePrinter_DownloadElapsedAndSpeed(t *testing.T) {
+	clock := []time.Time{
+		time.Unix(0, 0),
+		time.Unix(0, int64(2*time.Second)),
+	}
+	i := 0
+	lp := newLifecyclePrinter(func() time.Time {
+		v := clock[i]
+		i++
+		return v
+	})
+
+	_ = lp.formatDownloadEvent(client.DownloadEvent{
+		Stage:   "download",
+		Phase:   "start",
+		VideoID: "x",
+		Path:    "x.f248.video",
+		Detail:  "itag=248",
+	})
+	got := lp.formatDownloadEvent(client.DownloadEvent{
+		Stage:   "download",
+		Phase:   "complete",
+		VideoID: "x",
+		Path:    "x.f248.video",
+		Detail:  "bytes=10485760",
+	})
+	if !strings.Contains(got, "elapsed_ms=2000") {
+		t.Fatalf("expected elapsed_ms in output: %q", got)
+	}
+	if !strings.Contains(got, "speed_bps=") || !strings.Contains(got, "speed_mib_s=") {
+		t.Fatalf("expected speed fields in output: %q", got)
+	}
+	if !strings.Contains(got, "part=video") {
+		t.Fatalf("expected role field in output: %q", got)
+	}
+}

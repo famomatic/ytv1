@@ -144,13 +144,17 @@ The CLI exists for verification and debugging, not as the primary product surfac
 
 Examples:
 
-- `ytv1.exe -v <video_id>`
-- `ytv1.exe -v <video_id> -playerjs`
-- `ytv1.exe -v <video_id> -download [-itag <itag>] [-o <output_path>]`
+- `ytv1.exe --verbose <video_id>`
+- `ytv1.exe --verbose --override-diagnostics <video_id>`
+- `ytv1.exe --verbose --clients android_vr,web,web_safari <video_id>`
+- `ytv1.exe --verbose --visitor-data <VISITOR_INFO1_LIVE> <video_id>`
+- `ytv1.exe --verbose --po-token <POT_TOKEN> <video_id>`
+- `ytv1.exe --playerjs <video_id>`
 
 ## Troubleshooting
 
 - `login required`: provide cookies (`--cookies`) and/or visitor context (`--visitor-data`), then retry with `--override-diagnostics`.
+- `missing required POT`: provide a token via `--po-token` (CLI) or configure `client.Config.PoTokenProvider` (library API).
 - `challenge not solved`: retry with `--verbose` and check `player_js`/`challenge` stages; player JS may have changed.
 - `no playable formats`: use `-F` to inspect candidates and verify manifest extraction stages in verbose logs.
 - merge output missing: verify ffmpeg availability or pass `--ffmpeg-location`.

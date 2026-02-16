@@ -27,21 +27,8 @@ func applyRequestHeaders(req *http.Request, headers http.Header) {
 }
 
 func applyMediaRequestHeaders(req *http.Request, headers http.Header, videoID string) {
-	applyRequestHeaders(req, headers)
-
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", innertube.WebClient.UserAgent)
-	}
-	if req.Header.Get("Origin") == "" {
-		req.Header.Set("Origin", "https://www.youtube.com")
-	}
-	if req.Header.Get("Referer") == "" {
-		if videoID != "" {
-			req.Header.Set("Referer", "https://www.youtube.com/watch?v="+videoID)
-			return
-		}
-		req.Header.Set("Referer", "https://www.youtube.com/")
-	}
+	merged := buildMediaRequestHeaders(headers, videoID)
+	applyRequestHeaders(req, merged)
 }
 
 func cloneHeader(h http.Header) http.Header {
@@ -55,6 +42,29 @@ func cloneHeader(h http.Header) http.Header {
 		out[k] = cp
 	}
 	return out
+}
+
+func buildMediaRequestHeaders(headers http.Header, videoID string) http.Header {
+	merged := cloneHeader(headers)
+	if merged == nil {
+		merged = make(http.Header)
+	}
+
+	if merged.Get("User-Agent") == "" {
+		merged.Set("User-Agent", innertube.WebClient.UserAgent)
+	}
+	if merged.Get("Origin") == "" {
+		merged.Set("Origin", "https://www.youtube.com")
+	}
+	if merged.Get("Referer") == "" {
+		if videoID != "" {
+			merged.Set("Referer", "https://www.youtube.com/watch?v="+videoID)
+		} else {
+			merged.Set("Referer", "https://www.youtube.com/")
+		}
+	}
+
+	return merged
 }
 
 func mergeHeaders(dst http.Header, src http.Header) {

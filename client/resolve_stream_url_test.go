@@ -97,7 +97,7 @@ func TestResolveStreamURL_SOnly(t *testing.T) {
 func TestResolveStreamURL_NOnly(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	format := innertube.Format{
-		Itag: 140,
+		Itag:            140,
 		SignatureCipher: buildCipher("https://example.com/audio?n=abcd&foo=1", nil),
 	}
 	c := testClientWithSession(videoID, format, testPlayerJS())
@@ -154,7 +154,7 @@ func TestResolveStreamURL_DirectURLWithN(t *testing.T) {
 	}
 }
 
-func TestResolveStreamURL_DirectURLWithNWithoutPlayerURL(t *testing.T) {
+func TestResolveStreamURL_DirectURLWithNWithoutPlayerURL_FetchesOnDemand(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	format := innertube.Format{
 		Itag: 18,
@@ -165,9 +165,13 @@ func TestResolveStreamURL_DirectURLWithNWithoutPlayerURL(t *testing.T) {
 	session.PlayerURL = ""
 	c.sessions[videoID] = session
 
-	_, err := c.ResolveStreamURL(context.Background(), videoID, 18)
-	if err != ErrChallengeNotSolved {
-		t.Fatalf("ResolveStreamURL() error = %v, want %v", err, ErrChallengeNotSolved)
+	out, err := c.ResolveStreamURL(context.Background(), videoID, 18)
+	if err != nil {
+		t.Fatalf("ResolveStreamURL() error = %v", err)
+	}
+	u, _ := url.Parse(out)
+	if got := u.Query().Get("n"); got != "bcd" {
+		t.Fatalf("n = %q, want %q", got, "bcd")
 	}
 }
 
@@ -243,6 +247,29 @@ func TestPrimeChallengeSolutions_BatchesAndCaches(t *testing.T) {
 	}
 }
 
+func TestChallengeCache_NormalizesPlayerLocaleKey(t *testing.T) {
+	resolver := &countingPlayerResolverStub{js: testPlayerJS()}
+	c := &Client{
+		config:           Config{HTTPClient: http.DefaultClient},
+		playerJSResolver: resolver,
+		sessions:         map[string]videoSession{},
+		challenges:       map[string]challengeSolutions{},
+	}
+
+	koPath := "/s/player/1798f86c/player_es6.vflset/ko_KR/base.js"
+	enPath := "/s/player/1798f86c/player_es6.vflset/en_US/base.js"
+
+	if _, err := c.decodeNWithCache(context.Background(), koPath, "abcd"); err != nil {
+		t.Fatalf("decodeNWithCache(ko) error = %v", err)
+	}
+	if _, err := c.decodeNWithCache(context.Background(), enPath, "abcd"); err != nil {
+		t.Fatalf("decodeNWithCache(en) error = %v", err)
+	}
+	if resolver.calls != 1 {
+		t.Fatalf("expected locale-normalized challenge cache hit, calls=%d want=1", resolver.calls)
+	}
+}
+
 func TestPrimeChallengeSolutions_EmitsPartialOnMixedSolve(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	// n-function exists, signature decipher ops intentionally absent.
@@ -289,4 +316,3 @@ xx.get("n"))&&(b=abc[0](x)+1||nx)
 
 var _ playerjs.Resolver = playerResolverStub{}
 var _ playerjs.Resolver = (*countingPlayerResolverStub)(nil)
-

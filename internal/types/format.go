@@ -13,6 +13,8 @@ type FormatInfo struct {
 	Height       int
 	FPS          int
 	Ciphered     bool
+	IsDRM        bool
+	IsDamaged    bool
 	Quality      string
 	QualityLabel string
 	SourceClient string

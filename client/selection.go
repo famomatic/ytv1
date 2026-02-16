@@ -89,28 +89,28 @@ func betterForMode(a, b FormatInfo, mode SelectionMode) bool {
 	switch mode {
 	case SelectionModeAudioOnly, SelectionModeMP3:
 		return compareKeys(
-			[]int{a.Bitrate, boolScore(a.Ciphered), -a.Itag},
-			[]int{b.Bitrate, boolScore(b.Ciphered), -b.Itag},
+			[]int{protocolScore(a.Protocol), a.Bitrate, boolScore(a.Ciphered), -a.Itag},
+			[]int{protocolScore(b.Protocol), b.Bitrate, boolScore(b.Ciphered), -b.Itag},
 		)
 	case SelectionModeMP4AV, SelectionModeMP4VideoOnly:
 		return compareKeys(
-			[]int{a.Height, a.Width, a.FPS, a.Bitrate, boolScore(a.Ciphered), -a.Itag},
-			[]int{b.Height, b.Width, b.FPS, b.Bitrate, boolScore(b.Ciphered), -b.Itag},
+			[]int{a.Height, a.Width, a.FPS, protocolScore(a.Protocol), a.Bitrate, boolScore(a.Ciphered), -a.Itag},
+			[]int{b.Height, b.Width, b.FPS, protocolScore(b.Protocol), b.Bitrate, boolScore(b.Ciphered), -b.Itag},
 		)
 	case SelectionModeVideoOnly:
 		return compareKeys(
-			[]int{a.Height, a.Width, a.FPS, a.Bitrate, boolScore(a.Ciphered), -a.Itag},
-			[]int{b.Height, b.Width, b.FPS, b.Bitrate, boolScore(b.Ciphered), -b.Itag},
+			[]int{a.Height, a.Width, a.FPS, protocolScore(a.Protocol), a.Bitrate, boolScore(a.Ciphered), -a.Itag},
+			[]int{b.Height, b.Width, b.FPS, protocolScore(b.Protocol), b.Bitrate, boolScore(b.Ciphered), -b.Itag},
 		)
 	case SelectionModeBest:
 		return compareKeys(
-			[]int{trackRank(a), a.Height, a.Width, a.FPS, a.Bitrate, boolScore(a.Ciphered), -a.Itag},
-			[]int{trackRank(b), b.Height, b.Width, b.FPS, b.Bitrate, boolScore(b.Ciphered), -b.Itag},
+			[]int{trackRank(a), a.Height, a.Width, a.FPS, protocolScore(a.Protocol), a.Bitrate, boolScore(a.Ciphered), -a.Itag},
+			[]int{trackRank(b), b.Height, b.Width, b.FPS, protocolScore(b.Protocol), b.Bitrate, boolScore(b.Ciphered), -b.Itag},
 		)
 	default:
 		return compareKeys(
-			[]int{trackRank(a), a.Height, a.Width, a.FPS, a.Bitrate, boolScore(a.Ciphered), -a.Itag},
-			[]int{trackRank(b), b.Height, b.Width, b.FPS, b.Bitrate, boolScore(b.Ciphered), -b.Itag},
+			[]int{trackRank(a), a.Height, a.Width, a.FPS, protocolScore(a.Protocol), a.Bitrate, boolScore(a.Ciphered), -a.Itag},
+			[]int{trackRank(b), b.Height, b.Width, b.FPS, protocolScore(b.Protocol), b.Bitrate, boolScore(b.Ciphered), -b.Itag},
 		)
 	}
 }
@@ -143,6 +143,15 @@ func boolScore(ciphered bool) int {
 		return 0
 	}
 	return 1
+}
+
+func protocolScore(protocol string) int {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "https", "dash", "hls":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func mimeContainer(mimeType string) string {

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/famomatic/ytv1/internal/challenge"
 	"github.com/famomatic/ytv1/internal/formats"
 	"github.com/famomatic/ytv1/internal/innertube"
 	"github.com/famomatic/ytv1/internal/orchestrator"
@@ -51,6 +52,9 @@ func NewClient(config Config) *Client {
 	}
 	if config.CookieJar != nil {
 		config.HTTPClient.Jar = config.CookieJar
+	}
+	if config.PoTokenProvider != nil {
+		config.PoTokenProvider = challenge.NewCachedPoTokenProvider(config.PoTokenProvider)
 	}
 
 	registry := innertube.NewRegistry()
@@ -128,16 +132,17 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		HLSManifestURL:  resp.StreamingData.HlsManifestURL,
 	}
 
-	c.emitExtractionEvent("webpage", "start", "web", videoID)
-	playerURL, playerErr := c.playerJSResolver.GetPlayerURL(ctx, videoID)
-	if playerErr != nil {
-		c.emitExtractionEvent("webpage", "failure", "web", playerErr.Error())
-	} else {
-		c.emitExtractionEvent("webpage", "success", "web", playerURL)
+	playerURL := ""
+	nChallenges, sigChallenges := collectStreamChallenges(resp, info.DashManifestURL, info.HLSManifestURL)
+	if len(nChallenges) > 0 || len(sigChallenges) > 0 {
+		fetched, fetchErr := c.fetchPlayerURL(ctx, videoID)
+		if fetchErr == nil {
+			playerURL = fetched
+			c.primeChallengeSolutions(ctx, playerURL, resp, info.DashManifestURL, info.HLSManifestURL)
+		}
 	}
-	c.primeChallengeSolutions(ctx, playerURL, resp, info.DashManifestURL, info.HLSManifestURL)
-	info.DashManifestURL = c.resolveManifestURL(ctx, info.DashManifestURL, playerURL)
-	info.HLSManifestURL = c.resolveManifestURL(ctx, info.HLSManifestURL, playerURL)
+	info.DashManifestURL = c.resolveManifestURL(ctx, info.DashManifestURL, playerURL, resp.SourceClient, innertube.StreamingProtocolDASH)
+	info.HLSManifestURL = c.resolveManifestURL(ctx, info.HLSManifestURL, playerURL, resp.SourceClient, innertube.StreamingProtocolHLS)
 
 	manifestFormats := c.loadManifestFormats(ctx, info.DashManifestURL, info.HLSManifestURL)
 	if len(manifestFormats) > 0 {
@@ -176,7 +181,13 @@ func (c *Client) FetchDASHManifest(ctx context.Context, input string) (string, e
 	if err != nil {
 		return "", err
 	}
-	manifestURL := c.resolveManifestURL(ctx, session.Response.StreamingData.DashManifestURL, session.PlayerURL)
+	manifestURL := c.resolveManifestURL(
+		ctx,
+		session.Response.StreamingData.DashManifestURL,
+		session.PlayerURL,
+		session.Response.SourceClient,
+		innertube.StreamingProtocolDASH,
+	)
 	if manifestURL == "" {
 		return "", fmt.Errorf("%w: dash manifest unavailable for video=%s", ErrNoPlayableFormats, videoID)
 	}
@@ -196,7 +207,13 @@ func (c *Client) FetchHLSManifest(ctx context.Context, input string) (string, er
 	if err != nil {
 		return "", err
 	}
-	manifestURL := c.resolveManifestURL(ctx, session.Response.StreamingData.HlsManifestURL, session.PlayerURL)
+	manifestURL := c.resolveManifestURL(
+		ctx,
+		session.Response.StreamingData.HlsManifestURL,
+		session.PlayerURL,
+		session.Response.SourceClient,
+		innertube.StreamingProtocolHLS,
+	)
 	if manifestURL == "" {
 		return "", fmt.Errorf("%w: hls manifest unavailable for video=%s", ErrNoPlayableFormats, videoID)
 	}
@@ -234,7 +251,20 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 	}
 
 	if raw.URL != "" {
-		rewritten, err := c.resolveDirectURL(ctx, raw.URL, session.PlayerURL)
+		if hasQueryParam(raw.URL, "n") && strings.TrimSpace(session.PlayerURL) == "" {
+			updated, fetchErr := c.ensureSessionPlayerURL(ctx, videoID, session)
+			if fetchErr != nil {
+				return "", ErrChallengeNotSolved
+			}
+			session = updated
+		}
+		rewritten, err := c.resolveDirectURL(
+			ctx,
+			raw.URL,
+			session.PlayerURL,
+			session.Response.SourceClient,
+			protocolFromRawFormat(raw),
+		)
 		if err != nil {
 			return "", err
 		}
@@ -245,8 +275,15 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 	if cipher == "" {
 		cipher = raw.Cipher
 	}
-	if cipher == "" || session.PlayerURL == "" {
+	if cipher == "" {
 		return "", ErrChallengeNotSolved
+	}
+	if strings.TrimSpace(session.PlayerURL) == "" {
+		updated, fetchErr := c.ensureSessionPlayerURL(ctx, videoID, session)
+		if fetchErr != nil {
+			return "", ErrChallengeNotSolved
+		}
+		session = updated
 	}
 
 	params, err := url.ParseQuery(cipher)
@@ -287,7 +324,11 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 		}
 	}
 
-	return u.String(), nil
+	rewritten, err := c.applyPoTokenPolicyToURL(ctx, u.String(), session.Response.SourceClient, protocolFromRawFormat(raw))
+	if err != nil {
+		return "", err
+	}
+	return rewritten, nil
 }
 
 func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f FormatInfo) (string, error) {
@@ -307,7 +348,14 @@ func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f
 				return "", ErrChallengeNotSolved
 			}
 		}
-		return c.resolveDirectURL(ctx, f.URL, session.PlayerURL)
+		if hasQueryParam(f.URL, "n") && strings.TrimSpace(session.PlayerURL) == "" {
+			updated, fetchErr := c.ensureSessionPlayerURL(ctx, videoID, session)
+			if fetchErr != nil {
+				return "", ErrChallengeNotSolved
+			}
+			session = updated
+		}
+		return c.resolveDirectURL(ctx, f.URL, session.PlayerURL, f.SourceClient, protocolFromFormat(f))
 	}
 
 	return c.ResolveStreamURL(ctx, videoID, f.Itag)
@@ -328,6 +376,8 @@ func toFormatInfo(f formats.Format) FormatInfo {
 		Height:       f.Height,
 		FPS:          f.FPS,
 		Ciphered:     f.Ciphered,
+		IsDRM:        f.IsDRM,
+		IsDamaged:    f.IsDamaged,
 		Quality:      f.Quality,
 		QualityLabel: f.QualityLabel,
 		SourceClient: f.SourceClient,
@@ -577,18 +627,77 @@ func findRawFormat(resp *innertube.PlayerResponse, itag int) (innertube.Format, 
 	return innertube.Format{}, false
 }
 
-func (c *Client) resolveManifestURL(ctx context.Context, manifestURL, playerURL string) string {
-	if manifestURL == "" || playerURL == "" || !hasQueryParam(manifestURL, "n") {
-		return manifestURL
-	}
-	rewritten, err := rewriteURLParam(manifestURL, "n", func(value string) (string, error) {
-		return c.decodeNWithCache(ctx, playerURL, value)
-	})
+func (c *Client) fetchPlayerURL(ctx context.Context, videoID string) (string, error) {
+	c.emitExtractionEvent("webpage", "start", "web", videoID)
+	playerURL, err := c.playerJSResolver.GetPlayerURL(ctx, videoID)
 	if err != nil {
-		c.warnf("n challenge decode failed for manifest url; using original url: %v", err)
-		return manifestURL
+		c.emitExtractionEvent("webpage", "failure", "web", err.Error())
+		return "", err
 	}
-	return rewritten
+	c.emitExtractionEvent("webpage", "success", "web", playerURL)
+	return playerURL, nil
+}
+
+func (c *Client) ensureSessionPlayerURL(ctx context.Context, videoID string, session videoSession) (videoSession, error) {
+	if strings.TrimSpace(session.PlayerURL) != "" {
+		return session, nil
+	}
+	playerURL, err := c.fetchPlayerURL(ctx, videoID)
+	if err != nil {
+		return session, err
+	}
+	session.PlayerURL = playerURL
+	c.putSession(videoID, session)
+	return session, nil
+}
+
+func protocolFromRawFormat(raw innertube.Format) innertube.VideoStreamingProtocol {
+	if p := protocolFromURL(raw.URL); p != innertube.StreamingProtocolUnknown {
+		return p
+	}
+	cipher := raw.SignatureCipher
+	if cipher == "" {
+		cipher = raw.Cipher
+	}
+	if strings.TrimSpace(cipher) == "" {
+		return innertube.StreamingProtocolUnknown
+	}
+	params, err := url.ParseQuery(cipher)
+	if err != nil {
+		return innertube.StreamingProtocolUnknown
+	}
+	return protocolFromURL(params.Get("url"))
+}
+
+func (c *Client) resolveManifestURL(
+	ctx context.Context,
+	manifestURL string,
+	playerURL string,
+	sourceClient string,
+	protocol innertube.VideoStreamingProtocol,
+) string {
+	if manifestURL == "" {
+		return ""
+	}
+
+	rewritten := manifestURL
+	if playerURL != "" && hasQueryParam(manifestURL, "n") {
+		nRewritten, err := rewriteURLParam(manifestURL, "n", func(value string) (string, error) {
+			return c.decodeNWithCache(ctx, playerURL, value)
+		})
+		if err != nil {
+			c.warnf("n challenge decode failed for manifest url; using original url: %v", err)
+		} else {
+			rewritten = nRewritten
+		}
+	}
+
+	potRewritten, err := c.applyPoTokenPolicyToURL(ctx, rewritten, sourceClient, protocol)
+	if err != nil {
+		c.warnf("po token injection failed for manifest url; using original url: %v", err)
+		return rewritten
+	}
+	return potRewritten
 }
 
 func hasQueryParam(rawURL, key string) bool {
@@ -673,25 +782,37 @@ func appendUniqueFormats(base []FormatInfo, extras []FormatInfo) []FormatInfo {
 	return out
 }
 
-func (c *Client) resolveDirectURL(ctx context.Context, rawURL string, playerURL string) (string, error) {
+func (c *Client) resolveDirectURL(
+	ctx context.Context,
+	rawURL string,
+	playerURL string,
+	sourceClient string,
+	protocol innertube.VideoStreamingProtocol,
+) (string, error) {
 	if rawURL == "" {
 		return "", ErrChallengeNotSolved
 	}
-	if !hasQueryParam(rawURL, "n") {
-		return rawURL, nil
-	}
-	if playerURL == "" {
-		return "", ErrChallengeNotSolved
+
+	rewritten := rawURL
+	if hasQueryParam(rawURL, "n") {
+		if playerURL == "" {
+			return "", ErrChallengeNotSolved
+		}
+		nRewritten, err := rewriteURLParam(rawURL, "n", func(value string) (string, error) {
+			return c.decodeNWithCache(ctx, playerURL, value)
+		})
+		if err != nil {
+			c.warnf("n challenge decode failed for direct url; using original url: %v", err)
+		} else {
+			rewritten = nRewritten
+		}
 	}
 
-	rewritten, err := rewriteURLParam(rawURL, "n", func(value string) (string, error) {
-		return c.decodeNWithCache(ctx, playerURL, value)
-	})
+	potRewritten, err := c.applyPoTokenPolicyToURL(ctx, rewritten, sourceClient, protocol)
 	if err != nil {
-		c.warnf("n challenge decode failed for direct url; using original url: %v", err)
-		return rawURL, nil
+		return "", err
 	}
-	return rewritten, nil
+	return potRewritten, nil
 }
 
 func (c *Client) warnf(format string, args ...any) {
