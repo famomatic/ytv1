@@ -62,6 +62,37 @@ func TestParse(t *testing.T) {
 				},
 			},
 		},
+		{
+			input: "bestvideo[width>=1920]/best",
+			expected: &Selector{
+				Fallbacks: []MergeGroup{
+					{
+						{Filters: []FormatFilter{
+							{Type: "media", Value: "video", Op: "best"},
+							{Type: "width", Value: "1920", Op: ">="},
+						}},
+					},
+					{
+						{Filters: []FormatFilter{{Type: "builtin", Value: "best"}}},
+					},
+				},
+			},
+		},
+		{
+			input: "worstaudio/fps!=60",
+			expected: &Selector{
+				Fallbacks: []MergeGroup{
+					{
+						{Filters: []FormatFilter{{Type: "media", Value: "audio", Op: "worst"}}},
+					},
+					{
+						{Filters: []FormatFilter{
+							{Type: "fps", Value: "60", Op: "!="},
+						}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {

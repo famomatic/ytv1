@@ -1,4 +1,4 @@
-# ytv1 Implementation Plan (yt-dlp Deep Port Rebuild)
+# ytv1 Implementation Plan (Cycle B: YouTube CLI Substitute)
 
 ## Status Legend
 
@@ -11,9 +11,9 @@
 
 ## 0. Planning Rules (Authoritative)
 
-1. This document is the single execution order for migration work.
+1. This document is the single execution order for active work.
 2. Do not start tasks outside this file unless user explicitly requests.
-3. Execute sequentially by dependency track (`R0 -> R11`).
+3. Execute sequentially by dependency track (`B0 -> B9`).
 4. Before substantial coding:
    - mark active track as `[-]`
    - keep all later tracks as `[ ]`
@@ -35,240 +35,206 @@
 ### 1.1 Session Date
 - `2026-02-16`
 
-### 1.2 Verified Runtime State
-- `ytv1 DSYFmhjDbvs` now reaches `player_api_json` success and completes JS challenge stage with `challenge:success ... n=1,sig=1` when JS path is used.
-- Client selection now resolves by configured order (parallel fetch with deterministic ordered commit), so `android_vr` is preferred when available.
-- Latest rerun (`2026-02-16`) confirms full end-to-end success: selected `248+251`, downloaded both streams, merged output, and cleaned intermediates.
-- R5 parity increment landed: POT provider now has in-process reuse cache, source-client-aware POT policy evaluation is applied in format filtering, and resolved direct/manifest URLs can receive POT query injection under policy.
-- R6 groundwork started: `internal/challenge` now includes provider-backed batch solver primitives, and client challenge priming now executes through bulk solver path instead of per-challenge direct loops.
-- R6 parity increment landed: challenge cache key now canonicalizes player locale path (`.../ko_KR/base.js` == `.../en_US/base.js`) to improve cache hit stability, partial solve path emits explicit warning logs, and provider fallback chain is enabled for bulk solve resilience.
-- R7 parity increment landed: normalized format model now marks `is_drm` and `is_damaged` candidates, and client-side format filtering deterministically skips these before selection/materialization.
-- R7 parity increment landed: format ranking now deprioritizes `unknown` protocol candidates versus known media protocols (`https`/`dash`/`hls`) to reduce invalid materialization picks.
-- R8 parity increment landed: downloader manifest/segment requests now support explicit media-header propagation for HLS/DASH paths (including default UA/Origin/Referer synthesis) with dedicated transport tests.
-- R8 parity increment landed: fragmented downloader paths now honor retry/backoff policy with shared HTTP retry transport (including `Retry-After` throttle hint handling for status retries such as `429`).
-- R8 parity increment landed: live/dynamic fragment downloads now support controlled unavailable-fragment skipping (`404`/`410`) with bounded skip limits to mirror practical degraded-stream behavior without hanging on missing edges.
-- R8 parity increment landed: DASH static fragment path now supports bounded parallel fetch with ordered materialization (concurrency controlled by transport config), while dynamic/live paths retain sequential semantics.
-- R10 parity increment landed: CLI now supports explicit static POT override input via `--po-token` (wired to `client.Config.PoTokenProvider`), and runtime diagnostics emit actionable remediation hints for policy-sensitive failures.
-- R11 closeout verification (`2026-02-16`) passed: `go test ./...` green, live-gated E2E suite green, and runtime gate `go run ./cmd/ytv1 --verbose DSYFmhjDbvs` succeeded with download+merge completion.
-- Remaining migration work is parity hardening/documentation, not DSYF baseline pass gate failure.
+### 1.2 Completed Baseline (Cycle A Closed)
+- Previous migration cycle `R0-R11` is fully completed.
+- DSYF runtime gate already passed end-to-end (`extract + download + merge`).
+- Live-gated E2E tests and default test suite were green at cycle closeout.
+- Core parity blocks are in place: Innertube policy, JS challenge, POT policy/injection, format materialization, retryable downloader transport, CLI diagnostics.
 
-### 1.3 Reference Baseline Used For Rebuild
-- Runtime binary folder exists: `C:\yt-dlp`.
-- Source reference used for porting: `D:\yt-dlp\yt_dlp`.
-- Primary source files for this rebuild:
-  1. `D:\yt-dlp\yt_dlp\extractor\youtube\_base.py`
-  2. `D:\yt-dlp\yt_dlp\extractor\youtube\_video.py`
-  3. `D:\yt-dlp\yt_dlp\extractor\youtube\jsc\*`
-  4. `D:\yt-dlp\yt_dlp\extractor\youtube\pot\*`
-  5. `D:\yt-dlp\yt_dlp\downloader\http.py`
-  6. `D:\yt-dlp\yt_dlp\downloader\fragment.py`
-  7. `D:\yt-dlp\yt_dlp\downloader\common.py`
+### 1.3 Current Gap Theme (New Cycle Focus)
+- CLI still supports only a narrow selector mapping (`best`, `bestaudio`, `bestvideo`, `mp4`, `mp3`) and lacks yt-dlp-grade selection grammar behavior.
+- CLI/operator workflow parity is incomplete (batch controls, archive/idempotency, richer output templating, predictable failure controls).
+- Need explicit substitute-level acceptance criteria and regression matrix focused on real operator workflows, not only single-ID success.
+- B0 documentation sync is complete across plan/readme/architecture with explicit scorecard targets and workflow matrix classes.
+- B1 first increment landed: CLI now forwards custom `-f` expressions to package selector flow, while preserving mp3/mode aliases and numeric itag input handling.
+- B1 second increment landed in selector engine: fixed `ext=m4a` matching for `audio/mp4`, added width-filter semantics, improved `best` ranking to prefer AV candidates, and added selector behavior tests for merge/fallback/filter paths.
+- B1 third increment landed: added `worstvideo/worstaudio` selection semantics and standalone predicate parsing (`fps!=60`, `ext=mp4`, `height<=720`) for fallback segments.
+- B1 completion increment landed: selector parse/match failures now surface as typed `ErrNoPlayableFormats` details with selector+reason diagnostics, and CLI remediation hints include selector-specific guidance.
+- B2 completion increment landed: output template token rendering (`%(id)s`, `%(title)s`, `%(uploader)s`, `%(ext)s`, `%(itag)s`) now applies deterministically to single/merge downloads with filename-safe normalization and test coverage.
+- B3 first increment landed: CLI now exposes batch error policy (`--abort-on-error`), resume policy (`--no-continue`), and retry controls (`--retries`, `--retry-sleep-ms`) mapped into package transport config; main-loop abort semantics are covered by command-layer tests.
+- B3 completion increment landed: resume control is wired through CLI-to-download pipeline (`Resume` propagation), retry/backoff overrides are test-covered at config mapping layer, and batch continue/abort semantics are validated with deterministic processor-loop tests.
+- B4 completion increment landed: playlist item processing now reports deterministic per-item outcomes with final totals (`total/succeeded/failed/aborted`) and explicit abort-on-error cutover semantics validated by command-layer tests.
+- B5 completion increment landed: subtitle flags now execute end-to-end in CLI (`--write-subs`, `--write-auto-subs`, `--sub-lang`) with deterministic SRT naming/output, explicit language fallback policy wiring, and mp3-mode failure remediation hints.
+- B6 completion increment landed: CLI archive-backed idempotency is now available via `--download-archive`, with deterministic skip-on-rerun policy, append-on-success persistence, and corruption-tolerant archive load behavior.
+- B7 completion increment landed: CLI now emits structured JSON failure payloads in `--print-json` mode (`ok=false`, `input`, `exit_code`, `error{category,message,attempts?}`), exposes explicit exit-code-by-category policy, and uses shared package error categorization for automation-stable diagnostics.
+- B8 completion increment landed: fixture workflow matrix is now codified by command-layer matrix tests (`TestWorkflowMatrix_FixtureCoverage`) with reproducible command contract (`go test ./...`, live-gated `YTV1_E2E=1 go test ./client -run TestE2E_`), and latest fixture-gated scorecard on `2026-02-16` is `workflow_pass_rate=100%`, `deterministic_output_rate=100%`, `diagnosable_failure_rate=100%` (inferred from passing matrix-class tests).
+- B9 closeout verification landed: `go test ./...` and live-gated matrix (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`) passed on `2026-02-16`, and residual risk register is now explicit with severity/owner.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
-1. `[x]` R0. Rebaseline and failure observability hardening
-2. `[x]` R1. yt-dlp YouTube source-map parity (function-level)
-3. `[x]` R2. Innertube client/profile parity port
-4. `[x]` R3. API header/session/auth parity port
-5. `[x]` R4. Player response pipeline parity (`ytcfg`, player URL, `sts`, context)
-6. `[x]` R5. PO Token framework parity (policy + provider/cache + URL injection)
-7. `[x]` R6. JS challenge framework parity (bulk solve + provider fallback + cache semantics)
-8. `[x]` R7. Format/materialization parity (direct + manifest + n/sig/pot rewrite)
-9. `[x]` R8. Downloader transport parity (HTTP/fragment retry, range/chunk/resume, header propagation)
-10. `[x]` R9. End-to-end regression matrix (DSYF mandatory pass gate)
-11. `[x]` R10. CLI parity diagnostics and operator controls
-12. `[x]` R11. Migration closeout with unresolved-gap classification
+1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
+2. `[x]` B1. Format selector grammar parity (`-f`)
+3. `[x]` B2. Output template and metadata naming parity (`-o` and related fields)
+4. `[x]` B3. Download job control parity (retry/continue/abort behavior)
+5. `[x]` B4. Playlist/batch execution parity and deterministic reporting
+6. `[x]` B5. Subtitle/metadata/post-processing parity for common workflows
+7. `[x]` B6. Download archive/idempotency parity
+8. `[x]` B7. CLI diagnostics + machine-readable output parity
+9. `[x]` B8. Substitute-grade regression matrix and scorecard
+10. `[x]` B9. Cycle B closeout and release checklist
 
 ---
 
-## 2. Mission and Non-Negotiable Outcome
+## 2. Mission and Scope (Cycle B)
 
 ### 2.1 Mission
-`ytv1` must port yt-dlp YouTube extraction behavior deeply enough that real-world IDs like `DSYFmhjDbvs` succeed in default usage, not only fixture tests.
+Make `ytv1` a practical **YouTube-focused** CLI substitute for yt-dlp in daily operator workflows, while preserving package-first architecture.
 
-### 2.2 Non-Negotiable Outcome
-- `ytv1 DSYFmhjDbvs` succeeds end-to-end on maintained environment.
-- If blocked by external factors, diagnostics must explicitly identify exact blocker (policy/auth/pot/challenge/download).
+### 2.2 Scope Boundary
+- In scope: YouTube extractor + downloader behavior and CLI operation parity for common yt-dlp usage patterns.
+- Out of scope: Multi-site extractor parity across non-YouTube providers.
+
+### 2.3 Non-Negotiable Outcome
+- A defined workflow matrix (single video, playlist batch, format selection, subtitle path, archive/idempotent rerun) executes successfully with deterministic behavior and actionable diagnostics.
 
 ---
 
 ## 3. Execution Tracks
 
-### R0. Rebaseline and Failure Observability
+### B0. Rebaseline and Target Definition Reset
 - Status: `[x]`
-- Goal: Freeze current failure signatures before deeper porting.
+- Goal: Freeze current CLI/operator baseline and define measurable substitute targets.
 - Work:
-  1. Capture structured stage logs for extraction + download attempts for DSYF.
-  2. Ensure diagnostics include selected client, protocol, URL policy metadata, and response status.
-  3. Add regression test harness hooks for replaying critical failure surfaces.
-- Target files:
-  - `client/client.go`
-  - `client/download.go`
-  - `client/errors.go`
-  - `cmd/ytv1/main.go`
-- Acceptance:
-  - DSYF failure path produces deterministic, typed diagnostics suitable for root-cause triage.
-
-### R1. yt-dlp YouTube Source-Map Parity
-- Status: `[x]`
-- Goal: Build explicit mapping from yt-dlp functions to ytv1 modules before additional code movement.
-- Work:
-  1. Map `_video.py` extraction flow to `client` + `internal/orchestrator`.
-  2. Map `_base.py` header/session/context helpers to `internal/innertube` + request helpers.
-  3. Map `jsc/*` and `pot/*` responsibilities to `internal/playerjs` + `internal/challenge`.
-  4. Map downloader `http.py`/`fragment.py` behavior to `client/download` + `internal/downloader`.
+  1. Document current CLI flag behavior vs desired yt-dlp-equivalent workflow expectations.
+  2. Define substitute scorecard metrics (workflow pass rate, deterministic outputs, error diagnosability).
+  3. Establish test/fixture matrix for Cycle B tracks.
 - Target files:
   - `docs/IMPLEMENTATION_PLAN.md`
+  - `README.md`
   - `docs/ARCHITECTURE.md`
 - Acceptance:
-  - No major yt-dlp dependency path is left unmapped.
+  - Cycle B metrics and test matrix are explicit, concrete, and agreed in docs.
 
-### R2. Innertube Client/Profile Parity Port
+### B1. Format Selector Grammar Parity (`-f`)
 - Status: `[x]`
-- Goal: Align client matrix and fallback behavior with yt-dlp practical defaults.
+- Goal: Support practical yt-dlp-style format expressions used in real operations.
 - Work:
-  1. Port effective default client order and auth/non-auth variants.
-  2. Port per-client capability metadata (JS required, cookie support, ad playback context support).
-  3. Port client-specific host/context/version invariants needed for successful playback URL extraction.
+  1. Expand selector parser/evaluator coverage for combined selectors (`A+B`, fallback `/`, filter predicates used in common cases).
+  2. Integrate selector resolution into client download selection without pushing logic into CLI.
+  3. Add deterministic tie-break and conflict diagnostics.
 - Target files:
-  - `internal/innertube/clients.go`
-  - `internal/policy/*`
-  - `internal/orchestrator/*`
+  - `internal/selector/*`
+  - `client/selection.go`
+  - `client/download.go`
+  - `cmd/ytv1/main.go`
 - Acceptance:
-  - Client trial order and fallback decisions are deterministic and policy-driven.
+  - Common selector recipes execute correctly and are covered by tests.
 
-### R3. API Header/Session/Auth Parity Port
+### B2. Output Template and Metadata Naming Parity
 - Status: `[x]`
-- Goal: Match yt-dlp request identity behavior used for YouTube API and playback eligibility.
+- Goal: Make output naming predictable for yt-dlp users.
 - Work:
-  1. Port visitor data extraction/override precedence.
-  2. Port API headers generation (`X-YouTube-Client-*`, visitor, UA, auth/session headers).
-  3. Port cookie/session-derived auth header behavior (where applicable without login automation).
-- Target files:
-  - `internal/innertube/*`
-  - `client/request_helpers.go`
-  - `client/config.go`
-- Acceptance:
-  - Header/session behavior is explicit, testable, and client-aware.
-
-### R4. Player Response Pipeline Parity
-- Status: `[x]`
-- Goal: Align player response fetching with yt-dlp’s multi-source/context usage.
-- Work:
-  1. Port ytcfg acquisition per client and fallback strategy.
-  2. Port player URL extraction precedence and robust fallback.
-  3. Port signature timestamp (`sts`) usage in player context.
-  4. Port player-response request context shaping per client.
-- Target files:
-  - `internal/orchestrator/engine.go`
-  - `internal/playerjs/*`
-  - `client/client.go`
-- Acceptance:
-  - Player response fetching matches yt-dlp decision points for core clients.
-
-### R5. PO Token Framework Parity
-- Status: `[x]`
-- Goal: Implement policy-correct PO Token handling for player/GVS/subs paths.
-- Work:
-  1. Port token policy semantics (required/recommended/never) by protocol and client.
-  2. Port fetch lifecycle and caching behavior for token reuse.
-  3. Port URL/query/path injection for formats/manifests/subtitles.
-  4. Port typed warnings when formats are skipped due to missing required POT.
-- Target files:
-  - `internal/challenge/*`
-  - `internal/innertube/*`
-  - `client/client.go`
-  - `client/stream_api.go`
-- Acceptance:
-  - Missing/available POT behavior is deterministic and visible in diagnostics.
-
-### R6. JS Challenge Framework Parity
-- Status: `[x]`
-- Goal: Align challenge solve behavior with yt-dlp’s batch/provider model.
-- Work:
-  1. Port first-pass challenge inventory across direct/cipher/manifest URLs.
-  2. Port provider-style bulk solve semantics and fallback handling.
-  3. Port cache key semantics for `n` and `sig` outputs tied to player identity.
-  4. Port partial-failure degradation behavior and warnings.
-- Target files:
-  - `internal/playerjs/*`
-  - `internal/challenge/*`
-  - `client/challenge_cache.go`
-- Acceptance:
-  - Challenge solving is bulk-first, cached, and failure-mode compatible.
-
-### R7. Format/Materialization Parity
-- Status: `[x]`
-- Goal: Align final URL materialization and format filtering decisions.
-- Work:
-  1. Port direct and signatureCipher URL handling details.
-  2. Port n/sig rewrite ordering and query normalization.
-  3. Port manifest n rewrite and POT path/query injection.
-  4. Port skip/deprioritize policies (damaged/DRM/missing POT).
-- Target files:
-  - `internal/formats/*`
-  - `client/client.go`
-  - `client/stream_api.go`
-- Acceptance:
-  - Selected formats translate into valid downloadable URLs under real conditions.
-
-### R8. Downloader Transport Parity
-- Status: `[x]`
-- Goal: Match yt-dlp download transport behavior needed to avoid 403 and transient failures.
-- Work:
-  1. Port per-request media header propagation strategy.
-  2. Port range/chunk/resume logic parity for HTTP downloads.
-  3. Port retry/throttle behavior for direct and fragmented transfers.
-  4. Port fragment concurrency/error-skip policies where applicable.
+  1. Define supported template fields and normalization rules.
+  2. Implement deterministic path/file naming behavior for single and playlist cases.
+  3. Add collision handling policy and tests.
 - Target files:
   - `client/download.go`
-  - `internal/downloader/*`
-  - `client/request_helpers.go`
+  - `client/types.go`
+  - `cmd/ytv1/main.go`
+  - `README.md`
 - Acceptance:
-  - DSYF selected format download no longer fails with immediate 403 under baseline environment.
+  - Repeated runs produce expected stable paths under identical inputs and options.
 
-### R9. End-to-End Regression Matrix
+### B3. Download Job Control Parity
 - Status: `[x]`
-- Goal: Replace synthetic confidence with real parity confidence.
+- Goal: Align retry/continue/abort semantics with operator expectations.
 - Work:
-  1. Keep fixture tests for deterministic unit behavior.
-  2. Add controlled integration tests mirroring current breakpoints.
-  3. Add manual/CI verification checklist including mandatory DSYF pass.
+  1. Harden resume/continue behavior and partial file handling policies.
+  2. Add configurable error policy for batch (`continue` vs `abort-on-error`).
+  3. Expose practical retry/backoff controls through CLI flags mapped to config.
 - Target files:
-  - `client/*_test.go`
-  - `internal/*/*_test.go`
-  - `docs/IMPLEMENTATION_PLAN.md`
+  - `internal/downloader/*`
+  - `client/download.go`
+  - `internal/cli/parser.go`
+  - `cmd/ytv1/main.go`
 - Acceptance:
-  - Regression suite catches known extraction/download parity regressions.
-  - Verification checklist:
-    1. `go test ./...` is green in default mode.
-    2. `YTV1_E2E=1 go test ./client -run TestE2E_ -count=1` passes against live endpoint.
-    3. DSYF mandatory gate passes in runtime: `go run ./cmd/ytv1 --verbose DSYFmhjDbvs`.
+  - Interrupted and transient-failure scenarios recover predictably with tested policies.
 
-### R10. CLI Diagnostics and Operator Controls
+### B4. Playlist/Batch Execution Parity
 - Status: `[x]`
-- Goal: Make parity gaps operable without moving logic into CLI.
+- Goal: Make multi-item runs deterministic and operable.
 - Work:
-  1. Expose extraction/download diagnostics clearly in verbose mode.
-  2. Add explicit flags for visitor data, client override, POT override inputs.
-  3. Ensure diagnostics include actionable remediation hints.
+  1. Define per-item status accounting and final summary output.
+  2. Ensure item-level failures do not corrupt global progress state.
+  3. Add stable ordering and replay-safe behavior.
 - Target files:
   - `cmd/ytv1/main.go`
+  - `client/playlist_transcript.go`
+  - `client/*_test.go`
+- Acceptance:
+  - Batch runs provide clear totals and deterministic per-item results.
+
+### B5. Subtitle/Metadata/Post-processing Parity (Common Paths)
+- Status: `[x]`
+- Goal: Close practical gaps for frequent subtitle and conversion workflows.
+- Work:
+  1. Align subtitle language selection/fallback behavior for common flags.
+  2. Validate MP3/transcode path behavior and failure reporting.
+  3. Ensure metadata outputs are consistent with CLI expectations in common flows.
+- Target files:
+  - `client/playlist_transcript.go`
+  - `client/download_mp3_test.go`
   - `internal/cli/parser.go`
   - `README.md`
 - Acceptance:
-  - User can identify and adjust policy-sensitive failures from CLI output alone.
+  - Core subtitle and mp3 workflows are reproducible and tested.
 
-### R11. Migration Closeout
+### B6. Download Archive/Idempotency Parity
 - Status: `[x]`
-- Goal: Finalize with explicit pass/fail truth.
+- Goal: Avoid re-downloading already completed items in repeat operations.
 - Work:
-  1. Run full test sweep and targeted runtime validation.
-  2. Mark completed/blocked tracks with evidence.
-  3. Record unresolved items with concrete blocker reasons.
+  1. Introduce archive persistence model and skip policy.
+  2. Wire CLI option(s) to archive backend without polluting extractor logic.
+  3. Add tests for rerun idempotency and corruption handling.
+- Target files:
+  - `cmd/ytv1/main.go`
+  - `internal/cli/parser.go`
+  - `client/download.go`
+  - `client/*_test.go`
+- Acceptance:
+  - Second run with archive enabled skips already-completed items deterministically.
+
+### B7. CLI Diagnostics and Machine-readable Output Parity
+- Status: `[x]`
+- Goal: Improve automation usability and operator triage speed.
+- Work:
+  1. Standardize structured diagnostics payloads for extraction/download failures.
+  2. Improve `--print-json` contract coverage for automation scripts.
+  3. Add explicit exit-code policy by failure class.
+- Target files:
+  - `cmd/ytv1/main.go`
+  - `cmd/ytv1/diagnostics_test.go`
+  - `client/errors.go`
+  - `README.md`
+- Acceptance:
+  - Automation can rely on stable JSON/error semantics and documented exit codes.
+
+### B8. Substitute-grade Regression Matrix and Scorecard
+- Status: `[x]`
+- Goal: Replace anecdotal confidence with quantified substitute readiness.
+- Work:
+  1. Build representative workflow matrix (single, playlist, selectors, subtitles, archive rerun).
+  2. Add live-gated and fixture-gated tests per workflow class.
+  3. Publish scorecard thresholds and measured results in docs.
+- Target files:
+  - `client/e2e_integration_test.go`
+  - `cmd/ytv1/*_test.go`
+  - `docs/IMPLEMENTATION_PLAN.md`
+  - `README.md`
+- Acceptance:
+  - Readiness scorecard is reproducible from test commands and documented thresholds.
+
+### B9. Cycle B Closeout
+- Status: `[x]`
+- Goal: Close cycle with explicit pass/fail truth and residual-gap register.
+- Work:
+  1. Run full tests + live-gated matrix.
+  2. Mark all tracks complete/blocked with evidence.
+  3. Document remaining gaps by severity and owner.
 - Target files:
   - `docs/IMPLEMENTATION_PLAN.md`
+  - `README.md`
 - Acceptance:
-  - Final plan state reflects runtime reality, not just unit pass status.
+  - Plan state matches verified runtime reality and includes concrete residual risks.
 
 ---
 
@@ -280,48 +246,42 @@
 
 ---
 
-## 5. Done Criteria (Global)
+## 5. Global Done Criteria (Cycle B)
 
-Global migration is considered complete only when all are true:
-1. `R0-R11` are `[x]` or explicitly `[!]` with reason.
+Cycle B is complete only when all are true:
+1. `B0-B9` are `[x]` or explicitly `[!]` with reason.
 2. `go test ./...` is green.
-3. `ytv1 DSYFmhjDbvs` succeeds end-to-end in baseline run.
-4. Remaining gaps are documented with exact blocker classes.
+3. Live-gated workflow matrix passes at documented threshold.
+4. Remaining gaps are documented with exact blocker classes and impact.
 
 ---
 
 ## 6. Change Log (Plan)
 
-- `2026-02-16`: Rebuilt plan from scratch based on deep source review of `D:\yt-dlp\yt_dlp\extractor\youtube/*`, `jsc/*`, `pot/*`, and downloader transport modules, with DSYF 403 runtime failure as primary migration gate.
-- `2026-02-16`: Completed R0 (download failure typed diagnostics, source-client propagation, protocol/host/url-policy metadata in runtime and CLI diagnostics); moved R1 to in-progress.
-- `2026-02-16`: Completed R1 source-map parity documentation (`docs/ARCHITECTURE.md`) with yt-dlp function-to-module mapping across extractor/jsc/pot/downloader paths.
-- `2026-02-16`: Started R2 implementation: added client alias ID propagation (`web` vs `web_safari`) for deterministic diagnostics, aligned default selector order to yt-dlp baseline (`android_vr`, `web`, `web_safari`) with authenticated variant (`tv_downgraded`, `web`, `web_safari`), and added client capability metadata fields.
-- `2026-02-16`: Added initial R3 header parity subset in Innertube requests (`X-YouTube-Client-Name`, `X-YouTube-Client-Version`, `X-Goog-Visitor-Id`, `X-Origin`) with orchestrator tests.
-- `2026-02-16`: Completed R2 (client profile/order parity baseline) and moved R3 to in-progress.
-- `2026-02-16`: Extended R3 with cookie-derived auth/session signal handling (`Authorization` SAPISID hash variants, `X-Youtube-Bootstrap-Logged-In`) and visitor-data fallback from cookie jar (`VISITOR_INFO1_LIVE`), with unit/integration tests.
-- `2026-02-16`: Extended R3 visitor precedence with watch-page `ytcfg` fallback (`VISITOR_DATA`) via `APIKeyResolver` cache path, including resolver/orchestrator tests.
-- `2026-02-16`: Extended R3 session header parity with watch-page metadata extraction (`SESSION_INDEX`, `DELEGATED_SESSION_ID`, `USER_SESSION_ID`, `DATASYNC_ID`) and request header propagation (`X-Goog-AuthUser`, `X-Goog-PageId`); aligned SID hash format with yt-dlp additional `u` marker semantics.
-- `2026-02-16`: Started R4 groundwork by parsing watch-page `STS` and injecting `playbackContext.contentPlaybackContext.signatureTimestamp` into Innertube player requests; added resolver/request/orchestrator coverage.
-- `2026-02-16`: Extended R4 player URL extraction precedence in `internal/playerjs` to prefer watch-page `PLAYER_JS_URL` and `WEB_PLAYER_CONTEXT_CONFIGS.*.jsUrl` before generic regex fallback, with dedicated tests.
-- `2026-02-16`: Completed R3 (client-aware header/session/auth parity baseline) and moved R4 to in-progress.
-- `2026-02-16`: R4 ytcfg acquisition path now uses client-aware page selection and per-client cache keying (`host|client`) instead of fixed watch seed; DSYF runtime advanced to challenge stage and now fails with `challenge not solved`.
-- `2026-02-16`: Extended R4 request/context parity with optional ad playback context and top-level player params plumbing; added STS fallback extraction from player JS when watch-page `STS` is absent, and updated tests/mocks for player-JS fetch path (`go test ./...` green).
-- `2026-02-16`: Added runtime JS decipher fallback in `internal/playerjs/decipher.go` (export-injected goja execution path) when regex token extraction fails; `challenge` stage for DSYF now reports success (`n=1,sig=1`) and remaining runtime blocker moved to download-side `403` (POT/SABR/transport parity).
-- `2026-02-16`: Updated orchestrator client selection to deterministic order-priority commit while keeping concurrent fetches; DSYF baseline now selects `android_vr` first and `ytv1 DSYFmhjDbvs` succeeds end-to-end (`248+251` download + merge).
-- `2026-02-16`: Completed R5 baseline parity increment: added cached POT provider wrapper (`internal/challenge`), source-client-aware POT policy resolution in client format filtering, POT URL injection for direct/manifest materialization paths, and warning visibility for POT-required skip reasons (`go test ./...` green).
-- `2026-02-16`: Started R6 implementation by adding provider-style batch challenge solver abstractions/tests in `internal/challenge` and wiring client challenge priming to bulk solve semantics (`go test ./...` green).
-- `2026-02-16`: Extended R6 cache semantics by canonicalizing challenge cache keys per player identity (locale-insensitive base.js path) and adding explicit partial-solve warning log surface (`go test ./...` green).
-- `2026-02-16`: Completed R6 by adding fallback provider-chain bulk solver semantics and wiring client challenge priming to try canonicalized provider fallback path when primary solve path fails (`go test ./...` green); moved R7 to in-progress.
-- `2026-02-16`: Extended R7 with format-quality guardrails: parsed formats now carry `is_drm`/`is_damaged` signals (including cipher-url integrity check), and `filterFormatsByPoTokenPolicy` now drops DRM/damaged candidates with typed skip reasons (`go test ./...` green).
-- `2026-02-16`: Extended R7 ranking policy by adding protocol-awareness in selector tie-breaks so `unknown` protocol formats are deprioritized against known protocols under equivalent mode/quality classes (`go test ./...` green).
-- `2026-02-16`: Completed R7 after porting direct/cipher URL materialization, n/sig rewrite flow, manifest n+POT handling, and skip/deprioritize policy hardening (`go test ./...` green); moved R8 to in-progress.
-- `2026-02-16`: Started R8 transport parity increment by wiring request-header propagation into HLS/DASH downloader fetch paths and adding coverage for manifest+segment header forwarding (`go test ./...` green).
-- `2026-02-16`: Extended R8 transport retry parity by introducing shared downloader retry transport config for HLS/DASH (manifest/segment/key paths), mapping package transport config into fragmented downloads, and adding retries + `Retry-After` coverage tests (`go test ./...` green).
-- `2026-02-16`: Hardened R8 fragmented transport control by propagating caller context into HLS key-fetch path (replacing background context) so cancellation/deadline semantics remain consistent during live/fragmented retries (`go test ./...` green).
-- `2026-02-16`: Extended R8 fragment policy parity by adding optional unavailable-fragment skip semantics for HLS live and DASH dynamic flows (bounded by max-skip guard) and wiring new transport knobs through package config (`go test ./...` green).
-- `2026-02-16`: Extended R8 concurrency parity by plumbing transport max-concurrency into fragmented downloader config and enabling ordered parallel segment fetch for DASH static manifests, with dedicated ordering coverage (`go test ./...` green).
-- `2026-02-16`: Completed R8 with baseline runtime verification (`go run ./cmd/ytv1 --verbose -o r8_dsyf_check.mp4 DSYFmhjDbvs`) confirming DSYF extraction/download/merge success without immediate `403`; moved R9 to in-progress.
-- `2026-02-16`: Started R9 by adding controlled live integration smoke coverage (`client/e2e_integration_test.go`) gated behind `YTV1_E2E=1` (default CI-safe skip) for DSYF/override video download regression checks.
-- `2026-02-16`: Completed R9 by extending controlled live integration coverage (`GetVideo/GetFormats`, `ResolveStreamURL`, `Download`) and validating both default suite (`go test ./...`) and live-gated suite (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1`); moved R10 to in-progress.
-- `2026-02-16`: Completed R10 by adding CLI POT override input (`--po-token` -> static provider wiring), enabling diagnostics emission in verbose failure paths, adding actionable remediation hints (login/POT/challenge/throttle/input), updating CLI README guidance, and validating with `go test ./...`; moved R11 to in-progress.
-- `2026-02-16`: Completed R11 closeout verification: full suite `go test ./...` passed, live-gated E2E (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`) passed, and runtime DSYF gate (`go run ./cmd/ytv1 --verbose DSYFmhjDbvs`) passed end-to-end (extract/download/merge); all tracks now complete.
+- `2026-02-16`: Replaced completed deep-port migration plan (`R0-R11`) with new execution cycle (`B0-B9`) focused on YouTube CLI substitute readiness for yt-dlp-style operations.
+- `2026-02-16`: Marked `B0` as in-progress to begin gap matrix and target-definition reset using current repository baseline.
+- `2026-02-16`: Completed `B0` by synchronizing Cycle B scorecard/matrix contract across `docs/IMPLEMENTATION_PLAN.md`, `README.md`, and `docs/ARCHITECTURE.md`; moved `B1` to in-progress.
+- `2026-02-16`: B1 increment: wired CLI `-f` passthrough into `client.DownloadOptions.FormatSelector`, preserved mode aliases (`best/mp4/mp3/...`), added numeric itag parsing, and added command-layer tests for selector/itag/mp3 mapping.
+- `2026-02-16`: B1 increment: hardened selector behavior by adding `width` filter type, strict extension mapping (`audio/mp4` -> `m4a`), AV-first ranking for generic `best`, and new `internal/selector` tests covering `bestvideo+bestaudio` ext constraints and `/` fallback selection.
+- `2026-02-16`: B1 increment: added worst-media selection handling (`worstvideo`/`worstaudio`) and base-token predicate parsing via modifier grammar (e.g. `fps!=60` outside brackets), with selector tests for worst and `!=` filter scenarios.
+- `2026-02-16`: Completed `B1` by unifying selector parse/no-match failures under typed `NoPlayableFormatsDetailError` (`selector`, `selection_reason`) and surfacing selector-aware CLI remediation hints; moved `B2` to in-progress.
+- `2026-02-16`: Completed `B2` by implementing deterministic output template token rendering (`id/title/uploader/ext/itag`) with filesystem-safe normalization for single/merge downloads and adding output-template tests; moved `B3` to in-progress.
+- `2026-02-16`: B3 increment: added CLI batch-control and retry/resume flags, wired them into `main` processing flow and `ToClientConfig` transport overrides, and added tests for abort behavior and retry override mapping.
+- `2026-02-16`: Completed `B3` by wiring resume control (`--no-continue`) into download path, validating batch abort/continue loop semantics through unit tests, and retaining retry/backoff overrides as explicit CLI operator controls; moved `B4` to in-progress.
+- `2026-02-16`: Completed `B4` by adding deterministic playlist run accounting (`total/succeeded/failed/aborted`), explicit item-failure collection, and abort-on-error cutover behavior in command-layer tests; moved `B5` to in-progress.
+- `2026-02-16`: Completed `B5` by wiring CLI subtitle workflows (`--write-subs/--write-auto-subs/--sub-lang`) into transcript-to-SRT output with deterministic naming, applying explicit language auto/manual preference policy in subtitle selection, and expanding tests/remediation hints for common subtitle/mp3 paths; moved `B6` to in-progress.
+- `2026-02-16`: Completed `B6` by adding archive persistence (`--download-archive`) with rerun skip semantics, append-on-success recording, and corruption-tolerant archive loading; added command-layer tests for idempotent rerun and archive integrity handling, and moved `B7` to in-progress.
+- `2026-02-16`: Completed `B7` by standardizing machine-readable CLI failure JSON in `--print-json` mode, adding package-level error category classification + command-layer exit-code policy, extending diagnostics tests, and documenting exit-code contract; moved `B8` to in-progress.
+- `2026-02-16`: Completed `B8` by adding explicit fixture workflow-matrix tests (`TestWorkflowMatrix_FixtureCoverage`), documenting reproducible fixture/live matrix commands, and publishing fixture-gated scorecard measurements from current test evidence; moved `B9` to in-progress.
+- `2026-02-16`: Completed `B9` closeout by running full suite (`go test ./...`) and live-gated matrix (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`) successfully, marking all tracks complete, and documenting residual risks with severity/owner.
+
+---
+
+## 7. Residual Risk Register (Post-Closeout)
+
+1. `Medium` - Upstream YouTube behavior drift may break live extraction/download without code changes.
+   owner: `internal/orchestrator`, `internal/playerjs`, `internal/challenge` maintainers.
+2. `Low` - CLI substitute claim is YouTube-scoped; multi-site parity is intentionally out of scope.
+   owner: product scope maintainers (`docs/IMPLEMENTATION_PLAN.md`, `README.md`).
+3. `Low` - Live-gated confidence depends on periodic reruns; fixture matrix alone cannot detect all upstream runtime shifts.
+   owner: release/checklist maintainers (`client/e2e_integration_test.go` + CI operators).

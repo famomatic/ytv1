@@ -21,6 +21,22 @@ var (
 	ErrTranscriptParse = errors.New("transcript parse failed")
 )
 
+// ErrorCategory is a stable machine-readable error class.
+type ErrorCategory string
+
+const (
+	ErrorCategoryUnknown                    ErrorCategory = "unknown"
+	ErrorCategoryInvalidInput               ErrorCategory = "invalid_input"
+	ErrorCategoryUnavailable                ErrorCategory = "unavailable"
+	ErrorCategoryLoginRequired              ErrorCategory = "login_required"
+	ErrorCategoryNoPlayableFormats          ErrorCategory = "no_playable_formats"
+	ErrorCategoryChallengeNotSolved         ErrorCategory = "challenge_not_solved"
+	ErrorCategoryAllClientsFailed           ErrorCategory = "all_clients_failed"
+	ErrorCategoryMP3TranscoderNotConfigured ErrorCategory = "mp3_transcoder_not_configured"
+	ErrorCategoryTranscriptParse            ErrorCategory = "transcript_parse_failed"
+	ErrorCategoryDownloadFailed             ErrorCategory = "download_failed"
+)
+
 // InvalidInputDetailError preserves ErrInvalidInput while exposing parsing reason/context.
 type InvalidInputDetailError struct {
 	Input  string
@@ -61,13 +77,22 @@ type FormatSkipReason struct {
 
 // NoPlayableFormatsDetailError preserves ErrNoPlayableFormats while exposing skip details.
 type NoPlayableFormatsDetailError struct {
-	Mode  SelectionMode
-	Skips []FormatSkipReason
+	Mode           SelectionMode
+	Selector       string
+	SelectionError string
+	Skips          []FormatSkipReason
 }
 
 // Error returns a summary of the no-playable-formats condition.
 func (e *NoPlayableFormatsDetailError) Error() string {
-	return "no playable formats after filtering for mode=" + string(e.Mode)
+	msg := "no playable formats after filtering for mode=" + string(e.Mode)
+	if e.Selector != "" {
+		msg += " selector=" + e.Selector
+	}
+	if e.SelectionError != "" {
+		msg += " reason=" + e.SelectionError
+	}
+	return msg
 }
 
 // Is reports sentinel compatibility with ErrNoPlayableFormats.
@@ -213,4 +238,34 @@ func AttemptDetails(err error) ([]AttemptDetail, bool) {
 		return downloadErr.Attempts, true
 	}
 	return nil, false
+}
+
+// ClassifyError maps package errors to a stable machine-readable category.
+func ClassifyError(err error) ErrorCategory {
+	switch {
+	case err == nil:
+		return ErrorCategoryUnknown
+	case errors.Is(err, ErrInvalidInput):
+		return ErrorCategoryInvalidInput
+	case errors.Is(err, ErrLoginRequired):
+		return ErrorCategoryLoginRequired
+	case errors.Is(err, ErrUnavailable):
+		return ErrorCategoryUnavailable
+	case errors.Is(err, ErrNoPlayableFormats):
+		return ErrorCategoryNoPlayableFormats
+	case errors.Is(err, ErrChallengeNotSolved):
+		return ErrorCategoryChallengeNotSolved
+	case errors.Is(err, ErrAllClientsFailed):
+		return ErrorCategoryAllClientsFailed
+	case errors.Is(err, ErrMP3TranscoderNotConfigured):
+		return ErrorCategoryMP3TranscoderNotConfigured
+	case errors.Is(err, ErrTranscriptParse):
+		return ErrorCategoryTranscriptParse
+	default:
+		var downloadErr *DownloadFailureDetailError
+		if errors.As(err, &downloadErr) {
+			return ErrorCategoryDownloadFailed
+		}
+		return ErrorCategoryUnknown
+	}
 }

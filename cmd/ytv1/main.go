@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +22,21 @@ import (
 )
 
 var verboseLifecyclePrinter *lifecyclePrinter
+var activeDownloadArchive *downloadArchive
+
+const (
+	exitCodeSuccess             = 0
+	exitCodeGenericFailure      = 1
+	exitCodeInvalidInput        = 2
+	exitCodeLoginRequired       = 3
+	exitCodeUnavailable         = 4
+	exitCodeNoPlayableFormats   = 5
+	exitCodeChallengeUnresolved = 6
+	exitCodeAllClientsFailed    = 7
+	exitCodeDownloadFailed      = 8
+	exitCodeMP3ConfigRequired   = 9
+	exitCodeTranscriptParse     = 10
+)
 
 func main() {
 	opts := cli.ParseFlags()
@@ -35,22 +54,65 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize config: %v", err)
 	}
+	if strings.TrimSpace(opts.DownloadArchive) != "" {
+		archive, err := newDownloadArchive(opts.DownloadArchive)
+		if err != nil {
+			log.Fatalf("Failed to initialize download archive: %v", err)
+		}
+		activeDownloadArchive = archive
+		defer func() {
+			if err := archive.Close(); err != nil {
+				log.Printf("failed to close download archive: %v", err)
+			}
+		}()
+	}
 	attachLifecycleHandlers(&cfg, opts)
 	c := client.New(cfg)
 	ctx := context.Background()
+	exitCode := processInputsWithExitCode(ctx, c, opts.URLs, opts, processURL)
+	if exitCode != exitCodeSuccess {
+		os.Exit(exitCode)
+	}
+}
 
-	// Process each URL
-	for _, url := range opts.URLs {
-		if err := processURL(ctx, c, url, opts); err != nil {
-			// Print error but don't exit if multiple URLs?
-			// yt-dlp prints "ERROR: [youtube] ... " and continues unless --abort-on-error
-			// We print to stderr
-			log.Printf("Error processing %s: %v", url, err)
-			if opts.OverrideDiagnostics || opts.Verbose {
+func processInputs(
+	ctx context.Context,
+	c *client.Client,
+	urls []string,
+	opts cli.Options,
+	processor func(context.Context, *client.Client, string, cli.Options) error,
+) bool {
+	return processInputsWithExitCode(ctx, c, urls, opts, processor) != exitCodeSuccess
+}
+
+func processInputsWithExitCode(
+	ctx context.Context,
+	c *client.Client,
+	urls []string,
+	opts cli.Options,
+	processor func(context.Context, *client.Client, string, cli.Options) error,
+) int {
+	exitCode := exitCodeSuccess
+	for _, url := range urls {
+		if err := processor(ctx, c, url, opts); err != nil {
+			code := classifyExitCode(err)
+			if code > exitCode {
+				exitCode = code
+			}
+			if opts.PrintJSON {
+				emitJSONFailure(url, err, code)
+			} else {
+				log.Printf("Error processing %s: %v", url, err)
+			}
+			if (opts.OverrideDiagnostics || opts.Verbose) && !opts.PrintJSON {
 				printAttemptDiagnostics(err)
+			}
+			if opts.AbortOnError {
+				break
 			}
 		}
 	}
+	return exitCode
 }
 
 func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
@@ -79,6 +141,9 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 
 	if opts.PlayerJSURLOnly {
 		return handlePlayerJS(ctx, c, url)
+	}
+	if shouldSkipDownloadByArchive(url) {
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
@@ -118,39 +183,19 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		return nil // yt-dlp stops after listing formats
 	}
 
+	if opts.WriteSubs || opts.WriteAutoSubs {
+		if err := writeRequestedSubtitles(ctx, c, url, info, opts); err != nil {
+			return err
+		}
+	}
+
 	if opts.SkipDownload {
 		fmt.Printf("Skipping download for %s\n", info.Title)
 		return nil
 	}
 
-	// Download
-	// Map format selector to client mode
-	mode := client.SelectionModeBest
-	switch opts.FormatSelector {
-	case "best", "bestvideo+bestaudio":
-		mode = client.SelectionModeBest
-	case "bestaudio", "audioonly":
-		mode = client.SelectionModeAudioOnly
-	case "bestvideo", "videoonly":
-		mode = client.SelectionModeVideoOnly
-	case "mp4":
-		mode = client.SelectionModeMP4AV
-	case "mp3":
-		mode = client.SelectionModeMP3
-	default:
-		// Fallback to best for unknown selectors for now
-		// TODO: Implement full selector parser
-		if strings.HasPrefix(opts.FormatSelector, "res:") {
-			// Basic resolution parser?
-		}
-	}
-
 	fmt.Printf("Downloading: %s [%s]\n", info.Title, info.ID)
-	res, err := c.Download(ctx, url, client.DownloadOptions{
-		Mode:        mode,
-		OutputPath:  opts.OutputTemplate, // Client handles templating slightly different, usually expects strict path or ""
-		MergeOutput: true,                // Always try to merge on 'best'
-	})
+	res, err := c.Download(ctx, url, buildDownloadOptions(opts))
 	if err != nil {
 		return err
 	}
@@ -179,7 +224,49 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 			avgSpeed,
 		)
 	}
+	if err := recordCompletedDownload(info.ID); err != nil {
+		return err
+	}
 	return nil
+}
+
+func buildDownloadOptions(opts cli.Options) client.DownloadOptions {
+	downloadOpts := client.DownloadOptions{
+		Mode:        client.SelectionModeBest,
+		OutputPath:  opts.OutputTemplate, // Client handles templating slightly different, usually expects strict path or ""
+		MergeOutput: true,                // Always try to merge on 'best'
+		Resume:      !opts.NoContinue,
+	}
+
+	raw := strings.TrimSpace(opts.FormatSelector)
+	lower := strings.ToLower(raw)
+	switch lower {
+	case "", "best":
+		return downloadOpts
+	case "bestvideo+bestaudio":
+		downloadOpts.FormatSelector = "bestvideo+bestaudio/best"
+		return downloadOpts
+	case "bestaudio", "audioonly":
+		downloadOpts.Mode = client.SelectionModeAudioOnly
+		return downloadOpts
+	case "bestvideo", "videoonly":
+		downloadOpts.Mode = client.SelectionModeVideoOnly
+		return downloadOpts
+	case "mp4":
+		downloadOpts.Mode = client.SelectionModeMP4AV
+		return downloadOpts
+	case "mp3":
+		downloadOpts.Mode = client.SelectionModeMP3
+		return downloadOpts
+	}
+
+	if itag, err := strconv.Atoi(lower); err == nil && itag > 0 {
+		downloadOpts.Itag = itag
+		return downloadOpts
+	}
+
+	downloadOpts.FormatSelector = raw
+	return downloadOpts
 }
 
 func processPlaylist(ctx context.Context, c *client.Client, playlistID string, opts cli.Options) error {
@@ -190,16 +277,61 @@ func processPlaylist(ctx context.Context, c *client.Client, playlistID string, o
 	}
 	fmt.Printf("Playlist: %s (%d videos)\n", playlist.Title, len(playlist.Items))
 
-	// If ListFormats/PrintJSON, maybe apply to each item?
-	// yt-dlp applies flags to every item.
-
-	for i, item := range playlist.Items {
-		fmt.Printf("[%d/%d] Processing %s (%s)...\n", i+1, len(playlist.Items), item.Title, item.VideoID)
-		if err := processURL(ctx, c, item.VideoID, opts); err != nil {
-			log.Printf("Failed to process %s: %v", item.VideoID, err)
+	summary, failures := runPlaylistItems(ctx, c, playlist.Items, opts, processURL)
+	fmt.Printf(
+		"Playlist summary: total=%d succeeded=%d failed=%d aborted=%t\n",
+		summary.Total,
+		summary.Succeeded,
+		summary.Failed,
+		summary.Aborted,
+	)
+	if len(failures) > 0 {
+		for _, failure := range failures {
+			log.Printf("Failed to process %s: %v", failure.VideoID, failure.Err)
 		}
+		return fmt.Errorf("playlist completed with failures: failed=%d/%d", summary.Failed, summary.Total)
 	}
 	return nil
+}
+
+type playlistRunSummary struct {
+	Total     int
+	Succeeded int
+	Failed    int
+	Aborted   bool
+}
+
+type playlistItemFailure struct {
+	VideoID string
+	Err     error
+}
+
+func runPlaylistItems(
+	ctx context.Context,
+	c *client.Client,
+	items []client.PlaylistItem,
+	opts cli.Options,
+	processor func(context.Context, *client.Client, string, cli.Options) error,
+) (playlistRunSummary, []playlistItemFailure) {
+	summary := playlistRunSummary{Total: len(items)}
+	failures := make([]playlistItemFailure, 0)
+	for i, item := range items {
+		fmt.Printf("[%d/%d] Processing %s (%s)...\n", i+1, len(items), item.Title, item.VideoID)
+		if err := processor(ctx, c, item.VideoID, opts); err != nil {
+			summary.Failed++
+			failures = append(failures, playlistItemFailure{
+				VideoID: item.VideoID,
+				Err:     err,
+			})
+			if opts.AbortOnError {
+				summary.Aborted = true
+				break
+			}
+			continue
+		}
+		summary.Succeeded++
+	}
+	return summary, failures
 }
 
 func printFormats(info *client.VideoInfo) {
@@ -231,6 +363,169 @@ func handlePlayerJS(ctx context.Context, c *client.Client, videoID string) error
 		fmt.Println(path)
 	} else {
 		fmt.Println("https://www.youtube.com" + path)
+	}
+	return nil
+}
+
+func writeRequestedSubtitles(
+	ctx context.Context,
+	c *client.Client,
+	input string,
+	info *client.VideoInfo,
+	opts cli.Options,
+) error {
+	langs := parseSubtitleLanguages(opts.SubLangs)
+	if len(langs) == 0 {
+		langs = []string{"en"}
+	}
+
+	written := 0
+	failures := make([]string, 0, len(langs))
+	for _, lang := range langs {
+		transcript, err := c.GetTranscript(ctx, input, lang)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s(%v)", lang, err))
+			continue
+		}
+		outputPath := subtitleOutputPath(opts.OutputTemplate, info, transcript.LanguageCode)
+		if err := writeTranscriptAsSRT(outputPath, transcript); err != nil {
+			failures = append(failures, fmt.Sprintf("%s(%v)", transcript.LanguageCode, err))
+			continue
+		}
+		written++
+		fmt.Printf("Written subtitle: %s\n", outputPath)
+	}
+
+	if written == 0 && len(failures) > 0 {
+		return fmt.Errorf("failed to write subtitles: %s", strings.Join(failures, "; "))
+	}
+	if len(failures) > 0 {
+		log.Printf("subtitle partial failure: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func parseSubtitleLanguages(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		lang := strings.ToLower(strings.TrimSpace(part))
+		if lang == "" {
+			continue
+		}
+		if _, ok := seen[lang]; ok {
+			continue
+		}
+		seen[lang] = struct{}{}
+		out = append(out, lang)
+	}
+	return out
+}
+
+func subtitleOutputPath(outputTemplate string, info *client.VideoInfo, lang string) string {
+	safeLang := strings.TrimSpace(strings.ToLower(lang))
+	if safeLang == "" {
+		safeLang = "unknown"
+	}
+	if strings.TrimSpace(outputTemplate) == "" {
+		return fmt.Sprintf("%s.%s.srt", info.ID, safeLang)
+	}
+	base := strings.TrimSpace(outputTemplate)
+	base = strings.ReplaceAll(base, "%(id)s", sanitizeTemplateToken(info.ID))
+	base = strings.ReplaceAll(base, "%(title)s", sanitizeTemplateToken(info.Title))
+	base = strings.ReplaceAll(base, "%(uploader)s", sanitizeTemplateToken(info.Author))
+	base = strings.ReplaceAll(base, "%(ext)s", "srt")
+	base = strings.ReplaceAll(base, "%(itag)s", "subs_"+safeLang)
+	if strings.TrimSpace(base) == "" {
+		return fmt.Sprintf("%s.%s.srt", info.ID, safeLang)
+	}
+	if ext := filepath.Ext(base); ext != "" {
+		base = strings.TrimSuffix(base, ext)
+	}
+	return base + "." + safeLang + ".srt"
+}
+
+func sanitizeTemplateToken(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	for _, r := range v {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			b.WriteRune('_')
+		default:
+			if r < 32 {
+				b.WriteRune('_')
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func writeTranscriptAsSRT(path string, transcript *client.Transcript) error {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for i, entry := range transcript.Entries {
+		start := formatSRTTimestamp(entry.StartSec)
+		end := formatSRTTimestamp(entry.StartSec + entry.DurSec)
+		if _, err := fmt.Fprintf(f, "%d\n%s --> %s\n%s\n\n", i+1, start, end, strings.TrimSpace(entry.Text)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatSRTTimestamp(sec float64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	totalMs := int64(math.Round(sec * 1000))
+	hours := totalMs / (60 * 60 * 1000)
+	minutes := (totalMs / (60 * 1000)) % 60
+	seconds := (totalMs / 1000) % 60
+	millis := totalMs % 1000
+	return fmt.Sprintf("%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
+}
+
+func shouldSkipDownloadByArchive(input string) bool {
+	if activeDownloadArchive == nil {
+		return false
+	}
+	videoID, err := client.ExtractVideoID(input)
+	if err != nil {
+		return false
+	}
+	if !activeDownloadArchive.Has(videoID) {
+		return false
+	}
+	fmt.Printf("Skipping (in archive): %s\n", videoID)
+	return true
+}
+
+func recordCompletedDownload(videoID string) error {
+	if activeDownloadArchive == nil {
+		return nil
+	}
+	if err := activeDownloadArchive.Add(videoID); err != nil {
+		return fmt.Errorf("failed to update download archive: %w", err)
 	}
 	return nil
 }
@@ -279,15 +574,22 @@ func printAttemptDiagnostics(err error) {
 }
 
 func printGenericRemediationHints(err error) {
+	var noPlayableDetail *client.NoPlayableFormatsDetailError
 	switch {
 	case errors.Is(err, client.ErrInvalidInput):
 		fmt.Println("hint: unsupported input. Use a full YouTube URL or 11-char video ID, then retry.")
 	case errors.Is(err, client.ErrLoginRequired):
 		fmt.Println("hint: login-required content. Retry with --cookies <netscape.txt> and --visitor-data <VISITOR_INFO1_LIVE>.")
 	case errors.Is(err, client.ErrNoPlayableFormats):
+		if errors.As(err, &noPlayableDetail) && noPlayableDetail.Selector != "" {
+			fmt.Printf("hint: selector %q matched no formats (%s). Retry with -F and adjust -f expression.\n", noPlayableDetail.Selector, noPlayableDetail.SelectionError)
+			return
+		}
 		fmt.Println("hint: no playable formats. Retry with -F to inspect candidates and --verbose for extraction stages.")
 	case errors.Is(err, client.ErrChallengeNotSolved):
 		fmt.Println("hint: challenge solve failed. Retry with --verbose and inspect [extract] challenge:* logs.")
+	case errors.Is(err, client.ErrMP3TranscoderNotConfigured):
+		fmt.Println("hint: mp3 mode requires an MP3 transcoder. Configure client.Config.MP3Transcoder (CLI: use a build with transcoder wiring).")
 	default:
 		fmt.Println("hint: retry with --verbose --override-diagnostics to inspect stage/client failure details.")
 	}
@@ -520,4 +822,146 @@ func inferDownloadRole(path string) string {
 	default:
 		return "single"
 	}
+}
+
+type cliErrorReport struct {
+	OK       bool           `json:"ok"`
+	Input    string         `json:"input"`
+	ExitCode int            `json:"exit_code"`
+	Error    cliErrorDetail `json:"error"`
+}
+
+type cliErrorDetail struct {
+	Category string                 `json:"category"`
+	Message  string                 `json:"message"`
+	Attempts []client.AttemptDetail `json:"attempts,omitempty"`
+}
+
+func emitJSONFailure(input string, err error, exitCode int) {
+	report := cliErrorReport{
+		OK:       false,
+		Input:    input,
+		ExitCode: exitCode,
+		Error: cliErrorDetail{
+			Category: string(client.ClassifyError(err)),
+			Message:  err.Error(),
+		},
+	}
+	if attempts, ok := client.AttemptDetails(err); ok && len(attempts) > 0 {
+		report.Error.Attempts = attempts
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(report)
+}
+
+func classifyExitCode(err error) int {
+	switch client.ClassifyError(err) {
+	case client.ErrorCategoryInvalidInput:
+		return exitCodeInvalidInput
+	case client.ErrorCategoryLoginRequired:
+		return exitCodeLoginRequired
+	case client.ErrorCategoryUnavailable:
+		return exitCodeUnavailable
+	case client.ErrorCategoryNoPlayableFormats:
+		return exitCodeNoPlayableFormats
+	case client.ErrorCategoryChallengeNotSolved:
+		return exitCodeChallengeUnresolved
+	case client.ErrorCategoryAllClientsFailed:
+		return exitCodeAllClientsFailed
+	case client.ErrorCategoryDownloadFailed:
+		return exitCodeDownloadFailed
+	case client.ErrorCategoryMP3TranscoderNotConfigured:
+		return exitCodeMP3ConfigRequired
+	case client.ErrorCategoryTranscriptParse:
+		return exitCodeTranscriptParse
+	default:
+		return exitCodeGenericFailure
+	}
+}
+
+type downloadArchive struct {
+	path string
+	file *os.File
+	mu   sync.Mutex
+	ids  map[string]struct{}
+}
+
+func newDownloadArchive(path string) (*downloadArchive, error) {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return nil, fmt.Errorf("archive path is empty")
+	}
+	if dir := filepath.Dir(cleanPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, err
+		}
+	}
+	f, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	archive := &downloadArchive{
+		path: cleanPath,
+		file: f,
+		ids:  make(map[string]struct{}),
+	}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if _, err := client.ExtractVideoID(line); err != nil {
+			continue
+		}
+		archive.ids[line] = struct{}{}
+	}
+	if err := scanner.Err(); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return archive, nil
+}
+
+func (a *downloadArchive) Close() error {
+	if a == nil || a.file == nil {
+		return nil
+	}
+	return a.file.Close()
+}
+
+func (a *downloadArchive) Has(videoID string) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.ids[videoID]
+	return ok
+}
+
+func (a *downloadArchive) Add(videoID string) error {
+	if a == nil {
+		return nil
+	}
+	if _, err := client.ExtractVideoID(videoID); err != nil {
+		return fmt.Errorf("invalid video id for archive: %q", videoID)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, exists := a.ids[videoID]; exists {
+		return nil
+	}
+	if _, err := a.file.WriteString(videoID + "\n"); err != nil {
+		return err
+	}
+	if err := a.file.Sync(); err != nil {
+		return err
+	}
+	a.ids[videoID] = struct{}{}
+	return nil
 }

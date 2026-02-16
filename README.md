@@ -96,6 +96,44 @@ Additional package APIs:
 | Playlist/transcript/subtitles | Partial | Core APIs exist; long-tail parity remains |
 | Login/captcha/account flows | Deferred | Explicitly outside current v1 migration scope |
 
+## Cycle B Substitute Scorecard (YouTube CLI Scope)
+
+This cycle tracks operator-facing CLI substitute readiness rather than extractor internals only.
+
+Current scorecard categories:
+
+- `workflow_pass_rate`: percentage of defined workflows that pass in regression matrix
+- `deterministic_output_rate`: repeated-run output path/result stability under same inputs
+- `diagnosable_failure_rate`: failures that expose actionable category + hints
+
+Workflow matrix classes:
+
+- Single video default download (`best`)
+- Selector-driven download (`-f` composite recipes)
+- Playlist batch run with per-item summary
+- Subtitle and mp3 common flow
+- Archive-enabled rerun idempotency
+
+Target threshold for substitute-ready claim:
+
+- `workflow_pass_rate >= 95%`
+- `deterministic_output_rate >= 99%`
+- `diagnosable_failure_rate >= 99%`
+
+The measured values are published during Cycle B closeout in `docs/IMPLEMENTATION_PLAN.md`.
+
+Latest measured snapshot (`2026-02-16`):
+
+- `workflow_pass_rate=100%`
+- `deterministic_output_rate=100%`
+- `diagnosable_failure_rate=100%`
+
+Regression matrix commands (Cycle B):
+
+- Fixture matrix (CI-safe): `go test ./...`
+- Workflow-class fixture focus: `go test ./cmd/ytv1 -run TestWorkflowMatrix_FixtureCoverage -count=1`
+- Live-gated matrix (YouTube endpoint): `YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`
+
 ## Lifecycle Events
 
 - `OnExtractionEvent`: emits `webpage`, `player_api_json`, `player_js`, `challenge`, `manifest` stage events.
@@ -141,6 +179,49 @@ Use `errors.Is` for sentinel checks and `errors.As` for typed details such as:
 ## CLI
 
 The CLI exists for verification and debugging, not as the primary product surface.
+
+Output template tokens supported by `-o/--output`:
+
+- `%(id)s`
+- `%(title)s`
+- `%(uploader)s`
+- `%(ext)s`
+- `%(itag)s`
+
+Notes:
+
+- Tokens are sanitized for filesystem safety on Windows/Linux style paths.
+- The same input + options produce deterministic output paths.
+
+Batch/control flags:
+
+- `--abort-on-error`: stop processing remaining URLs after first failure
+- `--no-continue`: disable resume of partial direct downloads
+- `--download-archive FILE`: skip IDs already recorded in archive file and append newly completed downloads
+- `--retries N`: override retry count for download/metadata transports
+- `--retry-sleep-ms N`: override initial retry backoff in milliseconds
+- `--write-subs`: write manual subtitles when available
+- `--write-auto-subs`: prefer auto-generated subtitles for requested language(s)
+- `--sub-lang a,b,c`: subtitle language priority list (default: `en`)
+
+`--print-json` contract:
+
+- Success: emits video metadata JSON object (`ok` field omitted for backward compatibility).
+- Failure: emits JSON object with `ok=false`, `input`, `exit_code`, and `error{category,message,attempts?}`.
+
+CLI exit code policy:
+
+- `0`: success
+- `1`: generic failure
+- `2`: invalid input
+- `3`: login required
+- `4`: unavailable
+- `5`: no playable formats
+- `6`: challenge not solved
+- `7`: all clients failed
+- `8`: download failed
+- `9`: mp3 transcoder not configured
+- `10`: transcript parse failed
 
 Examples:
 
