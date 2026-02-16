@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -276,7 +279,7 @@ func TestParseSubtitleLanguages(t *testing.T) {
 func TestSubtitleOutputPath_Default(t *testing.T) {
 	path := subtitleOutputPath("", &client.VideoInfo{
 		ID: "abc123",
-	}, "ko")
+	}, "ko", "srt")
 	if path != "abc123.ko.srt" {
 		t.Fatalf("path=%q, want %q", path, "abc123.ko.srt")
 	}
@@ -287,29 +290,45 @@ func TestSubtitleOutputPath_Template(t *testing.T) {
 		ID:     "abc123",
 		Title:  "title/name",
 		Author: "owner",
-	}, "en")
+	}, "en", "srt")
 	if path != "title_name.en.srt" {
 		t.Fatalf("path=%q, want %q", path, "title_name.en.srt")
 	}
 }
 
-func TestFormatSRTTimestamp(t *testing.T) {
-	got := formatSRTTimestamp(3661.234)
-	if got != "01:01:01,234" {
-		t.Fatalf("timestamp=%q, want %q", got, "01:01:01,234")
+func TestSubtitleOutputPath_TemplateVTT(t *testing.T) {
+	path := subtitleOutputPath("%(title)s.%(ext)s", &client.VideoInfo{
+		ID:     "abc123",
+		Title:  "title/name",
+		Author: "owner",
+	}, "en", "vtt")
+	if path != "title_name.en.vtt" {
+		t.Fatalf("path=%q, want %q", path, "title_name.en.vtt")
+	}
+}
+
+func TestResolveSubtitleOutputFormat(t *testing.T) {
+	if got := client.ResolveSubtitleOutputFormat("vtt/srt"); got != client.SubtitleOutputFormatVTT {
+		t.Fatalf("ResolveSubtitleOutputFormat(vtt/srt)=%q, want %q", got, client.SubtitleOutputFormatVTT)
+	}
+	if got := client.ResolveSubtitleOutputFormat("best"); got != client.SubtitleOutputFormatSRT {
+		t.Fatalf("ResolveSubtitleOutputFormat(best)=%q, want %q", got, client.SubtitleOutputFormatSRT)
+	}
+	if got := client.ResolveSubtitleOutputFormat("srv3/ttml"); got != client.SubtitleOutputFormatSRT {
+		t.Fatalf("ResolveSubtitleOutputFormat(srv3/ttml)=%q, want %q", got, client.SubtitleOutputFormatSRT)
 	}
 }
 
 func TestWriteTranscriptAsSRT(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "sub", "x.ko.srt")
-	err := writeTranscriptAsSRT(out, &client.Transcript{
+	err := client.WriteTranscript(out, &client.Transcript{
 		Entries: []client.TranscriptEntry{
 			{StartSec: 0.0, DurSec: 1.5, Text: "hello"},
 			{StartSec: 1.5, DurSec: 0.5, Text: "world"},
 		},
-	})
+	}, client.SubtitleOutputFormatSRT)
 	if err != nil {
-		t.Fatalf("writeTranscriptAsSRT() error = %v", err)
+		t.Fatalf("WriteTranscript(SRT) error = %v", err)
 	}
 	f, err := os.Open(out)
 	if err != nil {
@@ -326,6 +345,35 @@ func TestWriteTranscriptAsSRT(t *testing.T) {
 	}
 	if !strings.Contains(txt, "\n2\n00:00:01,500 --> 00:00:02,000\nworld\n") {
 		t.Fatalf("unexpected srt output: %q", txt)
+	}
+}
+
+func TestWriteTranscriptAsVTT(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "sub", "x.ko.vtt")
+	err := client.WriteTranscript(out, &client.Transcript{
+		Entries: []client.TranscriptEntry{
+			{StartSec: 0.0, DurSec: 1.5, Text: "hello"},
+			{StartSec: 1.5, DurSec: 0.5, Text: "world"},
+		},
+	}, client.SubtitleOutputFormatVTT)
+	if err != nil {
+		t.Fatalf("WriteTranscript(VTT) error = %v", err)
+	}
+	f, err := os.Open(out)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	txt := string(raw)
+	if !strings.Contains(txt, "WEBVTT") {
+		t.Fatalf("unexpected vtt output: %q", txt)
+	}
+	if !strings.Contains(txt, "00:00:00.000 --> 00:00:01.500") {
+		t.Fatalf("unexpected vtt output: %q", txt)
 	}
 }
 
@@ -420,5 +468,118 @@ func TestRecordCompletedDownload_AppendsArchive(t *testing.T) {
 	}
 	if !archive.Has("DSYFmhjDbvs") {
 		t.Fatalf("expected recorded video ID in archive")
+	}
+}
+
+func TestWarnf_SuppressedByNoWarnings(t *testing.T) {
+	var buf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	}()
+
+	warnf(cli.Options{NoWarnings: true}, "this should not print")
+	if got := strings.TrimSpace(buf.String()); got != "" {
+		t.Fatalf("expected no warning output, got %q", got)
+	}
+}
+
+func TestWarnf_EmitsWarningByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	}()
+
+	warnf(cli.Options{}, "subtitle partial failure: %s", "ko(not found)")
+	got := strings.TrimSpace(buf.String())
+	if !strings.Contains(got, "WARNING: subtitle partial failure: ko(not found)") {
+		t.Fatalf("unexpected warning output: %q", got)
+	}
+}
+
+func TestEmitFlatPlaylist_Text(t *testing.T) {
+	var buf bytes.Buffer
+	err := emitFlatPlaylist([]client.PlaylistItem{
+		{VideoID: "jNQXAC9IVRw", Title: "one"},
+		{VideoID: "DSYFmhjDbvs", Title: "two"},
+	}, cli.Options{}, &buf)
+	if err != nil {
+		t.Fatalf("emitFlatPlaylist() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "[flat] jNQXAC9IVRw\tone") {
+		t.Fatalf("unexpected flat text output: %q", out)
+	}
+	if !strings.Contains(out, "[flat] DSYFmhjDbvs\ttwo") {
+		t.Fatalf("unexpected flat text output: %q", out)
+	}
+}
+
+func TestEmitFlatPlaylist_JSON(t *testing.T) {
+	var buf bytes.Buffer
+	err := emitFlatPlaylist([]client.PlaylistItem{
+		{VideoID: "jNQXAC9IVRw", Title: "one"},
+	}, cli.Options{PrintJSON: true}, &buf)
+	if err != nil {
+		t.Fatalf("emitFlatPlaylist() error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("lines=%d, want 1 output line", len(lines))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload["_type"] != "url" || payload["id"] != "jNQXAC9IVRw" {
+		t.Fatalf("unexpected payload: %v", payload)
+	}
+	if payload["url"] != "https://www.youtube.com/watch?v=jNQXAC9IVRw" {
+		t.Fatalf("unexpected payload url: %v", payload["url"])
+	}
+}
+
+func TestBuildDumpSingleJSONPayload_IncludesPlayableURL(t *testing.T) {
+	info := &client.VideoInfo{
+		ID:    "jNQXAC9IVRw",
+		Title: "Me at the zoo",
+		Formats: []client.FormatInfo{
+			{
+				Itag:     140,
+				URL:      "https://cdn.example/audio.m4a",
+				MimeType: "audio/mp4",
+				HasAudio: true,
+				Bitrate:  128000,
+			},
+			{
+				Itag:     18,
+				URL:      "https://cdn.example/av.mp4",
+				MimeType: "video/mp4",
+				HasAudio: true,
+				HasVideo: true,
+				Width:    640,
+				Height:   360,
+				Bitrate:  800000,
+			},
+		},
+	}
+	payload := buildDumpSingleJSONPayload("https://www.youtube.com/watch?v=jNQXAC9IVRw", info)
+	if payload.URL != "https://cdn.example/av.mp4" {
+		t.Fatalf("payload.URL=%q, want av format URL", payload.URL)
+	}
+	if payload.WebpageURL != "https://www.youtube.com/watch?v=jNQXAC9IVRw" {
+		t.Fatalf("payload.WebpageURL=%q", payload.WebpageURL)
+	}
+	if len(payload.Formats) != 2 {
+		t.Fatalf("formats len=%d, want 2", len(payload.Formats))
 	}
 }

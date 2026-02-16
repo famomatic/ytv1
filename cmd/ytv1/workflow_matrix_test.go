@@ -52,7 +52,7 @@ func TestWorkflowMatrix_FixtureCoverage(t *testing.T) {
 		got := subtitleOutputPath("%(title)s.%(ext)s", &client.VideoInfo{
 			ID:    "jNQXAC9IVRw",
 			Title: "hello/world",
-		}, "en")
+		}, "en", "srt")
 		if got != "hello_world.en.srt" {
 			t.Fatalf("subtitle path=%q", got)
 		}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -62,7 +61,7 @@ func main() {
 		activeDownloadArchive = archive
 		defer func() {
 			if err := archive.Close(); err != nil {
-				log.Printf("failed to close download archive: %v", err)
+				warnf(opts, "failed to close download archive: %v", err)
 			}
 		}()
 	}
@@ -135,8 +134,10 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	// For now, treat everything as video unless we want to support playlists explicitly here
 	// client.GetVideo handles video IDs.
 	// Check prompt for playlist ID extraction
-	if playlistID, err := client.ExtractPlaylistID(url); err == nil && playlistID != "" {
-		return processPlaylist(ctx, c, playlistID, opts)
+	if !opts.NoPlaylist {
+		if playlistID, err := client.ExtractPlaylistID(url); err == nil && playlistID != "" {
+			return processPlaylist(ctx, c, playlistID, opts)
+		}
 	}
 
 	if opts.PlayerJSURLOnly {
@@ -172,10 +173,8 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		}))
 	}
 
-	if opts.PrintJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(info)
+	if opts.PrintJSON || opts.DumpSingleJSON {
+		return emitDumpSingleJSON(os.Stdout, url, info)
 	}
 
 	if opts.ListFormats {
@@ -276,6 +275,9 @@ func processPlaylist(ctx context.Context, c *client.Client, playlistID string, o
 		return err
 	}
 	fmt.Printf("Playlist: %s (%d videos)\n", playlist.Title, len(playlist.Items))
+	if opts.FlatPlaylist {
+		return emitFlatPlaylist(playlist.Items, opts, os.Stdout)
+	}
 
 	summary, failures := runPlaylistItems(ctx, c, playlist.Items, opts, processURL)
 	fmt.Printf(
@@ -290,6 +292,30 @@ func processPlaylist(ctx context.Context, c *client.Client, playlistID string, o
 			log.Printf("Failed to process %s: %v", failure.VideoID, failure.Err)
 		}
 		return fmt.Errorf("playlist completed with failures: failed=%d/%d", summary.Failed, summary.Total)
+	}
+	return nil
+}
+
+func emitFlatPlaylist(items []client.PlaylistItem, opts cli.Options, w io.Writer) error {
+	if opts.PrintJSON {
+		enc := json.NewEncoder(w)
+		for _, item := range items {
+			payload := map[string]any{
+				"_type": "url",
+				"id":    item.VideoID,
+				"title": item.Title,
+				"url":   "https://www.youtube.com/watch?v=" + item.VideoID,
+			}
+			if err := enc.Encode(payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, item := range items {
+		if _, err := fmt.Fprintf(w, "[flat] %s\t%s\n", item.VideoID, item.Title); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -374,6 +400,7 @@ func writeRequestedSubtitles(
 	info *client.VideoInfo,
 	opts cli.Options,
 ) error {
+	subFormat := client.ResolveSubtitleOutputFormat(opts.SubFormat)
 	langs := parseSubtitleLanguages(opts.SubLangs)
 	if len(langs) == 0 {
 		langs = []string{"en"}
@@ -387,8 +414,8 @@ func writeRequestedSubtitles(
 			failures = append(failures, fmt.Sprintf("%s(%v)", lang, err))
 			continue
 		}
-		outputPath := subtitleOutputPath(opts.OutputTemplate, info, transcript.LanguageCode)
-		if err := writeTranscriptAsSRT(outputPath, transcript); err != nil {
+		outputPath := subtitleOutputPath(opts.OutputTemplate, info, transcript.LanguageCode, string(subFormat))
+		if err := client.WriteTranscript(outputPath, transcript, subFormat); err != nil {
 			failures = append(failures, fmt.Sprintf("%s(%v)", transcript.LanguageCode, err))
 			continue
 		}
@@ -400,9 +427,16 @@ func writeRequestedSubtitles(
 		return fmt.Errorf("failed to write subtitles: %s", strings.Join(failures, "; "))
 	}
 	if len(failures) > 0 {
-		log.Printf("subtitle partial failure: %s", strings.Join(failures, "; "))
+		warnf(opts, "subtitle partial failure: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func warnf(opts cli.Options, format string, args ...any) {
+	if opts.NoWarnings {
+		return
+	}
+	log.Printf("WARNING: "+format, args...)
 }
 
 func parseSubtitleLanguages(raw string) []string {
@@ -423,27 +457,31 @@ func parseSubtitleLanguages(raw string) []string {
 	return out
 }
 
-func subtitleOutputPath(outputTemplate string, info *client.VideoInfo, lang string) string {
+func subtitleOutputPath(outputTemplate string, info *client.VideoInfo, lang string, outputExt string) string {
+	outputExt = strings.TrimSpace(strings.ToLower(outputExt))
+	if outputExt == "" {
+		outputExt = string(client.SubtitleOutputFormatSRT)
+	}
 	safeLang := strings.TrimSpace(strings.ToLower(lang))
 	if safeLang == "" {
 		safeLang = "unknown"
 	}
 	if strings.TrimSpace(outputTemplate) == "" {
-		return fmt.Sprintf("%s.%s.srt", info.ID, safeLang)
+		return fmt.Sprintf("%s.%s.%s", info.ID, safeLang, outputExt)
 	}
 	base := strings.TrimSpace(outputTemplate)
 	base = strings.ReplaceAll(base, "%(id)s", sanitizeTemplateToken(info.ID))
 	base = strings.ReplaceAll(base, "%(title)s", sanitizeTemplateToken(info.Title))
 	base = strings.ReplaceAll(base, "%(uploader)s", sanitizeTemplateToken(info.Author))
-	base = strings.ReplaceAll(base, "%(ext)s", "srt")
+	base = strings.ReplaceAll(base, "%(ext)s", outputExt)
 	base = strings.ReplaceAll(base, "%(itag)s", "subs_"+safeLang)
 	if strings.TrimSpace(base) == "" {
-		return fmt.Sprintf("%s.%s.srt", info.ID, safeLang)
+		return fmt.Sprintf("%s.%s.%s", info.ID, safeLang, outputExt)
 	}
 	if ext := filepath.Ext(base); ext != "" {
 		base = strings.TrimSuffix(base, ext)
 	}
-	return base + "." + safeLang + ".srt"
+	return base + "." + safeLang + "." + outputExt
 }
 
 func sanitizeTemplateToken(v string) string {
@@ -469,40 +507,6 @@ func sanitizeTemplateToken(v string) string {
 		return "unknown"
 	}
 	return out
-}
-
-func writeTranscriptAsSRT(path string, transcript *client.Transcript) error {
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	for i, entry := range transcript.Entries {
-		start := formatSRTTimestamp(entry.StartSec)
-		end := formatSRTTimestamp(entry.StartSec + entry.DurSec)
-		if _, err := fmt.Fprintf(f, "%d\n%s --> %s\n%s\n\n", i+1, start, end, strings.TrimSpace(entry.Text)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func formatSRTTimestamp(sec float64) string {
-	if sec < 0 {
-		sec = 0
-	}
-	totalMs := int64(math.Round(sec * 1000))
-	hours := totalMs / (60 * 60 * 1000)
-	minutes := (totalMs / (60 * 1000)) % 60
-	seconds := (totalMs / 1000) % 60
-	millis := totalMs % 1000
-	return fmt.Sprintf("%02d:%02d:%02d,%03d", hours, minutes, seconds, millis)
 }
 
 func shouldSkipDownloadByArchive(input string) bool {
@@ -821,6 +825,136 @@ func inferDownloadRole(path string) string {
 		return "audio"
 	default:
 		return "single"
+	}
+}
+
+type ytdlpDumpSingleJSON struct {
+	ID           string             `json:"id"`
+	Title        string             `json:"title,omitempty"`
+	WebpageURL   string             `json:"webpage_url,omitempty"`
+	OriginalURL  string             `json:"original_url,omitempty"`
+	Extractor    string             `json:"extractor,omitempty"`
+	ExtractorKey string             `json:"extractor_key,omitempty"`
+	URL          string             `json:"url,omitempty"`
+	Ext          string             `json:"ext,omitempty"`
+	Formats      []ytdlpFormatEntry `json:"formats,omitempty"`
+}
+
+type ytdlpFormatEntry struct {
+	FormatID string `json:"format_id,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Ext      string `json:"ext,omitempty"`
+	VCodec   string `json:"vcodec,omitempty"`
+	ACodec   string `json:"acodec,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
+	FPS      int    `json:"fps,omitempty"`
+	TBR      int    `json:"tbr,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+}
+
+func emitDumpSingleJSON(w io.Writer, input string, info *client.VideoInfo) error {
+	payload := buildDumpSingleJSONPayload(input, info)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payload)
+}
+
+func buildDumpSingleJSONPayload(input string, info *client.VideoInfo) ytdlpDumpSingleJSON {
+	webURL := canonicalWatchURL(input, info.ID)
+	bestURL, bestExt := pickBestDirectFormatURL(info.Formats)
+	formats := make([]ytdlpFormatEntry, 0, len(info.Formats))
+	for _, f := range info.Formats {
+		if strings.TrimSpace(f.URL) == "" {
+			continue
+		}
+		formats = append(formats, ytdlpFormatEntry{
+			FormatID: strconv.Itoa(f.Itag),
+			URL:      f.URL,
+			Ext:      mimeExt(f.MimeType),
+			VCodec:   codecLabel(f.HasVideo),
+			ACodec:   codecLabel(f.HasAudio),
+			Width:    f.Width,
+			Height:   f.Height,
+			FPS:      f.FPS,
+			TBR:      f.Bitrate / 1000,
+			Protocol: f.Protocol,
+		})
+	}
+	return ytdlpDumpSingleJSON{
+		ID:           info.ID,
+		Title:        info.Title,
+		WebpageURL:   webURL,
+		OriginalURL:  strings.TrimSpace(input),
+		Extractor:    "youtube",
+		ExtractorKey: "Youtube",
+		URL:          bestURL,
+		Ext:          bestExt,
+		Formats:      formats,
+	}
+}
+
+func canonicalWatchURL(input string, videoID string) string {
+	id := strings.TrimSpace(videoID)
+	if id != "" {
+		return "https://www.youtube.com/watch?v=" + id
+	}
+	return strings.TrimSpace(input)
+}
+
+func codecLabel(enabled bool) string {
+	if enabled {
+		return "unknown"
+	}
+	return "none"
+}
+
+func pickBestDirectFormatURL(formats []client.FormatInfo) (string, string) {
+	bestIdx := -1
+	for i, f := range formats {
+		if strings.TrimSpace(f.URL) == "" {
+			continue
+		}
+		if bestIdx == -1 {
+			bestIdx = i
+			continue
+		}
+		if compareFormatQuality(f, formats[bestIdx]) > 0 {
+			bestIdx = i
+		}
+	}
+	if bestIdx < 0 {
+		return "", ""
+	}
+	best := formats[bestIdx]
+	return best.URL, mimeExt(best.MimeType)
+}
+
+func compareFormatQuality(a, b client.FormatInfo) int {
+	score := func(f client.FormatInfo) int64 {
+		var s int64
+		// Prefer muxed AV for direct playback fallback behavior.
+		if f.HasAudio && f.HasVideo {
+			s += 10_000_000_000
+		} else if f.HasVideo {
+			s += 5_000_000_000
+		} else if f.HasAudio {
+			s += 1_000_000_000
+		}
+		s += int64(f.Width*f.Height) * 1000
+		s += int64(f.FPS) * 100
+		s += int64(f.Bitrate)
+		return s
+	}
+	as := score(a)
+	bs := score(b)
+	switch {
+	case as > bs:
+		return 1
+	case as < bs:
+		return -1
+	default:
+		return 0
 	}
 }
 

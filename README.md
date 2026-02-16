@@ -196,6 +196,7 @@ Notes:
 Batch/control flags:
 
 - `--abort-on-error`: stop processing remaining URLs after first failure
+- `--no-warnings`: suppress non-critical warning logs
 - `--no-continue`: disable resume of partial direct downloads
 - `--download-archive FILE`: skip IDs already recorded in archive file and append newly completed downloads
 - `--retries N`: override retry count for download/metadata transports
@@ -206,6 +207,7 @@ Batch/control flags:
 
 `--print-json` contract:
 
+- `-J`: short alias of `--print-json` for yt-dlp compatibility.
 - Success: emits video metadata JSON object (`ok` field omitted for backward compatibility).
 - Failure: emits JSON object with `ok=false`, `input`, `exit_code`, and `error{category,message,attempts?}`.
 

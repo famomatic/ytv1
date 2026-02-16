@@ -59,6 +59,15 @@
 - B7 completion increment landed: CLI now emits structured JSON failure payloads in `--print-json` mode (`ok=false`, `input`, `exit_code`, `error{category,message,attempts?}`), exposes explicit exit-code-by-category policy, and uses shared package error categorization for automation-stable diagnostics.
 - B8 completion increment landed: fixture workflow matrix is now codified by command-layer matrix tests (`TestWorkflowMatrix_FixtureCoverage`) with reproducible command contract (`go test ./...`, live-gated `YTV1_E2E=1 go test ./client -run TestE2E_`), and latest fixture-gated scorecard on `2026-02-16` is `workflow_pass_rate=100%`, `deterministic_output_rate=100%`, `diagnosable_failure_rate=100%` (inferred from passing matrix-class tests).
 - B9 closeout verification landed: `go test ./...` and live-gated matrix (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`) passed on `2026-02-16`, and residual risk register is now explicit with severity/owner.
+- Post-closeout CLI compatibility increment landed: added yt-dlp-style short JSON flag alias (`-J`) mapped to existing `--print-json` behavior with parser test coverage.
+- Post-closeout CLI compatibility gap remains for common yt-dlp operator aliases (for example `--flat-playlist` and related playlist/error-handling flags).
+- B10 completion increment landed: added yt-dlp compatibility aliases (`--flat-playlist`/`--extract-flat`, `--no-playlist`/`--yes-playlist`, `--ignore-errors`/`-i`, `-j`/`--dump-json`, `--continue`) and wired deterministic flat-playlist output behavior in command flow with parser/command tests.
+- B10 compatibility follow-up landed: parser now accepts yt-dlp subtitle format flag (`--sub-format` and `-sub-format`) to prevent unknown-flag failures, with regression tests.
+- B10 compatibility completion follow-up landed: `--sub-format` now drives subtitle output serialization (`srt`/`vtt`) end-to-end, with transcript formatting utilities promoted into `client` package and CLI consuming package APIs.
+- B10 compatibility follow-up landed: parser now accepts yt-dlp subtitle language alias `--sub-langs` (including single-dash `-sub-langs`) mapped to existing `SubLangs` behavior, with parser regression tests.
+- B10 compatibility follow-up landed: parser now accepts yt-dlp subtitle write alias `--write-srt` (including `-write-srt`) and maps it to subtitle write flow while forcing `sub-format=srt`.
+- B10 compatibility follow-up landed: added `--dump-single-json` mode with yt-dlp-style single-entry payload (`url`, `webpage_url`, `formats`) for tool compatibility (including mpv ytdl hook expectations).
+- B10 compatibility follow-up landed: `--print-json` (`-J`, `-j`, `--dump-json`) now emits yt-dlp-style single-entry payload for external tool compatibility, while retaining shared JSON failure payload contract.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -71,6 +80,7 @@
 8. `[x]` B7. CLI diagnostics + machine-readable output parity
 9. `[x]` B8. Substitute-grade regression matrix and scorecard
 10. `[x]` B9. Cycle B closeout and release checklist
+11. `[x]` B10. Post-closeout yt-dlp CLI compatibility aliases (`--flat-playlist` and related common flags)
 
 ---
 
@@ -236,6 +246,21 @@ Make `ytv1` a practical **YouTube-focused** CLI substitute for yt-dlp in daily o
 - Acceptance:
   - Plan state matches verified runtime reality and includes concrete residual risks.
 
+### B10. Post-closeout yt-dlp CLI Compatibility Aliases
+- Status: `[x]`
+- Goal: Reduce operator friction by accepting common yt-dlp CLI aliases without breaking package-first boundaries.
+- Work:
+  1. Add parser support for common compatibility aliases (playlist/error-handling/json flags).
+  2. Implement minimal deterministic behavior for `--flat-playlist` in playlist flows.
+  3. Add parser/command-layer regression tests for new aliases and playlist behavior.
+- Target files:
+  - `internal/cli/parser.go`
+  - `internal/cli/parser_test.go`
+  - `cmd/ytv1/main.go`
+  - `cmd/ytv1/main_test.go`
+- Acceptance:
+  - Added aliases parse deterministically and `go test ./...` remains green.
+
 ---
 
 ## 4. Public API Contract
@@ -274,6 +299,14 @@ Cycle B is complete only when all are true:
 - `2026-02-16`: Completed `B7` by standardizing machine-readable CLI failure JSON in `--print-json` mode, adding package-level error category classification + command-layer exit-code policy, extending diagnostics tests, and documenting exit-code contract; moved `B8` to in-progress.
 - `2026-02-16`: Completed `B8` by adding explicit fixture workflow-matrix tests (`TestWorkflowMatrix_FixtureCoverage`), documenting reproducible fixture/live matrix commands, and publishing fixture-gated scorecard measurements from current test evidence; moved `B9` to in-progress.
 - `2026-02-16`: Completed `B9` closeout by running full suite (`go test ./...`) and live-gated matrix (`YTV1_E2E=1 go test ./client -run TestE2E_ -count=1 -timeout 8m`) successfully, marking all tracks complete, and documenting residual risks with severity/owner.
+- `2026-02-16`: Added CLI compatibility alias `-J` (short form of `--print-json`) and parser regression test (`TestParseFlags_ShortJEnablesPrintJSON`).
+- `2026-02-16`: Completed `B10` by adding yt-dlp compatibility aliases for playlist/error/json/resume flows (`--flat-playlist`, `--extract-flat`, `--no-playlist`, `--yes-playlist`, `--ignore-errors`/`-i`, `-j`, `--dump-json`, `--continue`) and flat-playlist deterministic output behavior with parser + command-layer regression tests.
+- `2026-02-16`: B10 compatibility follow-up: added parser support for yt-dlp subtitle format flag (`--sub-format` and `-sub-format`) and parser regression test coverage.
+- `2026-02-16`: B10 compatibility completion follow-up: wired `--sub-format` into subtitle write path (`best/srt/vtt` preference handling), added package-level transcript serialization API in `client` (`ResolveSubtitleOutputFormat`, `WriteTranscript`), and updated CLI/tests to consume it.
+- `2026-02-16`: B10 compatibility follow-up: added subtitle language alias support (`--sub-langs`, `-sub-langs`) mapped to existing subtitle language parsing flow, with parser regression coverage.
+- `2026-02-16`: B10 compatibility follow-up: added subtitle write alias support (`--write-srt`, `-write-srt`) mapped to `WriteSubs` and forced `SubFormat=srt`, with parser regression coverage.
+- `2026-02-16`: B10 compatibility follow-up: added `--dump-single-json` parser/emit path and yt-dlp-style payload serialization with CLI regression tests to improve external tool interoperability.
+- `2026-02-16`: B10 compatibility follow-up: aligned `--print-json` output path with `--dump-single-json` yt-dlp-style payload emission so callers that pass only `-J/--print-json` (e.g. mpv ytdl-hook variants) receive a playable `url` field.
 
 ---
 
