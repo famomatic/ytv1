@@ -13,12 +13,23 @@ Primary goals:
 
 ## Functional Scope (v1)
 
-Core package API:
+Minimal core package API (v1 contract):
 
 1. `client.New(config)`
 2. `client.GetVideo(ctx, input)`
 3. `client.GetFormats(ctx, input)`
 4. `client.ResolveStreamURL(ctx, videoID, itag)`
+
+Additional public package APIs (supported, but not the minimal contract):
+
+1. `client.Download(ctx, input, options)`
+2. `client.GetPlaylist(ctx, input)`
+3. `client.GetSubtitleTracks(ctx, input)`
+4. `client.GetTranscript(ctx, input, languageCode)`
+5. `client.FetchDASHManifest(ctx, input)`
+6. `client.FetchHLSManifest(ctx, input)`
+7. `client.OpenStream(ctx, input, options)`
+8. `client.OpenFormatStream(ctx, input, itag)`
 
 Core internal modules:
 

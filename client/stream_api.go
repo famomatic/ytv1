@@ -68,7 +68,7 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
-		return nil, FormatInfo{}, fmt.Errorf("stream open failed: status=%d", resp.StatusCode)
+		return nil, FormatInfo{}, fmt.Errorf("stream open failed: status=%s", resp.Status)
 	}
 	return resp.Body, chosen, nil
 }
