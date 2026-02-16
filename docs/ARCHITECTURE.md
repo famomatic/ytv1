@@ -46,7 +46,13 @@ This keeps diagnostics observable without coupling library internals to CLI outp
 - it may format lifecycle events for humans (`--verbose`),
 - it must not re-implement extraction/challenge logic.
 
-## yt-dlp Source Map
+Cycle B extension of this policy:
+
+- selector parsing/evaluation belongs in `internal/selector` + `client` integration,
+- batch control and reporting may be orchestrated in CLI, but media decisions stay in package code,
+- archive/idempotency state may be wired by CLI, but skip semantics must remain testable through package boundaries.
+
+## yt-dlp Source Map (Cycle A Baseline)
 
 Primary mapping baseline:
 
@@ -68,7 +74,27 @@ Primary mapping baseline:
   - HTTP header propagation/range-resume/chunked-retry -> `client/download.go`
   - fragmented transport internals -> `internal/downloader/*`
 
-Gap focus (runtime): extraction path reaches playable candidates, but default DSYF download still returns `403`; this indicates remaining parity work in policy/header/token/transport coupling.
+## Cycle B Gap Focus (CLI Substitute)
+
+Cycle A extraction parity gates are closed. Active gaps are operator workflow parity:
+
+1. Selector grammar depth (`-f`) vs yt-dlp common expressions.
+2. Stable output templating and collision policy.
+3. Batch controls (`continue`/`abort`) and deterministic summaries.
+4. Archive-backed idempotent reruns.
+5. Machine-readable diagnostics and explicit exit-code policy.
+
+## Cycle B Regression Matrix Contract
+
+Cycle B validates substitute readiness by workflow class, not single-ID anecdote:
+
+1. Single-item download
+2. Selector-heavy download
+3. Playlist batch run
+4. Subtitle/transcode flow
+5. Archive rerun idempotency
+
+Each class must be represented by fixture and/or live-gated tests, with scorecard reporting in `docs/IMPLEMENTATION_PLAN.md`.
 
 ## References
 

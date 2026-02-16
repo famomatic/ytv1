@@ -115,7 +115,7 @@ func parseModifier(s string) (*FormatFilter, error) {
 			case "res", "height":
 				return &FormatFilter{Type: "res", Value: val, Op: op}, nil
 			case "width":
-				return &FormatFilter{Type: "res", Value: val, Op: op}, nil // reuse res logic
+				return &FormatFilter{Type: "width", Value: val, Op: op}, nil
 			case "fps":
 				return &FormatFilter{Type: "fps", Value: val, Op: op}, nil
 			default:
@@ -137,8 +137,14 @@ func parseFilter(s string) (*FormatFilter, error) {
 	if s == "bestvideo" || s == "bv" {
 		return &FormatFilter{Type: "media", Value: "video", Op: "best"}, nil
 	}
+	if s == "worstvideo" || s == "wv" {
+		return &FormatFilter{Type: "media", Value: "video", Op: "worst"}, nil
+	}
 	if s == "bestaudio" || s == "ba" {
 		return &FormatFilter{Type: "media", Value: "audio", Op: "best"}, nil
+	}
+	if s == "worstaudio" || s == "wa" {
+		return &FormatFilter{Type: "media", Value: "audio", Op: "worst"}, nil
 	}
 	if s == "videoonly" {
 		return &FormatFilter{Type: "media", Value: "video"}, nil
@@ -154,11 +160,21 @@ func parseFilter(s string) (*FormatFilter, error) {
 
 	// Resolution shortcut (res:1080)
 	if matches := resRegex.FindStringSubmatch(s); matches != nil {
+		filterType := "res"
+		if matches[1] == "width" {
+			filterType = "width"
+		}
 		return &FormatFilter{
-			Type:  "res",
+			Type:  filterType,
 			Value: matches[3],
 			Op:    matches[2],
 		}, nil
+	}
+
+	// Allow standalone modifier-style filters as base tokens, e.g.:
+	// "fps!=60", "ext=mp4", "height<=720"
+	if flt, err := parseModifier(s); err == nil {
+		return flt, nil
 	}
 
 	return nil, fmt.Errorf("unknown selector: %s", s)

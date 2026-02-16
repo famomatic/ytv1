@@ -34,11 +34,22 @@ type Options struct {
 	ListFormats    bool   // -F, --list-formats
 
 	// Download / Filesystem
-	OutputTemplate string // -o, --output
-	SkipDownload   bool   // --skip-download
-	WriteSubs      bool   // --write-subs
-	WriteAutoSubs  bool   // --write-auto-subs
-	SubLangs       string // --sub-lang
+	OutputTemplate  string // -o, --output
+	DownloadArchive string // --download-archive
+	SkipDownload    bool   // --skip-download
+	NoWarnings      bool   // --no-warnings
+	NoContinue      bool   // --no-continue
+	AbortOnError    bool   // --abort-on-error
+	IgnoreErrors    bool   // -i, --ignore-errors
+	DownloadRetries int    // --retries
+	RetrySleepMS    int    // --retry-sleep-ms
+	WriteSubs       bool   // --write-subs
+	WriteAutoSubs   bool   // --write-auto-subs
+	SubLangs        string // --sub-lang
+	SubFormat       string // --sub-format
+	FlatPlaylist    bool   // --flat-playlist
+	NoPlaylist      bool   // --no-playlist
+	YesPlaylist     bool   // --yes-playlist
 
 	// Post-processing
 	MergeOutput bool // --merge-output-format (implied true in ytv1 currently, but we can make it explicit or toggle)
@@ -55,6 +66,7 @@ type Options struct {
 	// Verbosity / Debug
 	Verbose         bool
 	PrintJSON       bool // --print-json
+	DumpSingleJSON  bool // --dump-single-json
 	PlayerJSURLOnly bool // --playerjs (legacy/debug)
 }
 
@@ -80,11 +92,34 @@ func ParseFlags() Options {
 	flag.StringVar(&opts.CookiesFile, "cookies", "", "Netscape formatted cookies file")
 
 	flag.BoolVar(&opts.SkipDownload, "skip-download", false, "Do not download the video")
+	flag.BoolVar(&opts.NoWarnings, "no-warnings", false, "Suppress non-critical warning messages")
+	flag.StringVar(&opts.DownloadArchive, "download-archive", "", "File to store downloaded video IDs for idempotent reruns")
+	flag.BoolVar(&opts.NoContinue, "no-continue", false, "Do not resume partially downloaded files")
+	continueDownloads := true
+	flag.BoolVar(&continueDownloads, "continue", true, "Resume partially downloaded files (yt-dlp compatibility alias)")
+	flag.BoolVar(&opts.AbortOnError, "abort-on-error", false, "Abort batch processing on first error")
+	flag.BoolVar(&opts.AbortOnError, "no-ignore-errors", false, "Abort on download error (yt-dlp compatibility alias)")
+	flag.BoolVar(&opts.IgnoreErrors, "ignore-errors", false, "Continue on download errors (yt-dlp compatibility alias)")
+	flag.BoolVar(&opts.IgnoreErrors, "i", false, "Alias of --ignore-errors (yt-dlp compatibility)")
+	flag.IntVar(&opts.DownloadRetries, "retries", -1, "Download retry count override (-1 keeps defaults)")
+	flag.IntVar(&opts.RetrySleepMS, "retry-sleep-ms", -1, "Download retry initial backoff in milliseconds (-1 keeps defaults)")
+	writeSRT := false
+	flag.BoolVar(&writeSRT, "write-srt", false, "Alias of --write-subs that forces SRT output (yt-dlp compatibility)")
 	flag.BoolVar(&opts.WriteSubs, "write-subs", false, "Write subtitle file")
 	flag.BoolVar(&opts.WriteAutoSubs, "write-auto-subs", false, "Write automatically generated subtitle file")
 	flag.StringVar(&opts.SubLangs, "sub-lang", "en", "Languages of the subtitles to download (optional) separated by commas")
+	flag.StringVar(&opts.SubLangs, "sub-langs", "en", "Alias of --sub-lang (yt-dlp compatibility)")
+	flag.StringVar(&opts.SubFormat, "sub-format", "best", "Subtitle format preference (e.g. vtt/srt, best)")
+	flag.BoolVar(&opts.FlatPlaylist, "flat-playlist", false, "Do not resolve and download playlist items, emit flat entries only")
+	flag.BoolVar(&opts.FlatPlaylist, "extract-flat", false, "Alias of --flat-playlist (yt-dlp compatibility)")
+	flag.BoolVar(&opts.NoPlaylist, "no-playlist", false, "Download only the video, if the URL refers to a video and a playlist")
+	flag.BoolVar(&opts.YesPlaylist, "yes-playlist", false, "Download the playlist, if the URL refers to a video and a playlist")
 
 	flag.BoolVar(&opts.PrintJSON, "print-json", false, "Be quiet and print the video information as JSON")
+	flag.BoolVar(&opts.PrintJSON, "J", false, "Alias of --print-json (yt-dlp compatibility)")
+	flag.BoolVar(&opts.PrintJSON, "j", false, "Alias of --print-json (yt-dlp compatibility)")
+	flag.BoolVar(&opts.PrintJSON, "dump-json", false, "Alias of --print-json (yt-dlp compatibility)")
+	flag.BoolVar(&opts.DumpSingleJSON, "dump-single-json", false, "Print a yt-dlp compatible single-entry JSON payload")
 	flag.BoolVar(&opts.PlayerJSURLOnly, "playerjs", false, "Print player base.js URL only (debug)")
 
 	flag.BoolVar(&opts.Verbose, "verbose", false, "Print various debugging information")
@@ -111,6 +146,19 @@ func ParseFlags() Options {
 	opts.FormatSelector = pickValue(formatShort, formatLong, "best")
 	opts.OutputTemplate = pickValue(outputShort, outputLong, "")
 	opts.ListFormats = listFormatsShort || listFormatsLong
+	if !continueDownloads {
+		opts.NoContinue = true
+	}
+	if opts.IgnoreErrors {
+		opts.AbortOnError = false
+	}
+	if opts.YesPlaylist {
+		opts.NoPlaylist = false
+	}
+	if writeSRT {
+		opts.WriteSubs = true
+		opts.SubFormat = "srt"
+	}
 
 	opts.URLs = flag.Args()
 	return opts
@@ -133,11 +181,28 @@ func ToClientConfig(opts Options) (client.Config, error) {
 		ProxyURL:    opts.ProxyURL,
 		VisitorData: opts.VisitorData,
 	}
+	langs := parseSubLangs(opts.SubLangs)
+	if len(langs) > 0 {
+		cfg.SubtitlePolicy.PreferredLanguageCode = langs[0]
+		if len(langs) > 1 {
+			cfg.SubtitlePolicy.FallbackLanguageCodes = append([]string(nil), langs[1:]...)
+		}
+	}
+	cfg.SubtitlePolicy.PreferAutoGenerated = opts.WriteAutoSubs && !opts.WriteSubs
 	if opts.ClientHedgeMS > 0 {
 		cfg.ClientHedgeDelay = time.Duration(opts.ClientHedgeMS) * time.Millisecond
 	}
 	if strings.TrimSpace(opts.PoToken) != "" {
 		cfg.PoTokenProvider = staticPoTokenProvider(strings.TrimSpace(opts.PoToken))
+	}
+	if opts.DownloadRetries >= 0 {
+		cfg.DownloadTransport.MaxRetries = opts.DownloadRetries
+		cfg.MetadataTransport.MaxRetries = opts.DownloadRetries
+	}
+	if opts.RetrySleepMS >= 0 {
+		backoff := time.Duration(opts.RetrySleepMS) * time.Millisecond
+		cfg.DownloadTransport.InitialBackoff = backoff
+		cfg.MetadataTransport.InitialBackoff = backoff
 	}
 
 	// Muxer check (ffmpeg)
@@ -199,6 +264,24 @@ func ToClientConfig(opts Options) (client.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseSubLangs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		lang := strings.ToLower(strings.TrimSpace(part))
+		if lang == "" {
+			continue
+		}
+		if _, ok := seen[lang]; ok {
+			continue
+		}
+		seen[lang] = struct{}{}
+		out = append(out, lang)
+	}
+	return out
 }
 
 type staticPoTokenProvider string

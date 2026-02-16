@@ -134,7 +134,11 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	} else {
 		sel, err := selector.Parse(selStr)
 		if err != nil {
-			return nil, fmt.Errorf("selector parse failed: %w", err)
+			return nil, &NoPlayableFormatsDetailError{
+				Mode:           normalizeSelectionMode(options.Mode),
+				Selector:       selStr,
+				SelectionError: "selector parse failed: " + err.Error(),
+			}
 		}
 		parsedSelector = sel
 		selected, err = selector.Select(formats, sel)
@@ -144,7 +148,11 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	}
 
 	if len(selected) == 0 {
-		return nil, errors.New("no formats found matching criteria")
+		return nil, &NoPlayableFormatsDetailError{
+			Mode:           normalizeSelectionMode(options.Mode),
+			Selector:       selStr,
+			SelectionError: "no formats matched selector",
+		}
 	}
 
 	// Prefer decipher-free selections when available to avoid hard failure
@@ -177,10 +185,10 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	// 4. Download
 	if len(selected) == 1 {
-		res, err := c.downloadSingle(ctx, videoID, selected[0], options.OutputPath, options)
+		res, err := c.downloadSingle(ctx, videoID, info.Title, info.Author, selected[0], options.OutputPath, options)
 		if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
 			c.warnf("challenge solve incomplete; retrying with fallback single-file format")
-			return c.downloadFallbackSingle(ctx, videoID, formats, options.OutputPath, options)
+			return c.downloadFallbackSingle(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 		}
 		return res, err
 	}
@@ -188,7 +196,7 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	res, err := c.downloadAndMerge(ctx, videoID, selected, options, meta)
 	if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
 		c.warnf("challenge solve incomplete during merge selection; retrying with fallback single-file format")
-		return c.downloadFallbackSingle(ctx, videoID, formats, options.OutputPath, options)
+		return c.downloadFallbackSingle(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 	}
 	return res, err
 }
@@ -205,6 +213,8 @@ func selectionHasCiphered(selected []types.FormatInfo) bool {
 func (c *Client) downloadFallbackSingle(
 	ctx context.Context,
 	videoID string,
+	title string,
+	uploader string,
 	formats []types.FormatInfo,
 	outputPath string,
 	options DownloadOptions,
@@ -230,7 +240,7 @@ func (c *Client) downloadFallbackSingle(
 	}
 
 	for _, f := range preferred {
-		res, err := c.downloadSingle(ctx, videoID, f, outputPath, options)
+		res, err := c.downloadSingle(ctx, videoID, title, uploader, f, outputPath, options)
 		if err == nil {
 			return res, nil
 		}
@@ -241,9 +251,20 @@ func (c *Client) downloadFallbackSingle(
 	return nil, ErrChallengeNotSolved
 }
 
-func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.FormatInfo, outputPath string, options DownloadOptions) (*DownloadResult, error) {
+func (c *Client) downloadSingle(ctx context.Context, videoID string, title string, uploader string, f types.FormatInfo, outputPath string, options DownloadOptions) (*DownloadResult, error) {
 	if outputPath == "" {
 		outputPath = defaultOutputPath(videoID, f.Itag, f.MimeType, options.Mode)
+	} else {
+		outputPath = renderOutputPathTemplate(outputPath, outputTemplateData{
+			VideoID:  videoID,
+			Title:    title,
+			Uploader: uploader,
+			Ext:      detectOutputExt(f.MimeType, options.Mode),
+			Itag:     strconv.Itoa(f.Itag),
+		})
+		if strings.TrimSpace(outputPath) == "" {
+			outputPath = defaultOutputPath(videoID, f.Itag, f.MimeType, options.Mode)
+		}
 	}
 	if dir := filepath.Dir(outputPath); dir != "." && dir != "" {
 		_ = os.MkdirAll(dir, 0755)
@@ -284,7 +305,7 @@ func (c *Client) downloadSingle(ctx context.Context, videoID string, f types.For
 	}
 
 	c.emitDownloadEvent("download", "start", videoID, outputPath, fmt.Sprintf("itag=%d", f.Itag))
-	if err := c.downloadStream(ctx, videoID, streamURL, outputPath, f); err != nil {
+	if err := c.downloadStream(ctx, videoID, streamURL, outputPath, f, options.Resume); err != nil {
 		attempt := downloadAttemptFromFormatAndURL(f, streamURL, err)
 		c.emitDownloadEvent("download", "failure", videoID, outputPath, formatDownloadFailureDetail(attempt))
 		return nil, wrapDownloadFailure(err, attempt)
@@ -316,12 +337,23 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 
 	if !foundV || !foundA {
 		// Should not happen if selector logic works for +
-		return c.downloadSingle(ctx, videoID, formats[0], options.OutputPath, options)
+		return c.downloadSingle(ctx, videoID, meta.Title, meta.Artist, formats[0], options.OutputPath, options)
 	}
 
 	basePath := options.OutputPath
 	if basePath == "" {
 		basePath = fmt.Sprintf("%s-%d+%d.mp4", videoID, vidF.Itag, audF.Itag)
+	} else {
+		basePath = renderOutputPathTemplate(basePath, outputTemplateData{
+			VideoID:  videoID,
+			Title:    meta.Title,
+			Uploader: meta.Artist,
+			Ext:      "mp4",
+			Itag:     fmt.Sprintf("%d+%d", vidF.Itag, audF.Itag),
+		})
+		if strings.TrimSpace(basePath) == "" {
+			basePath = fmt.Sprintf("%s-%d+%d.mp4", videoID, vidF.Itag, audF.Itag)
+		}
 	}
 	if filepath.Ext(basePath) == "" {
 		basePath += ".mp4"
@@ -342,7 +374,7 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	}
 	c.emitDownloadEvent("download", "destination", videoID, videoPath, fmt.Sprintf("itag=%d", vidF.Itag))
 	c.emitDownloadEvent("download", "start", videoID, videoPath, fmt.Sprintf("itag=%d", vidF.Itag))
-	if err := c.downloadStream(ctx, videoID, vURL, videoPath, vidF); err != nil {
+	if err := c.downloadStream(ctx, videoID, vURL, videoPath, vidF, options.Resume); err != nil {
 		attempt := downloadAttemptFromFormatAndURL(vidF, vURL, err)
 		c.emitDownloadEvent("download", "failure", videoID, videoPath, formatDownloadFailureDetail(attempt))
 		return nil, wrapDownloadFailure(err, attempt)
@@ -357,7 +389,7 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	}
 	c.emitDownloadEvent("download", "destination", videoID, audioPath, fmt.Sprintf("itag=%d", audF.Itag))
 	c.emitDownloadEvent("download", "start", videoID, audioPath, fmt.Sprintf("itag=%d", audF.Itag))
-	if err := c.downloadStream(ctx, videoID, aURL, audioPath, audF); err != nil {
+	if err := c.downloadStream(ctx, videoID, aURL, audioPath, audF, options.Resume); err != nil {
 		attempt := downloadAttemptFromFormatAndURL(audF, aURL, err)
 		c.emitDownloadEvent("download", "failure", videoID, audioPath, formatDownloadFailureDetail(attempt))
 		return nil, wrapDownloadFailure(err, attempt)
@@ -381,7 +413,7 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	}, nil
 }
 
-func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputPath string, f types.FormatInfo) error {
+func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputPath string, f types.FormatInfo, resume bool) error {
 	if f.Protocol == "hls" || strings.HasSuffix(streamURL, ".m3u8") {
 		_, err := c.downloadHLS(ctx, videoID, streamURL, outputPath, f)
 		return err
@@ -395,7 +427,7 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 		c.config.HTTPClient,
 		streamURL,
 		outputPath,
-		false,
+		resume,
 		c.config.DownloadTransport,
 		videoID,
 		c.config.RequestHeaders,
@@ -983,6 +1015,70 @@ func defaultOutputPath(videoID string, itag int, mimeType string, mode Selection
 		}
 	}
 	return fmt.Sprintf("%s-%d%s", videoID, itag, ext)
+}
+
+type outputTemplateData struct {
+	VideoID  string
+	Title    string
+	Uploader string
+	Ext      string
+	Itag     string
+}
+
+func renderOutputPathTemplate(template string, data outputTemplateData) string {
+	values := map[string]string{
+		"%(id)s":       sanitizeOutputToken(data.VideoID),
+		"%(title)s":    sanitizeOutputToken(data.Title),
+		"%(uploader)s": sanitizeOutputToken(data.Uploader),
+		"%(ext)s":      sanitizeOutputToken(data.Ext),
+		"%(itag)s":     sanitizeOutputToken(data.Itag),
+	}
+	rendered := template
+	for token, value := range values {
+		rendered = strings.ReplaceAll(rendered, token, value)
+	}
+	return rendered
+}
+
+func sanitizeOutputToken(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	b.Grow(len(v))
+	for _, r := range v {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			b.WriteRune('_')
+		default:
+			if r < 32 {
+				b.WriteRune('_')
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func detectOutputExt(mimeType string, mode SelectionMode) string {
+	if mode == SelectionModeMP3 {
+		return "mp3"
+	}
+	mediaType, _, err := mime.ParseMediaType(mimeType)
+	if err != nil {
+		return "bin"
+	}
+	parts := strings.SplitN(mediaType, "/", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
+		return "bin"
+	}
+	return parts[1]
 }
 
 func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo) (*DownloadResult, error) {
