@@ -26,7 +26,7 @@ ytv1 is a Go-native library for extracting and downloading from YouTube. It prov
 
 This is not meant as a full feature checklist (both are moving targets), but a quick expectation-setter:
 
--   **vs `kkdai/youtube` (see `legacy/kkdai-youtube/README.md`)**: ytv1 is built around an Innertube/player-response + challenge-solving pipeline (instead of the older `get_video_info`-style approach) and ships a workflow-oriented CLI adapter.
+-   **vs `kkdai/youtube`**: ytv1 is built around an Innertube/player-response + challenge-solving pipeline (instead of the older `get_video_info`-style approach) and ships a workflow-oriented CLI adapter.
 -   **vs `yt-dlp`**: ytv1 is intentionally YouTube-scoped and implements a practical subset of yt-dlp CLI behaviors; it does not aim to replicate yt-dlp's multi-site coverage or its full post-processing ecosystem.
 
 ## CLI Compatibility (yt-dlp-inspired subset)
