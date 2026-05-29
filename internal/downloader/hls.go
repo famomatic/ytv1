@@ -189,9 +189,11 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 		}
 
 		if strings.HasPrefix(line, "#EXT-X-MAP:") {
-			// m, err := parseMap(line[11:])
-			// if err != nil { return nil, 0, err }
-			// currentMap = m
+			m, err := parseMap(line[11:])
+			if err != nil {
+				return nil, 0, fmt.Errorf("parse EXT-X-MAP: %w", err)
+			}
+			currentMap = m
 			continue
 		}
 
@@ -246,13 +248,15 @@ func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w i
 			return fmt.Errorf("encrypted data not block aligned")
 		}
 		cbc.CryptBlocks(body, body)
-		// Remove padding (PKCS7)
+		// Validate and remove PKCS7 padding.
 		padding := int(body[len(body)-1])
-		if padding > len(body) || padding == 0 {
-			// This happens if key is wrong or data is corrupt.
-			// For now, return error or maybe just warn and write raw?
-			// Return error to be safe.
-			return fmt.Errorf("invalid padding")
+		if padding == 0 || padding > len(body) || padding > aes.BlockSize {
+			return fmt.Errorf("invalid PKCS7 padding: value=%d len=%d", padding, len(body))
+		}
+		for i := 0; i < padding; i++ {
+			if int(body[len(body)-1-i]) != padding {
+				return fmt.Errorf("invalid PKCS7 padding: byte at %d is %d, expected %d", len(body)-1-i, body[len(body)-1-i], padding)
+			}
 		}
 		body = body[:len(body)-padding]
 

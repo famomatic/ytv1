@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 type Variant string
@@ -125,7 +126,7 @@ func (r *defaultResolver) fetchPlayerJS(ctx context.Context, playerURL string) (
 		return "", fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := iox.ReadAllLimit(resp.Body, 20<<20) // 20 MB player JS limit
 	if err != nil {
 		return "", fmt.Errorf("failed to read body: %w", err)
 	}
@@ -173,7 +174,7 @@ func (r *defaultResolver) GetPlayerURL(ctx context.Context, videoID string) (str
 		return "", fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB watch page limit
 	if err != nil {
 		return "", fmt.Errorf("failed to read body: %w", err)
 	}
@@ -232,7 +233,7 @@ func (r *defaultResolver) fetchIframeAPIPlayerURL(ctx context.Context, baseURL s
 	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB iframe API limit
 	if err != nil {
 		return ""
 	}

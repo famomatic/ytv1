@@ -4,11 +4,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 // HLSManifest represents a parsed HLS manifest.
@@ -33,7 +34,7 @@ func FetchHLSManifest(ctx context.Context, client *http.Client, url string) (*HL
 		return nil, fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 5<<20) // 5 MB HLS manifest limit
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}

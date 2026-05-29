@@ -1282,6 +1282,8 @@ func sanitizeOutputToken(v string) string {
 	if out == "" {
 		return "unknown"
 	}
+	// Collapse path traversal sequences so ../../etc becomes __etc
+	out = strings.ReplaceAll(out, "..", "_")
 	return out
 }
 

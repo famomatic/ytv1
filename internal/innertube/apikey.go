@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 var innertubeAPIKeyPattern = regexp.MustCompile(`(?i)["']INNERTUBE_API_KEY["']\s*:\s*["']([^"']+)["']`)
@@ -171,7 +172,7 @@ func (r *APIKeyResolver) fetchFromWatch(ctx context.Context, profile ClientProfi
 		return resolvedWatchData{}, fmt.Errorf("watch request failed: status=%d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB watch page limit
 	if err != nil {
 		return resolvedWatchData{}, err
 	}
@@ -271,7 +272,7 @@ func (r *APIKeyResolver) extractSignatureTimestampFromPlayerJS(ctx context.Conte
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("player js request failed: status=%d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 20<<20) // 20 MB player JS limit
 	if err != nil {
 		return 0, err
 	}
