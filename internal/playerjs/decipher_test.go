@@ -1,10 +1,13 @@
 package playerjs
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func loadFixture(t *testing.T, name string) string {
@@ -118,5 +121,16 @@ func TestDecipherN_CurrentBaseJSFixture(t *testing.T) {
 	}
 	if got == "" || strings.HasSuffix(got, input) {
 		t.Fatalf("DecipherN() current base.js returned invalid output %q for input %q", got, input)
+	}
+}
+
+func TestEvalJavascript_TimeoutDuringExportedFunctionCall(t *testing.T) {
+	oldTimeout := jsExecTimeout
+	jsExecTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { jsExecTimeout = oldTimeout })
+
+	_, err := evalJavascript(`function(a){ for (;;) {} }`, "abc")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("evalJavascript() error = %v, want DeadlineExceeded", err)
 	}
 }

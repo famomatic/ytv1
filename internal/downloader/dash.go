@@ -178,11 +178,19 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 const maxConcurrentDASHSegments = 64
 
 func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
-	// Cap segments to prevent unbounded memory allocation.
-	if len(segments) > maxConcurrentDASHSegments {
-		return fmt.Errorf("too many DASH segments (%d) for concurrent download; max %d", len(segments), maxConcurrentDASHSegments)
+	for start := 0; start < len(segments); start += maxConcurrentDASHSegments {
+		end := start + maxConcurrentDASHSegments
+		if end > len(segments) {
+			end = len(segments)
+		}
+		if err := d.downloadSegmentBatchConcurrent(ctx, segments[start:end], w); err != nil {
+			return err
+		}
 	}
+	return nil
+}
 
+func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
 	type item struct {
 		index int
 		seq   int64
@@ -191,7 +199,11 @@ func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segment
 		err   error
 	}
 	cfg := normalizeTransportConfig(d.Transport)
-	sem := make(chan struct{}, cfg.MaxConcurrency)
+	concurrency := cfg.MaxConcurrency
+	if concurrency > len(segments) {
+		concurrency = len(segments)
+	}
+	sem := make(chan struct{}, concurrency)
 	out := make([]item, len(segments))
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(ctx)

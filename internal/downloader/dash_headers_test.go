@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -206,5 +207,47 @@ func TestDASHDownloader_StaticConcurrentDownloadKeepsOrder(t *testing.T) {
 	}
 	if got := buf.String(); got != "AB" {
 		t.Fatalf("ordered segment payload mismatch: got=%q want=AB", got)
+	}
+}
+
+func TestDASHDownloader_StaticConcurrentDownloadBatchesLongSegmentLists(t *testing.T) {
+	const segmentCount = maxConcurrentDASHSegments + 3
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/manifest.mpd" {
+			w.Write([]byte(`<?xml version="1.0"?>
+<MPD type="static" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="248" bandwidth="1000000">
+        <SegmentTemplate timescale="1" media="seg-$Number$.m4s" startNumber="1">
+          <SegmentTimeline>
+            <S d="1" r="66"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`))
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/seg-") {
+			w.Write([]byte("x"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dl := NewDASHDownloader(server.Client(), server.URL+"/manifest.mpd", "248").WithTransportConfig(TransportConfig{
+		MaxConcurrency: 8,
+	})
+
+	var buf bytes.Buffer
+	if err := dl.Download(context.Background(), &buf); err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if got := buf.Len(); got != segmentCount {
+		t.Fatalf("downloaded bytes = %d, want %d", got, segmentCount)
 	}
 }

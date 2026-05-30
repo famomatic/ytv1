@@ -276,7 +276,7 @@ func firstNonEmptySubmatch(groups ...[]byte) string {
 	return ""
 }
 
-const jsExecTimeout = 5 * time.Second
+var jsExecTimeout = 5 * time.Second
 
 func evalJavascript(jsFunction, arg string) (string, error) {
 	const fnName = "ytv1NsigFunction"
@@ -284,30 +284,26 @@ func evalJavascript(jsFunction, arg string) (string, error) {
 	vm.SetMaxCallStackSize(20)
 	hardenVM(vm)
 
-	ctx, cancel := context.WithTimeout(context.Background(), jsExecTimeout)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		if ctx.Err() == context.DeadlineExceeded {
-			vm.Interrupt(context.DeadlineExceeded)
-		}
-	}()
-
-	if _, err := vm.RunString(fnName + "=" + jsFunction); err != nil {
-		return "", wrapVMError(err)
-	}
-	var output func(string) string
-	if err := vm.ExportTo(vm.Get(fnName), &output); err != nil {
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(fnName + "=" + jsFunction)
+		return err
+	}); err != nil {
 		return "", err
 	}
-	result, err := func() (string, error) {
-		// Clear deadline interrupt before calling the function
-		// so a fast function doesn't trip on the interrupt channel.
-		cancel()
-		out := output(arg)
-		return out, nil
-	}()
-	return result, err
+	output, ok := goja.AssertFunction(vm.Get(fnName))
+	if !ok {
+		return "", errors.New("javascript challenge export is not callable")
+	}
+
+	var result goja.Value
+	if err := runJSWithTimeout(vm, func() error {
+		var err error
+		result, err = output(goja.Undefined(), vm.ToValue(arg))
+		return err
+	}); err != nil {
+		return "", err
+	}
+	return result.String(), nil
 }
 
 func wrapVMError(err error) error {
@@ -315,6 +311,24 @@ func wrapVMError(err error) error {
 		return fmt.Errorf("js execution timed out after %s: %w", jsExecTimeout, err)
 	}
 	return err
+}
+
+func runJSWithTimeout(vm *goja.Runtime, fn func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), jsExecTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				vm.Interrupt(context.DeadlineExceeded)
+			}
+		case <-done:
+		}
+	}()
+	err := fn()
+	close(done)
+	return wrapVMError(err)
 }
 
 type runtimeDecipherer struct {
@@ -342,8 +356,12 @@ func (d *Decipherer) decipherSignatureWithRuntime(s string) (string, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	out, err := rt.sigFunc(goja.Undefined(), rt.vm.ToValue(16), rt.vm.ToValue(s))
-	if err != nil {
+	var out goja.Value
+	if err := runJSWithTimeout(rt.vm, func() error {
+		var err error
+		out, err = rt.sigFunc(goja.Undefined(), rt.vm.ToValue(16), rt.vm.ToValue(s))
+		return err
+	}); err != nil {
 		return "", err
 	}
 	return out.String(), nil
@@ -362,7 +380,12 @@ func (d *Decipherer) decipherNWithRuntime(n string) (string, error) {
 	inputURL := "https://www.youtube.com/videoplayback/n/" + escaped + "/x?n=" + url.QueryEscape(n)
 
 	rt.mu.Lock()
-	out, err := rt.nURLFunc(goja.Undefined(), rt.vm.ToValue(inputURL))
+	var out goja.Value
+	err = runJSWithTimeout(rt.vm, func() error {
+		var callErr error
+		out, callErr = rt.nURLFunc(goja.Undefined(), rt.vm.ToValue(inputURL))
+		return callErr
+	})
 	rt.mu.Unlock()
 	if err != nil {
 		return "", err
@@ -420,24 +443,18 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 	vm.SetMaxCallStackSize(20)
 	hardenVM(vm)
 
-	ctx, cancel := context.WithTimeout(context.Background(), jsExecTimeout)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		if ctx.Err() == context.DeadlineExceeded {
-			vm.Interrupt(context.DeadlineExceeded)
-		}
-	}()
-
-	if _, err := vm.RunString(runtimePreludeJS); err != nil {
-		cancel()
-		return nil, wrapVMError(err)
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(runtimePreludeJS)
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	if _, err := vm.RunString(jsBody); err != nil {
-		cancel()
-		return nil, wrapVMError(err)
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(jsBody)
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	cancel() // cancel timeout — VM is now idle, calls are guarded by rt.mu
 
 	root := vm.Get("_yt_player")
 	if root == nil || goja.IsUndefined(root) || goja.IsNull(root) {
