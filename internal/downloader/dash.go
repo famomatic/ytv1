@@ -173,7 +173,16 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 	}
 }
 
+// maxConcurrentDASHSegments caps the number of segments buffered in memory
+// during concurrent DASH downloads to prevent OOM on large static streams.
+const maxConcurrentDASHSegments = 64
+
 func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
+	// Cap segments to prevent unbounded memory allocation.
+	if len(segments) > maxConcurrentDASHSegments {
+		return fmt.Errorf("too many DASH segments (%d) for concurrent download; max %d", len(segments), maxConcurrentDASHSegments)
+	}
+
 	type item struct {
 		index int
 		seq   int64
@@ -302,11 +311,19 @@ func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Dura
 			currentTime = *s.T
 		}
 
-		// Repeat 'r' times (r=0 means 1 occurrence total, r=1 means 2 total)
-		// Spec says r is repeat count *after* the first one.
-		// Usually r=-1 means repeat until next S.
-
-		count := s.R + 1
+		// Cap repeat count for safety. The DASH spec defines r=-1 as
+		// "repeat until the next S element", but we don't have the next S
+		// boundary here. Cap at a reasonable maximum and treat r=-1 as
+		// a single occurrence (the caller will re-fetch for dynamic manifests).
+		const maxSegmentRepeatCount = 10000
+		repeatCount := s.R
+		if repeatCount < 0 {
+			repeatCount = 0 // r=-1: generate one segment; dynamic manifests re-fetch
+		}
+		if repeatCount > maxSegmentRepeatCount {
+			repeatCount = maxSegmentRepeatCount
+		}
+		count := repeatCount + 1
 		for i := int64(0); i < count; i++ {
 			// Generate URL
 			urlStr := strings.ReplaceAll(tmpl.Media, "$RepresentationID$", d.RepresentationID)

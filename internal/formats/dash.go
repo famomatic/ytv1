@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 // DASHManifest represents a parsed DASH manifest.
@@ -33,7 +34,7 @@ func FetchDASHManifest(ctx context.Context, client *http.Client, url string) (*D
 		return nil, fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 5<<20) // 5 MB DASH manifest limit
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
@@ -48,9 +49,9 @@ func FetchDASHManifest(ctx context.Context, client *http.Client, url string) (*D
 }
 
 type dashMPD struct {
-	XMLName xml.Name      `xml:"MPD"`
-	BaseURL string        `xml:"BaseURL"`
-	Periods []dashPeriod  `xml:"Period"`
+	XMLName xml.Name     `xml:"MPD"`
+	BaseURL string       `xml:"BaseURL"`
+	Periods []dashPeriod `xml:"Period"`
 }
 
 type dashPeriod struct {
@@ -64,15 +65,15 @@ type dashAdaptationSet struct {
 }
 
 type dashRepresentation struct {
-	ID               string `xml:"id,attr"`
-	Bandwidth        int    `xml:"bandwidth,attr"`
-	Width            int    `xml:"width,attr"`
-	Height           int    `xml:"height,attr"`
-	FrameRate        string `xml:"frameRate,attr"`
-	MimeType         string `xml:"mimeType,attr"`
-	Codecs           string `xml:"codecs,attr"`
+	ID                string `xml:"id,attr"`
+	Bandwidth         int    `xml:"bandwidth,attr"`
+	Width             int    `xml:"width,attr"`
+	Height            int    `xml:"height,attr"`
+	FrameRate         string `xml:"frameRate,attr"`
+	MimeType          string `xml:"mimeType,attr"`
+	Codecs            string `xml:"codecs,attr"`
 	AudioSamplingRate string `xml:"audioSamplingRate,attr"`
-	BaseURL          string `xml:"BaseURL"`
+	BaseURL           string `xml:"BaseURL"`
 }
 
 // ParseDASHManifest parses DASH MPD into normalized formats.

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/famomatic/ytv1/internal/challenge"
 	"github.com/famomatic/ytv1/internal/innertube"
@@ -13,8 +14,9 @@ import (
 )
 
 type challengeSolutions struct {
-	n   map[string]string
-	sig map[string]string
+	n       map[string]string
+	sig     map[string]string
+	created time.Time
 }
 
 var playerLocalePathPattern = regexp.MustCompile(`(?i)(/s/player/[A-Za-z0-9_-]+/player(?:_[a-z0-9]+)?\.vflset)/[a-z]{2,3}_[a-z]{2,3}(/base\.js)$`)
@@ -166,6 +168,9 @@ func (c *Client) getChallengeN(playerURL, challenge string) (string, bool) {
 	if !ok || s.n == nil {
 		return "", false
 	}
+	if c.isChallengeExpired(s) {
+		return "", false
+	}
 	decoded, ok := s.n[challenge]
 	return decoded, ok
 }
@@ -178,6 +183,9 @@ func (c *Client) getChallengeSig(playerURL, challenge string) (string, bool) {
 	if !ok || s.sig == nil {
 		return "", false
 	}
+	if c.isChallengeExpired(s) {
+		return "", false
+	}
 	decoded, ok := s.sig[challenge]
 	return decoded, ok
 }
@@ -186,12 +194,16 @@ func (c *Client) setChallengeN(playerURL, challenge, decoded string) {
 	key := canonicalPlayerCacheKey(playerURL)
 	c.challengesMu.Lock()
 	defer c.challengesMu.Unlock()
+	c.evictExpiredChallenges()
 	if c.challenges == nil {
 		c.challenges = make(map[string]challengeSolutions)
 	}
 	s := c.challenges[key]
 	if s.n == nil {
 		s.n = make(map[string]string)
+	}
+	if s.created.IsZero() {
+		s.created = time.Now()
 	}
 	s.n[challenge] = decoded
 	c.challenges[key] = s
@@ -201,12 +213,16 @@ func (c *Client) setChallengeSig(playerURL, challenge, decoded string) {
 	key := canonicalPlayerCacheKey(playerURL)
 	c.challengesMu.Lock()
 	defer c.challengesMu.Unlock()
+	c.evictExpiredChallenges()
 	if c.challenges == nil {
 		c.challenges = make(map[string]challengeSolutions)
 	}
 	s := c.challenges[key]
 	if s.sig == nil {
 		s.sig = make(map[string]string)
+	}
+	if s.created.IsZero() {
+		s.created = time.Now()
 	}
 	s.sig[challenge] = decoded
 	c.challenges[key] = s
@@ -280,4 +296,29 @@ func canonicalPlayerCacheKey(playerURL string) string {
 		return m[1] + "/en_US" + m[2]
 	}
 	return raw
+}
+
+// defaultChallengeTTL is the maximum age for cached challenge solutions.
+// YouTube rotates player JS frequently; stale solutions will fail softly
+// (the caller re-fetches and re-solves).
+const defaultChallengeTTL = 2 * time.Hour
+
+func (c *Client) isChallengeExpired(s challengeSolutions) bool {
+	ttl := c.config.SessionCacheTTL
+	if ttl <= 0 {
+		ttl = defaultChallengeTTL
+	}
+	return !s.created.IsZero() && time.Since(s.created) > ttl
+}
+
+func (c *Client) evictExpiredChallenges() {
+	ttl := c.config.SessionCacheTTL
+	if ttl <= 0 {
+		ttl = defaultChallengeTTL
+	}
+	for key, s := range c.challenges {
+		if !s.created.IsZero() && time.Since(s.created) > ttl {
+			delete(c.challenges, key)
+		}
+	}
 }

@@ -6,4 +6,4 @@ ytv1*.exe
 *.mkv
 /scripts/
 #/internal/playerjs/testdata/
-/*.json
+/*.json.pi-lens/

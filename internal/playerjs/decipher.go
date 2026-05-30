@@ -2,6 +2,7 @@ package playerjs
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -274,17 +276,45 @@ func firstNonEmptySubmatch(groups ...[]byte) string {
 	return ""
 }
 
+const jsExecTimeout = 5 * time.Second
+
 func evalJavascript(jsFunction, arg string) (string, error) {
 	const fnName = "ytv1NsigFunction"
 	vm := goja.New()
+	vm.SetMaxCallStackSize(20)
+	hardenVM(vm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), jsExecTimeout)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		if ctx.Err() == context.DeadlineExceeded {
+			vm.Interrupt(context.DeadlineExceeded)
+		}
+	}()
+
 	if _, err := vm.RunString(fnName + "=" + jsFunction); err != nil {
-		return "", err
+		return "", wrapVMError(err)
 	}
 	var output func(string) string
 	if err := vm.ExportTo(vm.Get(fnName), &output); err != nil {
 		return "", err
 	}
-	return output(arg), nil
+	result, err := func() (string, error) {
+		// Clear deadline interrupt before calling the function
+		// so a fast function doesn't trip on the interrupt channel.
+		cancel()
+		out := output(arg)
+		return out, nil
+	}()
+	return result, err
+}
+
+func wrapVMError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("js execution timed out after %s: %w", jsExecTimeout, err)
+	}
+	return err
 }
 
 type runtimeDecipherer struct {
@@ -387,12 +417,27 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 	jsBody = jsBody[:markerPos] + inject + jsBody[markerPos:]
 
 	vm := goja.New()
+	vm.SetMaxCallStackSize(20)
+	hardenVM(vm)
+
+	ctx, cancel := context.WithTimeout(context.Background(), jsExecTimeout)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		if ctx.Err() == context.DeadlineExceeded {
+			vm.Interrupt(context.DeadlineExceeded)
+		}
+	}()
+
 	if _, err := vm.RunString(runtimePreludeJS); err != nil {
-		return nil, err
+		cancel()
+		return nil, wrapVMError(err)
 	}
 	if _, err := vm.RunString(jsBody); err != nil {
-		return nil, err
+		cancel()
+		return nil, wrapVMError(err)
 	}
+	cancel() // cancel timeout — VM is now idle, calls are guarded by rt.mu
 
 	root := vm.Get("_yt_player")
 	if root == nil || goja.IsUndefined(root) || goja.IsNull(root) {
@@ -517,3 +562,28 @@ if (!document.removeEventListener) { document.removeEventListener = function(){}
 if (!document.location) { document.location = window.location; }
 if (!document.documentElement) { document.documentElement = { style: {} }; }
 `
+
+// hardenVM disables dangerous JavaScript globals that could be abused if the
+// fetched player JS is malicious or has been tampered with. goja is a pure Go
+// interpreter (no OS or network access), but these globals can still consume
+// unbounded CPU/memory or interfere with the sandbox.
+func hardenVM(vm *goja.Runtime) {
+	for _, name := range []string{
+		"eval",
+		"Function",
+		"WebAssembly",
+		"importScripts",
+		"Proxy",
+		"Reflect",
+		"SharedArrayBuffer",
+		"Atomics",
+		"fetch",
+		"Worker",
+		"SharedWorker",
+		"ServiceWorker",
+		"MessageChannel",
+		"BroadcastChannel",
+	} {
+		_ = vm.GlobalObject().Delete(name)
+	}
+}

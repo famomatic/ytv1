@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	neturl "net/url"
 	"regexp"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/famomatic/ytv1/internal/innertube"
+	"github.com/famomatic/ytv1/internal/iox"
 	"github.com/famomatic/ytv1/internal/policy"
 	"github.com/famomatic/ytv1/internal/types"
 )
@@ -558,7 +558,7 @@ func (e *Engine) fetchOnce(ctx context.Context, template *http.Request, profile 
 		}
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB innertube response limit
 	if err != nil {
 		return nil, err
 	}
