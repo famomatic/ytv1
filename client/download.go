@@ -111,13 +111,10 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return nil, err
 	}
 
-	// Fallback for Merge if Muxer missing
+	// Do not silently downgrade separate best video+audio selections to a
+	// lower progressive stream just because local merge support is unavailable.
 	if len(selected) > 1 && (c.config.Muxer == nil || !c.config.Muxer.Available()) {
-		c.logger.Warnf("Muxer unavailable, falling back to best single file")
-		selected, _ = SelectFormatsForDownloadOptions(formats, DownloadOptions{FormatSelector: "best"})
-		if len(selected) == 0 {
-			return nil, errors.New("no formats found (and muxer unavailable)")
-		}
+		return nil, fmt.Errorf("%w: selected formats require merge; configure ffmpeg or choose a single progressive format", ErrMuxerUnavailable)
 	}
 
 	if len(selected) == 1 {
@@ -135,15 +132,6 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return c.downloadFallbackSingle(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 	}
 	return res, err
-}
-
-func selectionHasCiphered(selected []types.FormatInfo) bool {
-	for _, f := range selected {
-		if f.Ciphered {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Client) downloadFallbackSingle(

@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/famomatic/ytv1/internal/selector"
-	"github.com/famomatic/ytv1/internal/types"
 )
 
 // SelectFormatsForDownloadOptions previews the media formats that Download would
@@ -47,20 +46,6 @@ func SelectFormatsForDownloadOptions(formats []FormatInfo, options DownloadOptio
 			Mode:           normalizeSelectionMode(options.Mode),
 			Selector:       selStr,
 			SelectionError: "no formats matched selector",
-		}
-	}
-
-	if selectionHasCiphered(selected) {
-		nonCiphered := make([]types.FormatInfo, 0, len(formats))
-		for _, f := range formats {
-			if !f.Ciphered {
-				nonCiphered = append(nonCiphered, f)
-			}
-		}
-		if len(nonCiphered) > 0 {
-			if alt, err := selector.Select(nonCiphered, parsed); err == nil && len(alt) > 0 && len(alt) >= len(selected) {
-				selected = alt
-			}
 		}
 	}
 

@@ -1,6 +1,6 @@
 module github.com/famomatic/ytv1
 
-go 1.23
+go 1.23.0
 
 require github.com/dop251/goja v0.0.0-20260106131823-651366fbe6e3
 

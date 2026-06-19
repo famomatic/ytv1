@@ -856,6 +856,42 @@ func (m testMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPath s
 	return os.WriteFile(outputPath, append(v, a...), 0o644)
 }
 
+func TestDownloadRequiresMuxerForSeparateBestVideoAudio(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{
+						"formats":[{"itag":18,"url":"https://media.example/low.mp4","mimeType":"video/mp4","bitrate":120000,"width":256,"height":144}],
+						"adaptiveFormats":[
+							{"itag":315,"url":"https://media.example/4k.webm","mimeType":"video/webm","bitrate":12000000,"width":3840,"height":2160},
+							{"itag":251,"url":"https://media.example/audio.webm","mimeType":"audio/webm","bitrate":192000}
+						]
+					}
+				}`
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/base.js"></script></html>`)), Header: make(http.Header)}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header)}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+	})
+	_, err := c.Download(context.Background(), videoID, DownloadOptions{Mode: SelectionModeBest})
+	if !errors.Is(err, ErrMuxerUnavailable) {
+		t.Fatalf("Download() error = %v, want ErrMuxerUnavailable", err)
+	}
+}
+
 func TestDownloadAndMerge_DefaultCleansIntermediateFiles(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	var events []DownloadEvent
@@ -1156,7 +1192,7 @@ func TestDownloadFailureProvidesAttemptDetails(t *testing.T) {
 	}
 }
 
-func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
+func TestDownloadKeepsCipheredHighQualitySelection(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	httpClient := &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1186,7 +1222,8 @@ func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
 					Header:     make(http.Header),
 				}, nil
 			case r.Method == http.MethodGet && r.URL.Path == "/s/player/test/player_ias.vflset/en_US/base.js":
-				// Intentionally broken JS: if ciphered selection is attempted, resolve should fail.
+				// Intentionally broken JS: preserving the ciphered high-quality
+				// selection should fail before falling back to lower plain URLs.
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(`var broken = true;`)),
@@ -1204,12 +1241,6 @@ func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader("audio")),
 					Header:     make(http.Header),
 				}, nil
-			case r.Method == http.MethodGet && strings.Contains(r.URL.String(), "cipher-video.webm"):
-				t.Fatalf("ciphered video should not be selected")
-				return nil, nil
-			case r.Method == http.MethodGet && strings.Contains(r.URL.String(), "cipher-audio.webm"):
-				t.Fatalf("ciphered audio should not be selected")
-				return nil, nil
 			default:
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
@@ -1227,15 +1258,12 @@ func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "merged.mp4")
-	res, err := c.Download(context.Background(), videoID, DownloadOptions{
+	_, err := c.Download(context.Background(), videoID, DownloadOptions{
 		Mode:       SelectionModeBest,
 		OutputPath: out,
 	})
-	if err != nil {
-		t.Fatalf("Download() error = %v", err)
-	}
-	if res.OutputPath != out {
-		t.Fatalf("output path=%q want=%q", res.OutputPath, out)
+	if !errors.Is(err, ErrChallengeNotSolved) {
+		t.Fatalf("Download() error = %v, want ErrChallengeNotSolved", err)
 	}
 }
 
