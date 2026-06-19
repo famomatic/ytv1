@@ -83,11 +83,10 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 
 func (s *defaultSelector) defaultClientOrder() []string {
 	// Mirrors yt-dlp practical defaults:
-	// - unauthenticated: android_vr, web_safari
+	// - unauthenticated: mweb, ios, android_vr, web_safari
 	// - authenticated: tv_downgraded, web_safari
-	// We currently map tv_downgraded to tv profile behavior.
 	if s.preferAuthDefaults {
 		return []string{"tv_downgraded", "web_safari"}
 	}
-	return []string{"android_vr", "web_safari"}
+	return []string{"mweb", "ios", "android_vr", "web_safari"}
 }

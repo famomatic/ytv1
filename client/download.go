@@ -52,7 +52,8 @@ type DownloadResult struct {
 
 // Download resolves the selected stream URL and writes it to a local file.
 // If options.Itag is 0, format selection follows options.Mode (default: best).
-// If options.OutputPath is empty, "<videoID>-<itag><ext>" is used.
+// If options.OutputPath is empty, the yt-dlp-style default
+// "<title> [<videoID>].<ext>" is used.
 func (c *Client) Download(ctx context.Context, input string, options DownloadOptions) (*DownloadResult, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
 	defer cancel()
@@ -188,7 +189,7 @@ func (c *Client) downloadFallbackSingle(
 
 func (c *Client) downloadSingle(ctx context.Context, videoID string, title string, uploader string, f types.FormatInfo, outputPath string, options DownloadOptions) (*DownloadResult, error) {
 	if outputPath == "" {
-		outputPath = defaultOutputPath(videoID, f.Itag, f.MimeType, options.Mode)
+		outputPath = defaultOutputPath(videoID, title, f.Itag, f.MimeType, options.Mode)
 	} else {
 		outputPath = renderOutputPathTemplate(outputPath, outputTemplateData{
 			VideoID:  videoID,
@@ -198,7 +199,7 @@ func (c *Client) downloadSingle(ctx context.Context, videoID string, title strin
 			Itag:     strconv.Itoa(f.Itag),
 		})
 		if strings.TrimSpace(outputPath) == "" {
-			outputPath = defaultOutputPath(videoID, f.Itag, f.MimeType, options.Mode)
+			outputPath = defaultOutputPath(videoID, title, f.Itag, f.MimeType, options.Mode)
 		}
 	}
 	if dir := filepath.Dir(outputPath); dir != "." && dir != "" {
@@ -289,7 +290,7 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	basePath := options.OutputPath
 	mergeExt := normalizedMergeOutputExt(options.MergeOutputFormat)
 	if basePath == "" {
-		basePath = fmt.Sprintf("%s-%d+%d.%s", videoID, vidF.Itag, audF.Itag, mergeExt)
+		basePath = defaultOutputPathForExt(videoID, meta.Title, fmt.Sprintf("%d+%d", vidF.Itag, audF.Itag), mergeExt)
 	} else {
 		basePath = renderOutputPathTemplate(basePath, outputTemplateData{
 			VideoID:  videoID,
@@ -299,7 +300,7 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 			Itag:     fmt.Sprintf("%d+%d", vidF.Itag, audF.Itag),
 		})
 		if strings.TrimSpace(basePath) == "" {
-			basePath = fmt.Sprintf("%s-%d+%d.%s", videoID, vidF.Itag, audF.Itag, mergeExt)
+			basePath = defaultOutputPathForExt(videoID, meta.Title, fmt.Sprintf("%d+%d", vidF.Itag, audF.Itag), mergeExt)
 		}
 	}
 	if filepath.Ext(basePath) == "" {
@@ -1223,9 +1224,9 @@ func downloadChunkOnce(
 	return nil
 }
 
-func defaultOutputPath(videoID string, itag int, mimeType string, mode SelectionMode) string {
+func defaultOutputPath(videoID string, title string, itag int, mimeType string, mode SelectionMode) string {
 	if mode == SelectionModeMP3 {
-		return fmt.Sprintf("%s-%d.mp3", videoID, itag)
+		return defaultOutputPathForExt(videoID, title, strconv.Itoa(itag), "mp3")
 	}
 	ext := ".bin"
 	if mediaType, _, err := mime.ParseMediaType(mimeType); err == nil {
@@ -1233,7 +1234,16 @@ func defaultOutputPath(videoID string, itag int, mimeType string, mode Selection
 			ext = "." + parts[1]
 		}
 	}
-	return fmt.Sprintf("%s-%d%s", videoID, itag, ext)
+	return defaultOutputPathForExt(videoID, title, strconv.Itoa(itag), strings.TrimPrefix(ext, "."))
+}
+
+func defaultOutputPathForExt(videoID string, title string, itag string, ext string) string {
+	return renderOutputPathTemplate(DefaultOutputTemplate, outputTemplateData{
+		VideoID: videoID,
+		Title:   title,
+		Ext:     ext,
+		Itag:    itag,
+	})
 }
 
 type outputTemplateData struct {

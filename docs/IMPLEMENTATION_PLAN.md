@@ -189,6 +189,7 @@
 - B129 completion increment landed: split remaining CLI adapter helpers and video workflow out of `cmd/ytv1/main.go`, leaving `main.go` as a thin entrypoint/run-loop wrapper over package and command adapters.
 - B130 completion increment landed: explicit video-only `video/mp4; codecs="avc1..."` entries no longer inherit progressive audio flags, while codec-less progressive fallback remains intact; verified against `oaevSXpWhdo` and `go test ./...`.
 - B131 completion increment landed: merged PR #9 security hardening into `dev` while preserving dev-first flow, bounded response/body reads, hardened player JS execution/cache behavior, validated encrypted HLS padding, bounded DASH concurrent buffering without rejecting long static streams, hardened ffmpeg merge inputs/metadata, and added regression coverage for JS timeout and long DASH segment batching.
+- B132 in progress: restore yt-dlp-style default download behavior by preferring highest video+audio selections and defaulting media filenames to `%(title)s [%(id)s].%(ext)s`, validated against `8IY44RZHyw8`.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -323,6 +324,7 @@
 130. `[x]` B129. Thin `cmd/ytv1/main.go` entrypoint split
 131. `[x]` B130. Explicit codec media-flag correction for video-only MP4 formats
 132. `[x]` B131. PR #9 security hardening integration on `dev`
+133. `[-]` B132. Default best-quality downloads and yt-dlp-style default filename
 
 ---
 

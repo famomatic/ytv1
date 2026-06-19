@@ -139,7 +139,7 @@ func TestEffectiveOutputTemplate_OutputPathDir(t *testing.T) {
 		{
 			name: "default template under dir",
 			opts: cli.Options{OutputPathDir: dir},
-			want: filepath.Join(dir, "%(id)s-%(itag)s.%(ext)s"),
+			want: filepath.Join(dir, "%(title)s [%(id)s].%(ext)s"),
 		},
 		{
 			name: "relative template under dir",
@@ -169,7 +169,7 @@ func TestEffectiveOutputTemplate_OutputPathDir(t *testing.T) {
 func TestBuildDownloadOptions_OutputPathDir(t *testing.T) {
 	dir := t.TempDir()
 	got := buildDownloadOptions(cli.Options{OutputPathDir: dir})
-	want := filepath.Join(dir, "%(id)s-%(itag)s.%(ext)s")
+	want := filepath.Join(dir, "%(title)s [%(id)s].%(ext)s")
 	if got.OutputPath != want {
 		t.Fatalf("OutputPath = %q, want %q", got.OutputPath, want)
 	}
@@ -708,8 +708,8 @@ func TestPredictedOutputFilename_MergeOutputFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("predictedOutputFilename() default error = %v", err)
 	}
-	if got != "jNQXAC9IVRw-137+140.webm" {
-		t.Fatalf("filename=%q, want jNQXAC9IVRw-137+140.webm", got)
+	if got != "A_B [jNQXAC9IVRw].webm" {
+		t.Fatalf("filename=%q, want A_B [jNQXAC9IVRw].webm", got)
 	}
 }
 
@@ -737,7 +737,8 @@ func TestPredictedOutputFilename_RemuxVideo(t *testing.T) {
 
 func TestPredictedOutputFilename_NumericDefault(t *testing.T) {
 	info := &client.VideoInfo{
-		ID: "jNQXAC9IVRw",
+		ID:    "jNQXAC9IVRw",
+		Title: "Audio title",
 		Formats: []client.FormatInfo{
 			{Itag: 140, MimeType: "audio/mp4", Bitrate: 128000, HasAudio: true},
 		},
@@ -746,8 +747,8 @@ func TestPredictedOutputFilename_NumericDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("predictedOutputFilename() error = %v", err)
 	}
-	if got != "jNQXAC9IVRw-140.mp4" {
-		t.Fatalf("filename=%q, want jNQXAC9IVRw-140.mp4", got)
+	if got != "Audio title [jNQXAC9IVRw].mp4" {
+		t.Fatalf("filename=%q, want Audio title [jNQXAC9IVRw].mp4", got)
 	}
 }
 
@@ -2278,7 +2279,7 @@ func TestWriteDescriptionSidecar_OutputPathDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeDescriptionSidecar() error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "jNQXAC9IVRw-description.description")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "Example [jNQXAC9IVRw].description")); err != nil {
 		t.Fatalf("description sidecar not written under output path dir: %v", err)
 	}
 }

@@ -110,6 +110,22 @@ MzD=function(b){try{const R=(new g.Mj(b,!0)).get("n");if(R){const h=b.match(/\/n
 	}
 }
 
+func TestDecipherN_RuntimeFallbackLetBinding(t *testing.T) {
+	js := `var _yt_player={};(function(g){
+g.oH=function(u){this.u=u;this.get=function(k){if(k!=="n")return null;var m=this.u.match(/[?&]n=([^&]+)/);if(!m||!m[1])return null;return decodeURIComponent(m[1]).split("").reverse().join("");};};
+B0j=function(M){try{let k=(new g.oH(M,!0)).get("n");if(k){let z=M.match(/\/n\/([^/]+)/);if(z&&z[1]&&z[1]!==k)return M.replace("/n/"+z[1],"/n/"+k)}}catch(k){}return M};
+})(_yt_player);`
+	d := NewDecipherer(js)
+
+	got, err := d.DecipherN("abcdef")
+	if err != nil {
+		t.Fatalf("DecipherN() runtime let fallback error = %v", err)
+	}
+	if got != "fedcba" {
+		t.Fatalf("DecipherN() runtime let fallback = %q, want %q", got, "fedcba")
+	}
+}
+
 func TestDecipherN_CurrentBaseJSFixture(t *testing.T) {
 	js := loadFixture(t, "base.js")
 	d := NewDecipherer(js)

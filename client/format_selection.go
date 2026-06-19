@@ -14,6 +14,10 @@ func SelectFormatsForDownloadOptions(formats []FormatInfo, options DownloadOptio
 	if len(formats) == 0 {
 		return nil, ErrNoPlayableFormats
 	}
+	formats = playableSelectionFormats(formats)
+	if len(formats) == 0 {
+		return nil, ErrNoPlayableFormats
+	}
 
 	if options.Itag > 0 {
 		for _, f := range formats {
@@ -79,4 +83,15 @@ func defaultFormatSelector(options DownloadOptions) string {
 	default:
 		return "bestvideo+bestaudio/best"
 	}
+}
+
+func playableSelectionFormats(formats []FormatInfo) []FormatInfo {
+	out := make([]FormatInfo, 0, len(formats))
+	for _, f := range formats {
+		if f.IsDRM || f.IsDamaged {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }

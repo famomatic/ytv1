@@ -1014,8 +1014,8 @@ func TestDownloadAndMerge_MergeOutputFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
-	if res.OutputPath != "jNQXAC9IVRw-248+251.mkv" {
-		t.Fatalf("OutputPath=%q, want jNQXAC9IVRw-248+251.mkv", res.OutputPath)
+	if res.OutputPath != "x [jNQXAC9IVRw].mkv" {
+		t.Fatalf("OutputPath=%q, want x [jNQXAC9IVRw].mkv", res.OutputPath)
 	}
 }
 

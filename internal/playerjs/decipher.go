@@ -340,7 +340,7 @@ type runtimeDecipherer struct {
 
 var (
 	signatureRuntimeNameRegexp = regexp.MustCompile(`const\s+[A-Za-z0-9_$]+=([A-Za-z0-9_$]+)\(16,decodeURIComponent\([^\)]*\.s\)\)`)
-	nURLRuntimeNameRegexp      = regexp.MustCompile(`([A-Za-z0-9_$]+)=function\([A-Za-z0-9_$]+\)\{try\{const\s+[A-Za-z0-9_$]+=\(new\s+g\.[A-Za-z0-9_$]+\([A-Za-z0-9_$]+,!0\)\)\.get\("n"\)`)
+	nURLRuntimeNameRegexp      = regexp.MustCompile(`([A-Za-z0-9_$]+)=function\([A-Za-z0-9_$]+\)\{try\{(?:const|let|var)\s+[A-Za-z0-9_$]+=\(new\s+g\.[A-Za-z0-9_$]+\([A-Za-z0-9_$]+,!0\)\)\.get\("n"\)`)
 	nPathExtractRegexp         = regexp.MustCompile(`/n/([^/?]+)`)
 )
 

@@ -28,7 +28,7 @@ func PredictOutputFilename(info *VideoInfo, selected []FormatInfo, opts OutputFi
 	mergeExt := NormalizeMergeOutputExt(opts.MergeOutputExt)
 	if IsMergedSelection(selected) {
 		videoItag, audioItag := MergedItags(selected)
-		defaultPath := fmt.Sprintf("%s-%d+%d.%s", info.ID, videoItag, audioItag, mergeExt)
+		defaultPath := defaultOutputFilenameFromTemplate(info, mergeExt, fmt.Sprintf("%d+%d", videoItag, audioItag), selected, opts)
 		if strings.TrimSpace(opts.OutputTemplate) == "" {
 			return TrimOutputPathFilename(defaultPath, opts.TrimFilenames), nil
 		}
@@ -68,7 +68,7 @@ func PredictOutputFilename(info *VideoInfo, selected []FormatInfo, opts OutputFi
 	}
 
 	format := selected[0]
-	defaultPath := DefaultOutputPath(info.ID, format.Itag, format.MimeType, opts.Mode)
+	defaultPath := defaultOutputFilenameFromTemplate(info, DetectOutputExt(format.MimeType, opts.Mode), strconv.Itoa(format.Itag), selected, opts)
 	if strings.TrimSpace(opts.OutputTemplate) == "" {
 		return TrimOutputPathFilename(defaultPath, opts.TrimFilenames), nil
 	}
@@ -102,6 +102,35 @@ func PredictOutputFilename(info *VideoInfo, selected []FormatInfo, opts OutputFi
 		return TrimOutputPathFilename(defaultPath, opts.TrimFilenames), nil
 	}
 	return TrimOutputPathFilename(rendered, opts.TrimFilenames), nil
+}
+
+func defaultOutputFilenameFromTemplate(info *VideoInfo, ext string, itag string, selected []FormatInfo, opts OutputFilenameOptions) string {
+	formatTokens := SelectedFormatTemplateTokens(selected)
+	return RenderOutputTemplate(DefaultOutputTemplate, OutputTemplateData{
+		VideoID:           info.ID,
+		Title:             info.Title,
+		Uploader:          info.Author,
+		UploaderID:        info.ChannelID,
+		Channel:           info.Author,
+		ChannelID:         info.ChannelID,
+		Ext:               ext,
+		Itag:              itag,
+		FormatID:          itag,
+		Resolution:        formatTokens.Resolution,
+		Width:             formatTokens.Width,
+		Height:            formatTokens.Height,
+		FPS:               formatTokens.FPS,
+		TBR:               formatTokens.TBR,
+		VBR:               formatTokens.VBR,
+		ABR:               formatTokens.ABR,
+		Protocol:          formatTokens.Protocol,
+		VCodec:            formatTokens.VCodec,
+		ACodec:            formatTokens.ACodec,
+		UploadDate:        templateUploadDate(info),
+		ReleaseDate:       templateReleaseDate(info),
+		Timestamp:         templateTimestamp(info),
+		RestrictFilenames: opts.RestrictFilenames,
+	})
 }
 
 // IsMergedSelection reports whether selected formats represent video+audio merge output.

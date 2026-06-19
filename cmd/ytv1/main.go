@@ -140,10 +140,17 @@ func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
 	}
 	lp := newLifecyclePrinter(time.Now)
 	verboseLifecyclePrinter = lp
+	cfg.Logger = verboseLogger{}
 	cfg.OnExtractionEvent = func(evt client.ExtractionEvent) {
 		fmt.Println(lp.formatExtractionEvent(evt))
 	}
 	cfg.OnDownloadEvent = func(evt client.DownloadEvent) {
 		fmt.Println(lp.formatDownloadEvent(evt))
 	}
+}
+
+type verboseLogger struct{}
+
+func (verboseLogger) Warnf(format string, args ...any) {
+	fmt.Printf("[warn] "+format+"\n", args...)
 }
