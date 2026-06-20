@@ -48,6 +48,63 @@ func TestFormatDownloadEvent(t *testing.T) {
 	}
 }
 
+func TestCompareReleaseTags(t *testing.T) {
+	if compareReleaseTags("v1.2.3", "v1.2.4") >= 0 {
+		t.Fatalf("expected v1.2.3 to be older than v1.2.4")
+	}
+	if compareReleaseTags("1.3.0", "v1.2.9") <= 0 {
+		t.Fatalf("expected 1.3.0 to be newer than v1.2.9")
+	}
+	if compareReleaseTags("dev", "v9.9.9") != 0 {
+		t.Fatalf("dev builds should not compare as outdated")
+	}
+}
+
+func TestCheckAndPrintOutdated(t *testing.T) {
+	prevVersion := currentVersion
+	prevFetch := httpGetLatestRelease
+	defer func() {
+		currentVersion = prevVersion
+		httpGetLatestRelease = prevFetch
+	}()
+	currentVersion = "v1.0.0"
+	httpGetLatestRelease = func(context.Context) (string, error) {
+		return "v1.1.0", nil
+	}
+
+	var buf bytes.Buffer
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	checkAndPrintOutdated(cli.Options{})
+	w.Close()
+	os.Stdout = prevStdout
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "ytv1 is outdated") || !strings.Contains(got, "current=v1.0.0") || !strings.Contains(got, "latest=v1.1.0") {
+		t.Fatalf("outdated output=%q", got)
+	}
+}
+
+func TestFormatDownloadProgress(t *testing.T) {
+	got := formatDownloadProgress(client.DownloadProgressEvent{
+		Part:           "video",
+		Downloaded:     50 * 1024 * 1024,
+		Total:          100 * 1024 * 1024,
+		BytesPerSecond: 10 * 1000 * 1000,
+	})
+	for _, want := range []string{"[download] video", "50.0%", "80.00Mbps", "50.0MiB/100.0MiB"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress output missing %q in %q", want, got)
+		}
+	}
+}
+
 func TestLifecyclePrinter_ExtractionElapsed(t *testing.T) {
 	clock := []time.Time{
 		time.Unix(0, 0),

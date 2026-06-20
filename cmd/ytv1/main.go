@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,11 +19,15 @@ import (
 )
 
 var verboseLifecyclePrinter *lifecyclePrinter
+var activeProgressPrinter *cliProgressPrinter
 var activeDownloadArchive *client.DownloadArchive
 var activeDownloadLimit *downloadLimit
 var sleepBeforeRequestFunc = time.Sleep
 var sleepBeforeDownloadFunc = time.Sleep
 var sleepBeforeSubtitleFunc = time.Sleep
+var latestReleaseURL = "https://api.github.com/repos/famomatic/ytv1/releases/latest"
+var currentVersion = "dev"
+var httpGetLatestRelease = defaultHTTPGetLatestRelease
 
 var errBreakOnExisting = errors.New("break on existing archive entry")
 var errMaxDownloadsReached = errors.New("maximum number of downloads reached")
@@ -43,6 +52,10 @@ func main() {
 }
 
 func run(opts cli.Options) int {
+	if opts.Version {
+		fmt.Println(versionString())
+		return exitCodeSuccess
+	}
 	if len(opts.URLs) == 0 {
 		err := fmt.Errorf("%w: no input URLs provided", client.ErrInvalidInput)
 		if opts.PrintJSON {
@@ -75,6 +88,7 @@ func run(opts cli.Options) int {
 			activeDownloadLimit = nil
 		}()
 	}
+	checkAndPrintOutdated(opts)
 	attachLifecycleHandlers(&cfg, opts)
 	c := client.New(cfg)
 	ctx := context.Background()
@@ -135,22 +149,139 @@ func processInputsWithExitCode(
 }
 
 func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
-	if !opts.Verbose {
-		return
-	}
 	lp := newLifecyclePrinter(time.Now)
 	verboseLifecyclePrinter = lp
-	cfg.Logger = verboseLogger{}
+	activeProgressPrinter = nil
+	if shouldPrintHumanText(opts) && !opts.NoWarnings {
+		cfg.Logger = cliLogger{}
+	}
+	if shouldPrintProgressText(opts) {
+		activeProgressPrinter = newCLIProgressPrinter(opts)
+		cfg.OnDownloadProgress = activeProgressPrinter.Print
+	}
+	if !shouldPrintHumanText(opts) {
+		return
+	}
 	cfg.OnExtractionEvent = func(evt client.ExtractionEvent) {
-		fmt.Println(lp.formatExtractionEvent(evt))
+		if opts.Verbose {
+			fmt.Println(lp.formatExtractionEvent(evt))
+			return
+		}
+		if isBasicExtractionEvent(evt) {
+			fmt.Println(formatExtractionEvent(evt))
+		}
 	}
 	cfg.OnDownloadEvent = func(evt client.DownloadEvent) {
-		fmt.Println(lp.formatDownloadEvent(evt))
+		if opts.Verbose || isBasicDownloadEvent(evt) {
+			fmt.Println(lp.formatDownloadEvent(evt))
+		}
 	}
 }
 
-type verboseLogger struct{}
+type cliLogger struct{}
 
-func (verboseLogger) Warnf(format string, args ...any) {
+func (cliLogger) Warnf(format string, args ...any) {
 	fmt.Printf("[warn] "+format+"\n", args...)
+}
+
+func isBasicExtractionEvent(evt client.ExtractionEvent) bool {
+	if evt.Stage != "player_api_json" {
+		return false
+	}
+	return evt.Phase == "start" || evt.Phase == "success" || evt.Phase == "failure"
+}
+
+func isBasicDownloadEvent(evt client.DownloadEvent) bool {
+	return evt.Phase == "destination" || evt.Phase == "failure"
+}
+
+func versionString() string {
+	return "ytv1 " + strings.TrimSpace(currentVersion)
+}
+
+func checkAndPrintOutdated(opts cli.Options) {
+	if !shouldPrintHumanText(opts) || opts.NoWarnings {
+		return
+	}
+	if _, ok := parseReleaseTag(currentVersion); !ok {
+		return
+	}
+	latest, err := httpGetLatestRelease(context.Background())
+	if err != nil || strings.TrimSpace(latest) == "" {
+		return
+	}
+	if compareReleaseTags(currentVersion, latest) < 0 {
+		fmt.Printf("[warn] ytv1 is outdated: current=%s latest=%s\n", currentVersion, latest)
+	}
+}
+
+func defaultHTTPGetLatestRelease(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestReleaseURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "ytv1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("github release check failed: status=%d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(payload.TagName), nil
+}
+
+func compareReleaseTags(current, latest string) int {
+	c, cok := parseReleaseTag(current)
+	l, lok := parseReleaseTag(latest)
+	if !cok || !lok {
+		return 0
+	}
+	for i := 0; i < len(c) && i < len(l); i++ {
+		if c[i] < l[i] {
+			return -1
+		}
+		if c[i] > l[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func parseReleaseTag(tag string) ([3]int, bool) {
+	var out [3]int
+	s := strings.TrimSpace(strings.TrimPrefix(tag, "v"))
+	if s == "" || s == "dev" {
+		return out, false
+	}
+	re := regexp.MustCompile(`^(\d+)(?:\.(\d+))?(?:\.(\d+))?`)
+	matches := re.FindStringSubmatch(s)
+	if len(matches) == 0 {
+		return out, false
+	}
+	for i := 1; i <= 3; i++ {
+		if matches[i] == "" {
+			continue
+		}
+		v, err := strconv.Atoi(matches[i])
+		if err != nil {
+			return out, false
+		}
+		out[i-1] = v
+	}
+	return out, true
 }

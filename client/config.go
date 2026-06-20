@@ -118,6 +118,10 @@ type Config struct {
 	// If nil, download events are suppressed.
 	OnDownloadEvent func(DownloadEvent)
 
+	// OnDownloadProgress receives byte-level direct media download progress (optional).
+	// If nil, progress events are suppressed.
+	OnDownloadProgress func(DownloadProgressEvent)
+
 	// KeepIntermediateFiles keeps intermediate video/audio files after merge download.
 	// Default is false (remove intermediates on successful/failed merge attempt).
 	KeepIntermediateFiles bool

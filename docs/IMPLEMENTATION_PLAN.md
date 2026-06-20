@@ -33,7 +33,7 @@
 ## 1. Current Snapshot (Update Every Session)
 
 ### 1.1 Session Date
-- `2026-06-20`
+- `2026-06-21`
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -195,6 +195,7 @@
 - B135 completion increment landed: installed ffmpeg in the runtime environment, fixed direct media downloads to send source-client-aware headers, switched fresh direct downloads to Range-first requests with full-GET fallback, removed MWEB from default unauthenticated extraction, and added default-download 403 recovery to retry a progressive single-file fallback (with one refreshed extraction for stale/bad googlevideo hosts) while preserving explicit selector/itag failures.
 - B136 completion increment landed: aligned Android VR with current yt-dlp's stable `1.65.10` profile to avoid SABR-only Android VR responses, disabled implicit direct-media chunked concurrency unless callers explicitly request it, and verified default `8IY44RZHyw8` download produces a merged VP9 `3840x2160` file.
 - B137 completion increment landed: ported yt-dlp's YouTube HTTPS download chunk policy (`10 MiB` sequential Range chunks) into the package direct downloader, with access-denied fallback to single-stream rewrite, bringing `8IY44RZHyw8` 4K download+merge time to roughly yt-dlp parity while preserving client-level defaults.
+- B138 completion increment landed: added release-build GitHub latest-release tag outdated warnings, package-level direct download progress callbacks, CLI progress output with percentage/Mbps/current-total size, and default human-mode client attempt/download destination/warning logs while preserving quiet/JSON suppression.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -335,6 +336,7 @@
 136. `[x]` B135. Default download 403 recovery and ffmpeg runtime verification
 137. `[x]` B136. Android VR stable profile and default 4K download verification
 138. `[x]` B137. yt-dlp-style YouTube HTTPS chunk speed parity
+139. `[x]` B138. CLI operator visibility: release tag outdated check, progress metrics, and default client attempt logs
 
 ---
 
@@ -2726,6 +2728,7 @@ Cycle B is complete only when all are true:
 - `2026-06-21`: Completed `B135` after installing ffmpeg and reproducing default download failures from current YouTube direct media `403` responses; media requests now keep source-client-aware headers, fresh direct downloads try Range first, default unauthenticated extraction uses `android_vr, web_safari, ios` (MWEB removed), default selections retry a progressive single-file fallback on download `403` with one refreshed extraction, failed merge intermediates clean up `.part` files, and live `8IY44RZHyw8` default download completes via fallback when iOS high-quality URLs are rejected.
 - `2026-06-21`: Completed `B136` by validating latest `yt-dlp 2026.06.09` uses Android VR `1.65.10` for `8IY44RZHyw8` 4K `315+251` URLs, changing ytv1's Android VR profile from `1.71.26` to `1.65.10`, disabling implicit direct-media chunked concurrency that caused YouTube GVS `401` responses on 4K chunk requests, and verifying default ytv1 download completes as VP9 `3840x2160` (`513278259` bytes).
 - `2026-06-21`: Completed `B137` by comparing latest yt-dlp's YouTube extractor/downloader behavior (`downloader_options.http_chunk_size = 10 << 20`, sequential HTTP Range chunks), changing ytv1 direct downloads to default to `10 MiB` sequential chunks with `401/403` fallback to single-stream rewrite, and verifying `8IY44RZHyw8` 4K download+merge completes as VP9 `3840x2160` in `0:05.57` versus yt-dlp's `0:05.10` on the same host.
+- `2026-06-21`: Completed `B138` by adding `--version` parsing, release-build outdated warnings based on GitHub latest release `tag_name`, package-level `OnDownloadProgress` callbacks for direct media downloads, CLI progress rendering with percent/Mbps/current-total size, and default human-mode extraction client attempt/download destination/warning logs; verified with a live `8IY44RZHyw8 -f 18 --newline` CLI download and `go test ./...`.
 
 ---
 

@@ -169,6 +169,9 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		return err
 	}
 	res, err := c.Download(ctx, url, downloadOpts)
+	if activeProgressPrinter != nil {
+		activeProgressPrinter.Finish()
+	}
 	if err != nil {
 		return err
 	}

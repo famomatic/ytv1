@@ -84,6 +84,45 @@ func TestDownloadStream_UsesSourceClientMediaHeaders(t *testing.T) {
 	}
 }
 
+func TestDownloadStream_EmitsProgress(t *testing.T) {
+	payload := []byte("payload")
+	var events []DownloadProgressEvent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(payload)-1, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	c := &Client{config: Config{
+		HTTPClient:        srv.Client(),
+		DownloadTransport: DownloadTransportConfig{EnableChunked: false},
+		OnDownloadProgress: func(evt DownloadProgressEvent) {
+			events = append(events, evt)
+		},
+	}}
+	outputPath := filepath.Join(t.TempDir(), "out.bin")
+	err := c.downloadStream(context.Background(), "video-id", srv.URL, outputPath, FormatInfo{
+		Itag:     18,
+		URL:      srv.URL,
+		Protocol: "https",
+	}, false, false)
+	if err != nil {
+		t.Fatalf("downloadStream() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("expected progress events")
+	}
+	last := events[len(events)-1]
+	if last.VideoID != "video-id" || last.Itag != 18 || last.Downloaded != int64(len(payload)) || last.Total != int64(len(payload)) {
+		t.Fatalf("last progress event=%+v", last)
+	}
+}
+
 func TestShouldRetryDefaultWithFallbackSingleOnDownload403(t *testing.T) {
 	err := wrapDownloadFailure(&downloadHTTPStatusError{StatusCode: http.StatusForbidden}, AttemptDetail{
 		HTTPStatus: http.StatusForbidden,
