@@ -99,16 +99,16 @@ func TestShouldRetryDefaultWithFallbackSingleOnDownload403(t *testing.T) {
 	}
 }
 
-func TestNormalizeDownloadTransportConfig_DoesNotEnableChunkedByDefault(t *testing.T) {
+func TestNormalizeDownloadTransportConfig_DefaultsToYTDLPStyleSequentialChunks(t *testing.T) {
 	cfg := normalizeDownloadTransportConfig(DownloadTransportConfig{})
-	if cfg.EnableChunked {
-		t.Fatalf("EnableChunked=true, want false by default")
+	if !cfg.EnableChunked {
+		t.Fatalf("EnableChunked=false, want true by default")
 	}
-	if cfg.ChunkSize <= 0 {
-		t.Fatalf("ChunkSize=%d, want default chunk size retained for explicit chunked use", cfg.ChunkSize)
+	if cfg.ChunkSize != 10<<20 {
+		t.Fatalf("ChunkSize=%d, want 10MiB", cfg.ChunkSize)
 	}
-	if cfg.MaxConcurrency <= 0 {
-		t.Fatalf("MaxConcurrency=%d, want default concurrency retained for explicit chunked use", cfg.MaxConcurrency)
+	if cfg.MaxConcurrency != 1 {
+		t.Fatalf("MaxConcurrency=%d, want sequential chunk downloads", cfg.MaxConcurrency)
 	}
 }
 

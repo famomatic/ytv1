@@ -592,7 +592,7 @@ func downloadURLToPathWithHeadersAndPart(
 		switch {
 		case err == nil:
 			return n, nil
-		case errors.Is(err, errRangeNotSupported), errors.Is(err, errChunkProbeFailed):
+		case errors.Is(err, errRangeNotSupported), errors.Is(err, errChunkProbeFailed), isChunkedMediaAccessDenied(err):
 			// fall through to full rewrite path
 		default:
 			return 0, err
@@ -960,13 +960,16 @@ func normalizeDownloadTransportConfig(cfg DownloadTransportConfig) effectiveDown
 	}
 	chunkSize := cfg.ChunkSize
 	if chunkSize <= 0 {
-		chunkSize = 1 << 20 // 1 MiB
+		chunkSize = 10 << 20 // 10 MiB, matching yt-dlp's YouTube HTTPS chunk size
 	}
 	maxConcurrency := cfg.MaxConcurrency
 	if maxConcurrency <= 0 {
-		maxConcurrency = 4
+		maxConcurrency = 1
 	}
 	enableChunked := cfg.EnableChunked
+	if !enableChunked && cfg.ChunkSize == 0 && cfg.MaxConcurrency == 0 {
+		enableChunked = true
+	}
 	rateLimit := cfg.RateLimitBytesPerSecond
 	if rateLimit < 0 {
 		rateLimit = 0
@@ -1000,6 +1003,11 @@ func normalizeDownloadTransportConfig(cfg DownloadTransportConfig) effectiveDown
 		FileAccessRetries:           normalizeFileAccessRetries(cfg.FileAccessRetries),
 		FileAccessBackoff:           cfg.FileAccessBackoff,
 	}
+}
+
+func isChunkedMediaAccessDenied(err error) bool {
+	status := downloadFailureHTTPStatus(err)
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func (c effectiveDownloadTransportConfig) backoffFor(attempt int) time.Duration {
