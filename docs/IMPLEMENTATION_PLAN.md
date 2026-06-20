@@ -198,6 +198,7 @@
 - B138 completion increment landed: added release-build GitHub latest-release tag outdated warnings, package-level direct download progress callbacks, CLI progress output with percentage/Mbps/current-total size, and default human-mode client attempt/download destination/warning logs while preserving quiet/JSON suppression.
 - B139 completion increment landed: replaced plain progress text with a cleaner single-line refreshing progress bar (`[####----]`) showing part, percent, current/total size, Mbps, and ETA, with duplicate completion suppression and clean log handoff before lifecycle/warning lines.
 - B140 completion increment landed: progress output now collapses to one final progress line when stdout is not an interactive terminal, uses ANSI clear-line refresh plus a compact bar for interactive terminals, and avoids captured/piped output that appears as many refresh lines.
+- B141 completion increment landed: interactive progress finish now clears the active progress line instead of leaving a final duplicated-looking 100% line before subsequent status output, while captured/non-TTY output still retains a single final progress line.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -341,6 +342,7 @@
 139. `[x]` B138. CLI operator visibility: release tag outdated check, progress metrics, and default client attempt logs
 140. `[x]` B139. Polished refreshing progress bar UX
 141. `[x]` B140. Single-line progress behavior for captured/non-TTY output
+142. `[x]` B141. Clear interactive progress line on completion
 
 ---
 
@@ -2735,6 +2737,7 @@ Cycle B is complete only when all are true:
 - `2026-06-21`: Completed `B138` by adding `--version` parsing, release-build outdated warnings based on GitHub latest release `tag_name`, package-level `OnDownloadProgress` callbacks for direct media downloads, CLI progress rendering with percent/Mbps/current-total size, and default human-mode extraction client attempt/download destination/warning logs; verified with a live `8IY44RZHyw8 -f 18 --newline` CLI download and `go test ./...`.
 - `2026-06-21`: Completed `B139` by replacing the CLI progress text with a single-line refreshing ASCII progress bar, adding ETA and duplicate completion suppression, finishing active progress lines before lifecycle/warning logs, and verifying with a live `8IY44RZHyw8 -f 18` download plus `go test ./...`.
 - `2026-06-21`: Completed `B140` by detecting non-interactive stdout, suppressing intermediate refresh frames in captured/piped output, emitting only the final 100% progress line outside TTYs, using ANSI clear-line refresh and a compact progress bar in interactive terminals, preserving `--newline` behavior, and verifying with a live piped `8IY44RZHyw8 -f 18` download plus `go test ./...`.
+- `2026-06-21`: Completed `B141` by changing interactive progress `Finish()` to clear the active line instead of emitting a newline that can look like a repeated completed progress row, adding regression coverage for the clear-line sequence, and verifying with `go test ./...`; live media verification is currently blocked by YouTube `LOGIN_REQUIRED` bot confirmation on the test video.
 
 ---
 

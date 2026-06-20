@@ -159,6 +159,44 @@ func TestProgressPrinter_NonInteractivePrintsOnlyFinalLine(t *testing.T) {
 	}
 }
 
+func TestProgressPrinter_InteractiveFinishClearsLine(t *testing.T) {
+	var buf bytes.Buffer
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = prevStdout
+	}()
+
+	printer := &cliProgressPrinter{
+		interactive: true,
+		completed:   make(map[string]bool),
+	}
+	printer.Print(client.DownloadProgressEvent{
+		Path:           "out.webm",
+		Part:           "video",
+		Downloaded:     50,
+		Total:          100,
+		BytesPerSecond: 10,
+	})
+	printer.Finish()
+	w.Close()
+	os.Stdout = prevStdout
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "\n") {
+		t.Fatalf("interactive Finish output=%q, want no newline", got)
+	}
+	if !strings.Contains(got, "\r\x1b[2K") {
+		t.Fatalf("interactive Finish output=%q, want clear-line sequence", got)
+	}
+}
+
 func withProgressDownloaded(evt client.DownloadProgressEvent, downloaded int64) client.DownloadProgressEvent {
 	evt.Downloaded = downloaded
 	return evt

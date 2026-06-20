@@ -71,7 +71,11 @@ func (p *cliProgressPrinter) Finish() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.active && !p.newline {
-		fmt.Println()
+		if p.interactive {
+			fmt.Print("\r\033[2K")
+		} else {
+			fmt.Println()
+		}
 	}
 	p.active = false
 	p.lastLen = 0
