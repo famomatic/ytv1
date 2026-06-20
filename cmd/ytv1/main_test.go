@@ -98,10 +98,25 @@ func TestFormatDownloadProgress(t *testing.T) {
 		Total:          100 * 1024 * 1024,
 		BytesPerSecond: 10 * 1000 * 1000,
 	})
-	for _, want := range []string{"[download] video", "50.0%", "80.00Mbps", "50.0MiB/100.0MiB"} {
+	for _, want := range []string{"[download] video", "[##############--------------]", "50.0%", "80.00Mbps", "50.0MiB/100.0MiB", "eta 00:06"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("progress output missing %q in %q", want, got)
 		}
+	}
+}
+
+func TestRenderProgressBarAndETA(t *testing.T) {
+	if got := renderProgressBar(0.25, true, 8); got != "[##------]" {
+		t.Fatalf("renderProgressBar()=%q, want [##------]", got)
+	}
+	if got := renderProgressBar(0, false, 4); got != "[----]" {
+		t.Fatalf("unknown total bar=%q, want [----]", got)
+	}
+	if got := formatETA(25, 100, 10); got != "00:08" {
+		t.Fatalf("formatETA()=%q, want 00:08", got)
+	}
+	if got := formatETA(100, 100, 10); got != "--:--" {
+		t.Fatalf("complete ETA=%q, want --:--", got)
 	}
 }
 

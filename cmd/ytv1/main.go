@@ -164,15 +164,18 @@ func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
 	}
 	cfg.OnExtractionEvent = func(evt client.ExtractionEvent) {
 		if opts.Verbose {
+			finishActiveProgressLine()
 			fmt.Println(lp.formatExtractionEvent(evt))
 			return
 		}
 		if isBasicExtractionEvent(evt) {
+			finishActiveProgressLine()
 			fmt.Println(formatExtractionEvent(evt))
 		}
 	}
 	cfg.OnDownloadEvent = func(evt client.DownloadEvent) {
 		if opts.Verbose || isBasicDownloadEvent(evt) {
+			finishActiveProgressLine()
 			fmt.Println(lp.formatDownloadEvent(evt))
 		}
 	}
@@ -181,7 +184,14 @@ func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
 type cliLogger struct{}
 
 func (cliLogger) Warnf(format string, args ...any) {
+	finishActiveProgressLine()
 	fmt.Printf("[warn] "+format+"\n", args...)
+}
+
+func finishActiveProgressLine() {
+	if activeProgressPrinter != nil {
+		activeProgressPrinter.Finish()
+	}
 }
 
 func isBasicExtractionEvent(evt client.ExtractionEvent) bool {

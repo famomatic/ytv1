@@ -10,13 +10,18 @@ import (
 )
 
 type cliProgressPrinter struct {
-	mu      sync.Mutex
-	newline bool
-	active  bool
+	mu        sync.Mutex
+	newline   bool
+	active    bool
+	lastLen   int
+	completed map[string]bool
 }
 
 func newCLIProgressPrinter(opts cli.Options) *cliProgressPrinter {
-	return &cliProgressPrinter{newline: opts.NewlineProgress}
+	return &cliProgressPrinter{
+		newline:   opts.NewlineProgress,
+		completed: make(map[string]bool),
+	}
 }
 
 func (p *cliProgressPrinter) Print(evt client.DownloadProgressEvent) {
@@ -29,12 +34,25 @@ func (p *cliProgressPrinter) Print(evt client.DownloadProgressEvent) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	key := evt.Path + "|" + evt.Part
+	complete := evt.Total > 0 && evt.Downloaded >= evt.Total
+	if complete && p.completed[key] {
+		return
+	}
+	if complete {
+		p.completed[key] = true
+	}
 	if p.newline {
 		fmt.Println(line)
 		return
 	}
-	fmt.Printf("\r%-120s", line)
+	padding := ""
+	if p.lastLen > len(line) {
+		padding = strings.Repeat(" ", p.lastLen-len(line))
+	}
+	fmt.Printf("\r%s%s", line, padding)
 	p.active = true
+	p.lastLen = len(line)
 }
 
 func (p *cliProgressPrinter) Finish() {
@@ -47,6 +65,7 @@ func (p *cliProgressPrinter) Finish() {
 		fmt.Println()
 	}
 	p.active = false
+	p.lastLen = 0
 }
 
 func formatDownloadProgress(evt client.DownloadProgressEvent) string {
@@ -58,21 +77,51 @@ func formatDownloadProgress(evt client.DownloadProgressEvent) string {
 		part = "media"
 	}
 	percent := "--.-%"
+	fraction := float64(0)
 	if evt.Total > 0 {
-		percent = fmt.Sprintf("%5.1f%%", float64(evt.Downloaded)*100/float64(evt.Total))
+		fraction = float64(evt.Downloaded) / float64(evt.Total)
+		if fraction < 0 {
+			fraction = 0
+		}
+		if fraction > 1 {
+			fraction = 1
+		}
+		percent = fmt.Sprintf("%5.1f%%", fraction*100)
 	}
 	total := "?"
 	if evt.Total > 0 {
 		total = formatBytes(evt.Total)
 	}
 	return fmt.Sprintf(
-		"[download] %s %s at %s %s/%s",
+		"[download] %-5s %s %s %s/%s %s eta %s",
 		part,
+		renderProgressBar(fraction, evt.Total > 0, 28),
 		percent,
-		formatMbps(evt.BytesPerSecond),
 		formatBytes(evt.Downloaded),
 		total,
+		formatMbps(evt.BytesPerSecond),
+		formatETA(evt.Downloaded, evt.Total, evt.BytesPerSecond),
 	)
+}
+
+func renderProgressBar(fraction float64, knownTotal bool, width int) string {
+	if width <= 0 {
+		width = 1
+	}
+	if !knownTotal {
+		return "[" + strings.Repeat("-", width) + "]"
+	}
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	filled := int(fraction*float64(width) + 0.5)
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", width-filled) + "]"
 }
 
 func formatBytes(v int64) string {
@@ -98,4 +147,24 @@ func formatMbps(bytesPerSecond int64) string {
 		return "0.00Mbps"
 	}
 	return fmt.Sprintf("%.2fMbps", float64(bytesPerSecond)*8/1000/1000)
+}
+
+func formatETA(downloaded, total, bytesPerSecond int64) string {
+	if total <= 0 || bytesPerSecond <= 0 || downloaded >= total {
+		return "--:--"
+	}
+	remaining := total - downloaded
+	seconds := remaining / bytesPerSecond
+	if remaining%bytesPerSecond != 0 {
+		seconds++
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	minutes := seconds / 60
+	seconds = seconds % 60
+	if minutes > 99 {
+		return ">99m"
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }
