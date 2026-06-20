@@ -83,7 +83,7 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 				SignatureCipher:  f.SignatureCipher,
 				Cipher:           f.Cipher,
 				IsDRM:            len(f.DRMFamilies) > 0,
-				SourceClient:     resp.SourceClient,
+				SourceClient:     firstNonEmpty(f.SourceClient, resp.SourceClient),
 				AudioSampleRate:  parseInt(f.AudioSampleRate),
 				ApproxDurationMs: parseInt64(f.ApproxDurationMs),
 				ContentLength:    parseInt64(f.ContentLength),

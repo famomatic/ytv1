@@ -19,7 +19,7 @@ func TestDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
 		profiles[2].ID,
 		profiles[3].ID,
 	}
-	want := []string{"ios", "mweb", "android_vr", "web_safari"}
+	want := []string{"android_vr", "web_safari", "ios", "mweb"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("order[%d] = %q, want %q", i, got[i], want[i])

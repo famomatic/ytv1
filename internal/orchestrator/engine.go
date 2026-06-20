@@ -148,10 +148,13 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 	pending := make(map[int]orderedResult, len(clients))
 	nextOrder := 0
 	attempts := make([]AttemptError, 0, len(clients))
+	successes := make([]*innertube.PlayerResponse, 0, len(clients))
 
-	// Deterministic client-order selection:
-	// keep parallel requests for latency, but only commit a success when all
-	// earlier-order clients have already completed (success/failure).
+	// Deterministic client-order merge:
+	// keep parallel requests for latency, but process results in configured
+	// order and merge successful streaming formats instead of returning the
+	// first successful client. This mirrors yt-dlp's multi-client extraction
+	// behavior while preserving predictable metadata precedence.
 	for res := range results {
 		pending[res.order] = orderedResult{
 			order:  res.order,
@@ -169,9 +172,10 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 
 			if current.err == nil {
 				current.resp.SourceClient = current.client
+				tagStreamingDataSourceClient(current.resp, current.client)
 				e.emitExtractionEvent("player_api_json", "success", current.client, "")
-				cancel()
-				return current.resp, attempts
+				successes = append(successes, current.resp)
+				continue
 			}
 			e.emitExtractionEvent("player_api_json", "failure", current.client, current.err.Error())
 			attempts = append(attempts, AttemptError{
@@ -180,7 +184,76 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 			})
 		}
 	}
+	if len(successes) > 0 {
+		return mergePlayerResponses(successes), attempts
+	}
 	return nil, attempts
+}
+
+func tagStreamingDataSourceClient(resp *innertube.PlayerResponse, client string) {
+	if resp == nil {
+		return
+	}
+	for i := range resp.StreamingData.Formats {
+		resp.StreamingData.Formats[i].SourceClient = client
+	}
+	for i := range resp.StreamingData.AdaptiveFormats {
+		resp.StreamingData.AdaptiveFormats[i].SourceClient = client
+	}
+}
+
+func mergePlayerResponses(responses []*innertube.PlayerResponse) *innertube.PlayerResponse {
+	if len(responses) == 0 {
+		return nil
+	}
+	merged := responses[0]
+	if merged == nil {
+		return nil
+	}
+	formatIndex := make(map[int]int, len(merged.StreamingData.Formats))
+	for i, f := range merged.StreamingData.Formats {
+		if f.Itag > 0 {
+			formatIndex[f.Itag] = i
+		}
+	}
+	adaptiveIndex := make(map[int]int, len(merged.StreamingData.AdaptiveFormats))
+	for i, f := range merged.StreamingData.AdaptiveFormats {
+		if f.Itag > 0 {
+			adaptiveIndex[f.Itag] = i
+		}
+	}
+	appendOrReplace := func(dst *[]innertube.Format, index map[int]int, src []innertube.Format) {
+		for _, f := range src {
+			if f.Itag > 0 {
+				if existingIndex, ok := index[f.Itag]; ok {
+					if preferMergedFormat(f, (*dst)[existingIndex]) {
+						(*dst)[existingIndex] = f
+					}
+					continue
+				}
+				index[f.Itag] = len(*dst)
+			}
+			*dst = append(*dst, f)
+		}
+	}
+	for _, resp := range responses[1:] {
+		if resp == nil {
+			continue
+		}
+		appendOrReplace(&merged.StreamingData.Formats, formatIndex, resp.StreamingData.Formats)
+		appendOrReplace(&merged.StreamingData.AdaptiveFormats, adaptiveIndex, resp.StreamingData.AdaptiveFormats)
+		if merged.StreamingData.DashManifestURL == "" {
+			merged.StreamingData.DashManifestURL = resp.StreamingData.DashManifestURL
+		}
+		if merged.StreamingData.HlsManifestURL == "" {
+			merged.StreamingData.HlsManifestURL = resp.StreamingData.HlsManifestURL
+		}
+	}
+	return merged
+}
+
+func preferMergedFormat(candidate innertube.Format, existing innertube.Format) bool {
+	return strings.TrimSpace(existing.URL) == "" && strings.TrimSpace(candidate.URL) != ""
 }
 
 func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innertube.ClientProfile {

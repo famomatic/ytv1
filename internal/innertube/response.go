@@ -139,6 +139,7 @@ type StreamingData struct {
 }
 
 type Format struct {
+	SourceClient     string   `json:"-"`
 	Itag             int      `json:"itag"`
 	URL              string   `json:"url"`
 	MimeType         string   `json:"mimeType"`
