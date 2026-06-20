@@ -119,19 +119,68 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 
 	if len(selected) == 1 {
 		res, err := c.downloadSingle(ctx, videoID, info.Title, info.Author, selected[0], options.OutputPath, options)
-		if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
-			c.warnf("challenge solve incomplete; retrying with fallback single-file format")
-			return c.downloadFallbackSingle(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
+		if shouldRetryDefaultWithFallbackSingle(err, options) {
+			c.warnf("selected media download failed; retrying with fallback single-file format")
+			return c.downloadFallbackSingleWithRefresh(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 		}
 		return res, err
 	}
 
 	res, err := c.downloadAndMerge(ctx, videoID, selected, options, meta)
-	if err != nil && errors.Is(err, ErrChallengeNotSolved) && options.Itag == 0 {
-		c.warnf("challenge solve incomplete during merge selection; retrying with fallback single-file format")
-		return c.downloadFallbackSingle(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
+	if shouldRetryDefaultWithFallbackSingle(err, options) {
+		c.warnf("selected media download failed during merge selection; retrying with fallback single-file format")
+		return c.downloadFallbackSingleWithRefresh(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 	}
 	return res, err
+}
+
+func shouldRetryDefaultWithFallbackSingle(err error, options DownloadOptions) bool {
+	if err == nil || options.Itag != 0 || strings.TrimSpace(options.FormatSelector) != "" {
+		return false
+	}
+	if errors.Is(err, ErrChallengeNotSolved) {
+		return true
+	}
+	return downloadFailureHTTPStatus(err) == http.StatusForbidden
+}
+
+func downloadFailureHTTPStatus(err error) int {
+	var statusErr *downloadHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode
+	}
+	var detail *DownloadFailureDetailError
+	if errors.As(err, &detail) {
+		for _, attempt := range detail.Attempts {
+			if attempt.HTTPStatus != 0 {
+				return attempt.HTTPStatus
+			}
+		}
+	}
+	return 0
+}
+
+func (c *Client) downloadFallbackSingleWithRefresh(
+	ctx context.Context,
+	videoID string,
+	title string,
+	uploader string,
+	formats []types.FormatInfo,
+	outputPath string,
+	options DownloadOptions,
+) (*DownloadResult, error) {
+	res, err := c.downloadFallbackSingle(ctx, videoID, title, uploader, formats, outputPath, options)
+	if downloadFailureHTTPStatus(err) != http.StatusForbidden {
+		return res, err
+	}
+
+	c.warnf("fallback single-file URL returned 403; refreshing extraction and retrying once")
+	c.deleteSession(videoID)
+	info, refreshErr := c.GetVideo(ctx, videoID)
+	if refreshErr != nil {
+		return nil, err
+	}
+	return c.downloadFallbackSingle(ctx, videoID, info.Title, info.Author, info.Formats, outputPath, options)
 }
 
 func (c *Client) downloadFallbackSingle(
@@ -224,6 +273,7 @@ func (c *Client) downloadSingle(ctx context.Context, videoID string, title strin
 			VideoID:        videoID,
 			SourceItag:     f.Itag,
 			SourceMimeType: f.MimeType,
+			SourceClient:   f.SourceClient,
 			AudioQuality:   options.AudioQuality,
 		}, out, c.config.RequestHeaders, c.config.DownloadTransport.RateLimitBytesPerSecond)
 		if err != nil {
@@ -313,6 +363,8 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	if err := c.downloadStream(ctx, videoID, vURL, videoPath, vidF, options.Resume, options.UsePartFiles); err != nil {
 		attempt := downloadAttemptFromFormatAndURL(vidF, vURL, err)
 		c.emitDownloadEvent("download", "failure", videoID, videoPath, formatDownloadFailureDetail(attempt))
+		c.cleanupIntermediateFile(videoID, videoPath, keepIntermediates)
+		c.cleanupIntermediateFile(videoID, videoPath+".part", keepIntermediates)
 		return nil, wrapDownloadFailure(err, attempt)
 	}
 	c.emitDownloadEvent("download", "complete", videoID, videoPath, fmt.Sprintf("bytes=%d", getFileSize(videoPath)))
@@ -328,6 +380,8 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	if err := c.downloadStream(ctx, videoID, aURL, audioPath, audF, options.Resume, options.UsePartFiles); err != nil {
 		attempt := downloadAttemptFromFormatAndURL(audF, aURL, err)
 		c.emitDownloadEvent("download", "failure", videoID, audioPath, formatDownloadFailureDetail(attempt))
+		c.cleanupIntermediateFile(videoID, audioPath, keepIntermediates)
+		c.cleanupIntermediateFile(videoID, audioPath+".part", keepIntermediates)
 		return nil, wrapDownloadFailure(err, attempt)
 	}
 	c.emitDownloadEvent("download", "complete", videoID, audioPath, fmt.Sprintf("bytes=%d", getFileSize(audioPath)))
@@ -367,7 +421,7 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 		usePartFiles,
 		c.config.DownloadTransport,
 		videoID,
-		c.config.RequestHeaders,
+		buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient),
 	)
 	return err
 }
@@ -386,7 +440,7 @@ func transcodeURLToMP3(
 	if err != nil {
 		return 0, err
 	}
-	applyMediaRequestHeaders(req, requestHeaders, meta.VideoID)
+	applyMediaRequestHeadersForSourceClient(req, requestHeaders, meta.VideoID, meta.SourceClient)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, err
@@ -844,7 +898,10 @@ func downloadURLFullRewrite(
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return 0, err
 		}
-		n, err := downloadURLToWriterOnce(ctx, httpClient, streamURL, file, videoID, requestHeaders, cfg)
+		n, err := downloadRangeOnce(ctx, httpClient, streamURL, 0, file, videoID, requestHeaders, cfg)
+		if errors.Is(err, errRangeNotSupported) {
+			n, err = downloadURLToWriterOnce(ctx, httpClient, streamURL, file, videoID, requestHeaders, cfg)
+		}
 		if err == nil {
 			return n, nil
 		}
@@ -1316,7 +1373,7 @@ func normalizedMergeOutputExt(raw string) string {
 }
 
 func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
-	headers := buildMediaRequestHeaders(c.config.RequestHeaders, videoID)
+	headers := buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient)
 	transport := downloader.TransportConfig{
 		MaxRetries:                  c.config.DownloadTransport.MaxRetries,
 		InitialBackoff:              c.config.DownloadTransport.InitialBackoff,
@@ -1381,7 +1438,7 @@ func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath
 
 func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
 	repID := fmt.Sprintf("%d", format.Itag)
-	headers := buildMediaRequestHeaders(c.config.RequestHeaders, videoID)
+	headers := buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient)
 	transport := downloader.TransportConfig{
 		MaxRetries:                  c.config.DownloadTransport.MaxRetries,
 		InitialBackoff:              c.config.DownloadTransport.InitialBackoff,

@@ -49,6 +49,56 @@ func TestDownloadURLToWriter_HTTPError(t *testing.T) {
 	}
 }
 
+func TestDownloadStream_UsesSourceClientMediaHeaders(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		if !strings.Contains(gotUA, "youtube.vr.oculus") {
+			http.Error(w, "wrong user agent", http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer srv.Close()
+
+	c := &Client{config: Config{
+		HTTPClient:        srv.Client(),
+		DownloadTransport: DownloadTransportConfig{EnableChunked: false},
+	}}
+	outputPath := filepath.Join(t.TempDir(), "out.bin")
+	err := c.downloadStream(context.Background(), "video-id", srv.URL, outputPath, FormatInfo{
+		Itag:         315,
+		URL:          srv.URL,
+		Protocol:     "https",
+		SourceClient: "android_vr",
+	}, false, false)
+	if err != nil {
+		t.Fatalf("downloadStream() error = %v, ua=%q", err, gotUA)
+	}
+	body, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got := string(body); got != "payload" {
+		t.Fatalf("downloaded body=%q, want payload", got)
+	}
+}
+
+func TestShouldRetryDefaultWithFallbackSingleOnDownload403(t *testing.T) {
+	err := wrapDownloadFailure(&downloadHTTPStatusError{StatusCode: http.StatusForbidden}, AttemptDetail{
+		HTTPStatus: http.StatusForbidden,
+	})
+	if !shouldRetryDefaultWithFallbackSingle(err, DownloadOptions{}) {
+		t.Fatalf("expected default download 403 to retry fallback single")
+	}
+	if shouldRetryDefaultWithFallbackSingle(err, DownloadOptions{Itag: 18}) {
+		t.Fatalf("explicit itag should not retry fallback single")
+	}
+	if shouldRetryDefaultWithFallbackSingle(err, DownloadOptions{FormatSelector: "315+251"}) {
+		t.Fatalf("explicit selector should not retry fallback single")
+	}
+}
+
 func TestDownloadURLToWriter_RetryOnTransientStatus(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -288,9 +338,10 @@ func TestDownloadURLToPath_ResumeFallbackToFull(t *testing.T) {
 func TestDownloadURLToPath_FullRewriteRetryTruncatesPartialAttempt(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := strings.TrimSpace(r.Header.Get("Range")); got != "" {
-			t.Fatalf("range header=%q, want empty", got)
+		if got := strings.TrimSpace(r.Header.Get("Range")); got != "bytes=0-" {
+			t.Fatalf("range header=%q, want bytes=0-", got)
 		}
+		w.WriteHeader(http.StatusPartialContent)
 		if atomic.AddInt32(&calls, 1) == 1 {
 			flusher, _ := w.(http.Flusher)
 			for i := 0; i < 8; i++ {

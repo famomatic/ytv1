@@ -83,12 +83,12 @@ func (s *defaultSelector) Select(videoID string) []innertube.ClientProfile {
 
 func (s *defaultSelector) defaultClientOrder() []string {
 	// Mirrors yt-dlp's current JS-capable bypass clients first, then keeps iOS
-	// as a package fallback for high-quality formats that are not exposed by the
-	// JS-less default pair in ytv1's extraction model.
-	// - unauthenticated: android_vr, web_safari, ios, mweb
+	// as a package fallback for high-quality direct media formats that are not
+	// exposed by the JS-capable default pair in ytv1's extraction model.
+	// - unauthenticated: android_vr, web_safari, ios
 	// - authenticated: tv_downgraded, web_safari
 	if s.preferAuthDefaults {
 		return []string{"tv_downgraded", "web_safari"}
 	}
-	return []string{"android_vr", "web_safari", "ios", "mweb"}
+	return []string{"android_vr", "web_safari", "ios"}
 }

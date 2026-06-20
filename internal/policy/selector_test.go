@@ -9,17 +9,16 @@ import (
 func TestDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
 	s := NewSelector(innertube.NewRegistry(), nil, nil, false)
 	profiles := s.Select("jNQXAC9IVRw")
-	if len(profiles) != 4 {
-		t.Fatalf("expected 4 profiles, got %d", len(profiles))
+	if len(profiles) != 3 {
+		t.Fatalf("expected 3 profiles, got %d", len(profiles))
 	}
 
 	got := []string{
 		profiles[0].ID,
 		profiles[1].ID,
 		profiles[2].ID,
-		profiles[3].ID,
 	}
-	want := []string{"android_vr", "web_safari", "ios", "mweb"}
+	want := []string{"android_vr", "web_safari", "ios"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("order[%d] = %q, want %q", i, got[i], want[i])

@@ -192,6 +192,7 @@
 - B132 completion increment landed: default downloads preserve highest video+audio selections instead of downgrading ciphered high-quality formats to low non-ciphered alternatives, missing muxer support now fails explicitly instead of silently falling back to low progressive files, default media filenames remain `%(title)s [%(id)s].%(ext)s`, live selection for `8IY44RZHyw8` resolves to 4K `315+251`, and `go test ./...` is green.
 - B133 completion increment landed: default unauthenticated extraction now prefers the iOS client before MWEB to avoid current POT-less MWEB high-quality direct media 403s, while preserving 4K `315+251` selection for `8IY44RZHyw8`; live one-byte Range checks return `206` for both selected video and audio URLs, and `go test ./...` is green.
 - B134 completion increment landed: ported current yt-dlp YouTube multi-client extraction behavior from upstream `9ae7df9a22b29e2f81825230c9bba7d444190de0` by merging successful client streaming formats in deterministic order, preserving per-format source client metadata, replacing metadata-only duplicate itags with later playable URLs, and aligning the default unauthenticated order with current yt-dlp bypass clients first while retaining iOS as a ytv1 high-quality fallback; live `8IY44RZHyw8` selection remains 4K `315+251`, selected URLs return `206`, and `go test ./...` is green.
+- B135 completion increment landed: installed ffmpeg in the runtime environment, fixed direct media downloads to send source-client-aware headers, switched fresh direct downloads to Range-first requests with full-GET fallback, removed MWEB from default unauthenticated extraction, and added default-download 403 recovery to retry a progressive single-file fallback (with one refreshed extraction for stale/bad googlevideo hosts) while preserving explicit selector/itag failures.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -329,6 +330,7 @@
 133. `[x]` B132. Default best-quality downloads and yt-dlp-style default filename
 134. `[x]` B133. Default client order mitigation for high-quality media 403s
 135. `[x]` B134. Latest yt-dlp multi-client YouTube bypass alignment
+136. `[x]` B135. Default download 403 recovery and ffmpeg runtime verification
 
 ---
 
@@ -2717,6 +2719,7 @@ Cycle B is complete only when all are true:
 - `2026-06-20`: Completed `B132` by removing the non-ciphered selection downgrade that could turn default high-quality video+audio downloads into low-quality plain streams, returning an explicit muxer-unavailable error instead of silently falling back when separate best video/audio formats require merging, preserving yt-dlp-style default output naming, validating live `8IY44RZHyw8` selection as `315+251`, and verifying with `go test ./...`.
 - `2026-06-20`: Completed `B133` by moving the default unauthenticated client order to `ios, mweb, android_vr, web_safari` after reproducing MWEB 4K direct media `403` responses and validating that the default iOS-selected `315+251` URLs for `8IY44RZHyw8` return `206` to one-byte Range requests; verified with `go test ./...`.
 - `2026-06-20`: Completed `B134` by comparing latest yt-dlp YouTube extractor commit `9ae7df9a22b29e2f81825230c9bba7d444190de0`, porting multi-client streaming format merge behavior into the Go orchestrator, preserving source-client metadata per raw format, replacing metadata-only duplicate itags with later playable URLs, changing default unauthenticated order to `android_vr, web_safari, ios, mweb`, and verifying `8IY44RZHyw8` default 4K `315+251` selection plus `206` Range responses and `go test ./...`.
+- `2026-06-21`: Completed `B135` after installing ffmpeg and reproducing default download failures from current YouTube direct media `403` responses; media requests now keep source-client-aware headers, fresh direct downloads try Range first, default unauthenticated extraction uses `android_vr, web_safari, ios` (MWEB removed), default selections retry a progressive single-file fallback on download `403` with one refreshed extraction, failed merge intermediates clean up `.part` files, and live `8IY44RZHyw8` default download completes via fallback when iOS high-quality URLs are rejected.
 
 ---
 

@@ -10,6 +10,7 @@ type MP3TranscodeMetadata struct {
 	VideoID        string
 	SourceItag     int
 	SourceMimeType string
+	SourceClient   string
 	AudioQuality   string
 }
 

@@ -561,6 +561,12 @@ func (c *Client) putSession(videoID string, session videoSession) {
 	c.evictLRULocked()
 }
 
+func (c *Client) deleteSession(videoID string) {
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+	delete(c.sessions, videoID)
+}
+
 func (c *Client) evictExpiredLocked(now time.Time) {
 	ttl := c.config.SessionCacheTTL
 	if ttl <= 0 {

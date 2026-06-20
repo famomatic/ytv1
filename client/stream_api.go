@@ -61,7 +61,7 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	if err != nil {
 		return nil, FormatInfo{}, err
 	}
-	applyMediaRequestHeaders(req, c.config.RequestHeaders, videoID)
+	applyMediaRequestHeadersForSourceClient(req, c.config.RequestHeaders, videoID, chosen.SourceClient)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, FormatInfo{}, err
