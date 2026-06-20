@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -10,17 +11,19 @@ import (
 )
 
 type cliProgressPrinter struct {
-	mu        sync.Mutex
-	newline   bool
-	active    bool
-	lastLen   int
-	completed map[string]bool
+	mu          sync.Mutex
+	newline     bool
+	interactive bool
+	active      bool
+	lastLen     int
+	completed   map[string]bool
 }
 
 func newCLIProgressPrinter(opts cli.Options) *cliProgressPrinter {
 	return &cliProgressPrinter{
-		newline:   opts.NewlineProgress,
-		completed: make(map[string]bool),
+		newline:     opts.NewlineProgress,
+		interactive: stdoutIsTerminal(),
+		completed:   make(map[string]bool),
 	}
 }
 
@@ -46,11 +49,17 @@ func (p *cliProgressPrinter) Print(evt client.DownloadProgressEvent) {
 		fmt.Println(line)
 		return
 	}
+	if !p.interactive {
+		if complete {
+			fmt.Println(line)
+		}
+		return
+	}
 	padding := ""
 	if p.lastLen > len(line) {
 		padding = strings.Repeat(" ", p.lastLen-len(line))
 	}
-	fmt.Printf("\r%s%s", line, padding)
+	fmt.Printf("\r\033[2K%s%s", line, padding)
 	p.active = true
 	p.lastLen = len(line)
 }
@@ -66,6 +75,14 @@ func (p *cliProgressPrinter) Finish() {
 	}
 	p.active = false
 	p.lastLen = 0
+}
+
+func stdoutIsTerminal() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func formatDownloadProgress(evt client.DownloadProgressEvent) string {
@@ -95,7 +112,7 @@ func formatDownloadProgress(evt client.DownloadProgressEvent) string {
 	return fmt.Sprintf(
 		"[download] %-5s %s %s %s/%s %s eta %s",
 		part,
-		renderProgressBar(fraction, evt.Total > 0, 28),
+		renderProgressBar(fraction, evt.Total > 0, 18),
 		percent,
 		formatBytes(evt.Downloaded),
 		total,

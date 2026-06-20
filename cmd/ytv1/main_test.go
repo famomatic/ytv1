@@ -98,7 +98,7 @@ func TestFormatDownloadProgress(t *testing.T) {
 		Total:          100 * 1024 * 1024,
 		BytesPerSecond: 10 * 1000 * 1000,
 	})
-	for _, want := range []string{"[download] video", "[##############--------------]", "50.0%", "80.00Mbps", "50.0MiB/100.0MiB", "eta 00:06"} {
+	for _, want := range []string{"[download] video", "[#########---------]", "50.0%", "80.00Mbps", "50.0MiB/100.0MiB", "eta 00:06"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("progress output missing %q in %q", want, got)
 		}
@@ -118,6 +118,50 @@ func TestRenderProgressBarAndETA(t *testing.T) {
 	if got := formatETA(100, 100, 10); got != "--:--" {
 		t.Fatalf("complete ETA=%q, want --:--", got)
 	}
+}
+
+func TestProgressPrinter_NonInteractivePrintsOnlyFinalLine(t *testing.T) {
+	var buf bytes.Buffer
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = prevStdout
+	}()
+
+	printer := &cliProgressPrinter{
+		interactive: false,
+		completed:   make(map[string]bool),
+	}
+	base := client.DownloadProgressEvent{
+		Path:           "out.webm",
+		Part:           "video",
+		Total:          100,
+		BytesPerSecond: 10,
+	}
+	printer.Print(withProgressDownloaded(base, 50))
+	printer.Print(withProgressDownloaded(base, 100))
+	printer.Print(withProgressDownloaded(base, 100))
+	w.Close()
+	os.Stdout = prevStdout
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	got := strings.TrimSpace(buf.String())
+	if strings.Count(buf.String(), "\n") != 1 {
+		t.Fatalf("output=%q, want exactly one final progress line", buf.String())
+	}
+	if !strings.Contains(got, "100.0%") || strings.Contains(got, "50.0%") {
+		t.Fatalf("output=%q, want only final progress", got)
+	}
+}
+
+func withProgressDownloaded(evt client.DownloadProgressEvent, downloaded int64) client.DownloadProgressEvent {
+	evt.Downloaded = downloaded
+	return evt
 }
 
 func TestLifecyclePrinter_ExtractionElapsed(t *testing.T) {
