@@ -967,13 +967,6 @@ func normalizeDownloadTransportConfig(cfg DownloadTransportConfig) effectiveDown
 		maxConcurrency = 4
 	}
 	enableChunked := cfg.EnableChunked
-	// Default to chunked transfer for direct media downloads when caller has
-	// not explicitly tuned chunking knobs. This improves throughput on servers
-	// that support byte ranges, and downloadURLToPath will gracefully fall back
-	// to single-stream mode when ranges are unsupported.
-	if !enableChunked && cfg.ChunkSize == 0 && cfg.MaxConcurrency == 0 {
-		enableChunked = true
-	}
 	rateLimit := cfg.RateLimitBytesPerSecond
 	if rateLimit < 0 {
 		rateLimit = 0

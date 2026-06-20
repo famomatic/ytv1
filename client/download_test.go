@@ -99,6 +99,19 @@ func TestShouldRetryDefaultWithFallbackSingleOnDownload403(t *testing.T) {
 	}
 }
 
+func TestNormalizeDownloadTransportConfig_DoesNotEnableChunkedByDefault(t *testing.T) {
+	cfg := normalizeDownloadTransportConfig(DownloadTransportConfig{})
+	if cfg.EnableChunked {
+		t.Fatalf("EnableChunked=true, want false by default")
+	}
+	if cfg.ChunkSize <= 0 {
+		t.Fatalf("ChunkSize=%d, want default chunk size retained for explicit chunked use", cfg.ChunkSize)
+	}
+	if cfg.MaxConcurrency <= 0 {
+		t.Fatalf("MaxConcurrency=%d, want default concurrency retained for explicit chunked use", cfg.MaxConcurrency)
+	}
+}
+
 func TestDownloadURLToWriter_RetryOnTransientStatus(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
