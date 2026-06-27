@@ -30,6 +30,23 @@ type Client struct {
 	sessions         map[string]videoSession
 	challengesMu     sync.RWMutex
 	challenges       map[string]challengeSolutions
+	// fetchLocks serializes per-video-id fetch paths (session build,
+	// player URL resolution, challenge solve) to avoid thundering-herd
+	// duplicate network requests and lost cache updates.
+	fetchLocks       *keyLock
+	fetchLocksOnce   sync.Once
+}
+
+// fetchLock returns the per-video-id lock manager, initializing it lazily
+// on first use so clients constructed directly (e.g. in tests) are still
+// race-safe without forcing every caller through NewClient.
+func (c *Client) fetchLock() *keyLock {
+	c.fetchLocksOnce.Do(func() {
+		if c.fetchLocks == nil {
+			c.fetchLocks = newKeyLock()
+		}
+	})
+	return c.fetchLocks
 }
 
 type videoSession struct {
@@ -89,6 +106,7 @@ func NewClient(config Config) *Client {
 		logger:           logger,
 		sessions:         make(map[string]videoSession),
 		challenges:       make(map[string]challengeSolutions),
+		fetchLocks:       newKeyLock(),
 	}
 }
 
@@ -110,6 +128,19 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		return nil, err
 	}
 
+	// Serialize per-video-id extraction so concurrent callers share one
+	// fetch and cache write instead of racing duplicate network calls.
+	lock, release := c.fetchLock().acquire(videoID)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
+	return c.fetchVideoOnce(ctx, videoID)
+}
+
+// fetchVideoOnce performs the actual extraction and session caching. It is
+// called while holding the per-video-id fetch lock.
+func (c *Client) fetchVideoOnce(ctx context.Context, videoID string) (*VideoInfo, error) {
 	resp, err := c.engine.GetVideoInfo(ctx, videoID)
 	if err != nil {
 		return nil, mapError(err)
@@ -246,9 +277,20 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 		return "", err
 	}
 
+	lock, release := c.fetchLock().acquire(videoID)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
+	return c.resolveStreamURLLocked(ctx, videoID, itag)
+}
+
+// resolveStreamURLLocked resolves a direct playable URL for a specific itag.
+// The caller must already hold the per-video-id fetch lock.
+func (c *Client) resolveStreamURLLocked(ctx context.Context, videoID string, itag int) (string, error) {
 	session, ok := c.getSession(videoID)
 	if !ok {
-		if _, err := c.GetVideo(ctx, videoID); err != nil {
+		if _, err := c.fetchVideoOnce(ctx, videoID); err != nil {
 			return "", err
 		}
 		session, ok = c.getSession(videoID)
@@ -349,10 +391,15 @@ func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f
 		return "", err
 	}
 
+	lock, release := c.fetchLock().acquire(videoID)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
 	if strings.TrimSpace(f.URL) != "" {
 		session, ok := c.getSession(videoID)
 		if !ok {
-			if _, err := c.GetVideo(ctx, videoID); err != nil {
+			if _, err := c.fetchVideoOnce(ctx, videoID); err != nil {
 				return "", err
 			}
 			session, ok = c.getSession(videoID)
@@ -370,7 +417,9 @@ func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f
 		return c.resolveDirectURL(ctx, f.URL, session.PlayerURL, f.SourceClient, protocolFromFormat(f))
 	}
 
-	return c.ResolveStreamURL(ctx, videoID, f.Itag)
+	// resolveSelectedFormatURL already holds the per-video-id fetch lock;
+	// call the lock-free inner path to avoid a self-reentrant deadlock.
+	return c.resolveStreamURLLocked(ctx, videoID, f.Itag)
 }
 
 func toFormatInfo(f formats.Format) FormatInfo {
@@ -614,14 +663,26 @@ func (c *Client) ensureSession(ctx context.Context, input string) (videoSession,
 	if err != nil {
 		return videoSession{}, "", err
 	}
-	session, ok := c.getSession(videoID)
-	if ok {
+
+	// Fast path: a cached session may exist without taking the fetch lock.
+	if session, ok := c.getSession(videoID); ok {
 		return session, videoID, nil
 	}
-	if _, err := c.GetVideo(ctx, videoID); err != nil {
+
+	lock, release := c.fetchLock().acquire(videoID)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check once inside the lock: another caller may have populated it.
+	if session, ok := c.getSession(videoID); ok {
+		return session, videoID, nil
+	}
+
+	if _, err := c.fetchVideoOnce(ctx, videoID); err != nil {
 		return videoSession{}, "", err
 	}
-	session, ok = c.getSession(videoID)
+	session, ok := c.getSession(videoID)
 	if !ok {
 		return videoSession{}, "", ErrChallengeNotSolved
 	}

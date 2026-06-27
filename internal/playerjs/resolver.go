@@ -25,9 +25,10 @@ type Resolver interface {
 }
 
 type defaultResolver struct {
-	client *http.Client
-	cache  Cache
-	config ResolverConfig
+	client     *http.Client
+	cache      Cache
+	config     ResolverConfig
+	fetchLocks *keyLock
 }
 
 // ResolverConfig contains externally tunable settings for player JS fetches.
@@ -54,9 +55,10 @@ func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolv
 		resolverConfig = cfg[0]
 	}
 	return &defaultResolver{
-		client: client,
-		cache:  cache,
-		config: resolverConfig,
+		client:     client,
+		cache:      cache,
+		config:     resolverConfig,
+		fetchLocks: newKeyLock(),
 	}
 }
 
@@ -66,6 +68,18 @@ func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolv
 func (r *defaultResolver) GetPlayerJS(ctx context.Context, playerURL string) (string, error) {
 	normalizedPath := r.normalizePlayerPath(playerURL)
 	cacheKey := r.playerCacheKey(normalizedPath)
+	if body, ok := r.cache.Get(cacheKey); ok {
+		return body, nil
+	}
+
+	// Serialize per-cache-key fetches so concurrent callers share one
+	// network round-trip instead of racing duplicate player JS downloads.
+	lock, release := r.fetchLocks.acquire(cacheKey)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check under the lock: another caller may have populated it.
 	if body, ok := r.cache.Get(cacheKey); ok {
 		return body, nil
 	}

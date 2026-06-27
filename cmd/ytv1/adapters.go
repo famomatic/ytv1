@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/famomatic/ytv1/client"
@@ -728,15 +729,17 @@ func recordForcedArchiveIfRequested(info *client.VideoInfo, opts cli.Options) er
 
 type downloadLimit struct {
 	Max   int
-	Count int
+	Count atomic.Int64
 }
 
 func incrementDownloadLimit() error {
 	if activeDownloadLimit == nil || activeDownloadLimit.Max <= 0 {
 		return nil
 	}
-	activeDownloadLimit.Count++
-	if activeDownloadLimit.Count >= activeDownloadLimit.Max {
+	// Atomic read-modify-write so concurrent playlist/download paths
+	// cannot lose increments once batch processing is parallelized.
+	next := activeDownloadLimit.Count.Add(1)
+	if next >= int64(activeDownloadLimit.Max) {
 		return errMaxDownloadsReached
 	}
 	return nil

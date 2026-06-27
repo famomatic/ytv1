@@ -997,6 +997,10 @@ func TestEngineEmitsPlayerAPIEventsInDeterministicStartOrder(t *testing.T) {
 		selectorStub{clients: []innertube.ClientProfile{web, mweb}},
 		innertube.Config{
 			HTTPClient: &http.Client{Transport: tr},
+			// Serialize client starts in configured order so the start-event
+			// ordering this test asserts is deterministic rather than
+			// racing on goroutine scheduling.
+			ClientHedgeDelay: 5 * time.Millisecond,
 			OnExtractionEvent: func(evt innertube.ExtractionEvent) {
 				mu.Lock()
 				defer mu.Unlock()

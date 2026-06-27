@@ -2245,8 +2245,8 @@ func TestRecordCompletedDownload_EnforcesMaxDownloads(t *testing.T) {
 	if err := recordCompletedDownload("DSYFmhjDbvs"); !errors.Is(err, errMaxDownloadsReached) {
 		t.Fatalf("second recordCompletedDownload() error = %v, want max downloads", err)
 	}
-	if activeDownloadLimit.Count != 2 {
-		t.Fatalf("download count=%d, want 2", activeDownloadLimit.Count)
+	if got := activeDownloadLimit.Count.Load(); got != 2 {
+		t.Fatalf("download count=%d, want 2", got)
 	}
 }
 
