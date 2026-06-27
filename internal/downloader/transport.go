@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 // TransportConfig controls retry/backoff behavior for downloader HTTP requests.
@@ -203,7 +205,7 @@ func readAllWithTransportConfig(ctx context.Context, r io.Reader, cfg effectiveT
 	if cfg.ThrottledRateBytesPerSecond > 0 {
 		r = throttledRateReader(ctx, r, cfg.ThrottledRateBytesPerSecond, cfg.ThrottledRateMinDuration)
 	}
-	return io.ReadAll(r)
+	return iox.ReadAllLimit(r, 100<<20) // 100 MB segment limit
 }
 
 func throttledRateReader(ctx context.Context, src io.Reader, bytesPerSecond int64, minDuration time.Duration) io.Reader {

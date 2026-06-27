@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 type Variant string
@@ -24,9 +25,10 @@ type Resolver interface {
 }
 
 type defaultResolver struct {
-	client *http.Client
-	cache  Cache
-	config ResolverConfig
+	client     *http.Client
+	cache      Cache
+	config     ResolverConfig
+	fetchLocks *keyLock
 }
 
 // ResolverConfig contains externally tunable settings for player JS fetches.
@@ -53,9 +55,10 @@ func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolv
 		resolverConfig = cfg[0]
 	}
 	return &defaultResolver{
-		client: client,
-		cache:  cache,
-		config: resolverConfig,
+		client:     client,
+		cache:      cache,
+		config:     resolverConfig,
+		fetchLocks: newKeyLock(),
 	}
 }
 
@@ -65,6 +68,18 @@ func NewResolver(client *http.Client, cache Cache, cfg ...ResolverConfig) Resolv
 func (r *defaultResolver) GetPlayerJS(ctx context.Context, playerURL string) (string, error) {
 	normalizedPath := r.normalizePlayerPath(playerURL)
 	cacheKey := r.playerCacheKey(normalizedPath)
+	if body, ok := r.cache.Get(cacheKey); ok {
+		return body, nil
+	}
+
+	// Serialize per-cache-key fetches so concurrent callers share one
+	// network round-trip instead of racing duplicate player JS downloads.
+	lock, release := r.fetchLocks.acquire(cacheKey)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check under the lock: another caller may have populated it.
 	if body, ok := r.cache.Get(cacheKey); ok {
 		return body, nil
 	}
@@ -125,7 +140,7 @@ func (r *defaultResolver) fetchPlayerJS(ctx context.Context, playerURL string) (
 		return "", fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := iox.ReadAllLimit(resp.Body, 20<<20) // 20 MB player JS limit
 	if err != nil {
 		return "", fmt.Errorf("failed to read body: %w", err)
 	}
@@ -173,7 +188,7 @@ func (r *defaultResolver) GetPlayerURL(ctx context.Context, videoID string) (str
 		return "", fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB watch page limit
 	if err != nil {
 		return "", fmt.Errorf("failed to read body: %w", err)
 	}
@@ -232,7 +247,7 @@ func (r *defaultResolver) fetchIframeAPIPlayerURL(ctx context.Context, baseURL s
 	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB iframe API limit
 	if err != nil {
 		return ""
 	}

@@ -7,8 +7,11 @@ import (
 
 func TestSelectFormatsForDownloadOptions_DefaultBestMergesVideoAndAudio(t *testing.T) {
 	formats := []FormatInfo{
+		{Itag: 160, MimeType: "video/mp4", HasVideo: true, Height: 144, Bitrate: 120_000, Protocol: "https"},
 		{Itag: 18, MimeType: "video/mp4", HasAudio: true, HasVideo: true, Height: 360, Bitrate: 700_000, Protocol: "https"},
+		{Itag: 136, MimeType: "video/mp4", HasVideo: true, Height: 720, Bitrate: 1_500_000, Protocol: "https"},
 		{Itag: 137, MimeType: "video/mp4", HasVideo: true, Height: 1080, Bitrate: 2_500_000, Protocol: "https"},
+		{Itag: 139, MimeType: "audio/mp4", HasAudio: true, Bitrate: 48_000, Protocol: "https"},
 		{Itag: 140, MimeType: "audio/mp4", HasAudio: true, Bitrate: 128_000, Protocol: "https"},
 	}
 
@@ -50,10 +53,10 @@ func TestSelectFormatsForDownloadOptions_ParseFailureIsDetailed(t *testing.T) {
 	}
 }
 
-func TestSelectFormatsForDownloadOptions_PrefersNonCipheredAlternative(t *testing.T) {
+func TestSelectFormatsForDownloadOptions_DefaultBestKeepsCipheredHighQuality(t *testing.T) {
 	formats := []FormatInfo{
-		{Itag: 137, MimeType: "video/mp4", HasVideo: true, Height: 1080, Ciphered: true, Protocol: "https"},
-		{Itag: 136, MimeType: "video/mp4", HasVideo: true, Height: 720, Protocol: "https"},
+		{Itag: 313, MimeType: "video/webm", HasVideo: true, Height: 2160, Width: 3840, Bitrate: 12_000_000, Ciphered: true, Protocol: "https"},
+		{Itag: 160, MimeType: "video/mp4", HasVideo: true, Height: 144, Width: 256, Bitrate: 120_000, Protocol: "https"},
 		{Itag: 140, MimeType: "audio/mp4", HasAudio: true, Bitrate: 128_000, Protocol: "https"},
 	}
 
@@ -61,8 +64,25 @@ func TestSelectFormatsForDownloadOptions_PrefersNonCipheredAlternative(t *testin
 	if err != nil {
 		t.Fatalf("SelectFormatsForDownloadOptions() error = %v", err)
 	}
-	if len(got) != 2 || got[0].Itag != 136 || got[1].Itag != 140 {
-		t.Fatalf("selected itags = %v, want [136 140]", itagsOf(got))
+	if len(got) != 2 || got[0].Itag != 313 || got[1].Itag != 140 {
+		t.Fatalf("selected itags = %v, want [313 140]", itagsOf(got))
+	}
+}
+
+func TestSelectFormatsForDownloadOptions_ExcludesDamagedMetadataOnlyFormats(t *testing.T) {
+	formats := []FormatInfo{
+		{Itag: 315, MimeType: "video/webm", HasVideo: true, Height: 2160, Bitrate: 26_000_000, Protocol: "unknown", IsDamaged: true},
+		{Itag: 160, MimeType: "video/mp4", HasVideo: true, Height: 144, Bitrate: 120_000, Protocol: "https"},
+		{Itag: 299, MimeType: "video/mp4", HasVideo: true, Height: 1080, Bitrate: 4_200_000, Protocol: "https"},
+		{Itag: 251, MimeType: "audio/webm", HasAudio: true, Bitrate: 146_000, Protocol: "https"},
+	}
+
+	got, err := SelectFormatsForDownloadOptions(formats, DownloadOptions{Mode: SelectionModeBest})
+	if err != nil {
+		t.Fatalf("SelectFormatsForDownloadOptions() error = %v", err)
+	}
+	if len(got) != 2 || got[0].Itag != 299 || got[1].Itag != 251 {
+		t.Fatalf("selected itags = %v, want [299 251]", itagsOf(got))
 	}
 }
 

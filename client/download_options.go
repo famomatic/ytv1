@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+// DefaultOutputTemplate is the yt-dlp-style package default media filename.
+const DefaultOutputTemplate = "%(title)s [%(id)s].%(ext)s"
+
 // OutputTemplateOptions describes package-level output template shortcuts.
 type OutputTemplateOptions struct {
 	OutputTemplate string
@@ -25,7 +28,7 @@ func EffectiveOutputTemplate(opts OutputTemplateOptions) string {
 		return outputTemplate
 	}
 	if outputTemplate == "" {
-		return filepath.Join(outputDir, "%(id)s-%(itag)s.%(ext)s")
+		return filepath.Join(outputDir, DefaultOutputTemplate)
 	}
 	if filepath.IsAbs(outputTemplate) {
 		return outputTemplate

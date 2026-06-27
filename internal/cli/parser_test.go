@@ -1404,6 +1404,24 @@ func TestParseFlags_QuietLastFlagWins(t *testing.T) {
 	}
 }
 
+func TestParseFlags_Version(t *testing.T) {
+	origArgs := os.Args
+	origFlagSet := flag.CommandLine
+	defer func() {
+		os.Args = origArgs
+		flag.CommandLine = origFlagSet
+	}()
+
+	os.Args = []string{"ytv1", "--version"}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+
+	opts := ParseFlags()
+	if !opts.Version {
+		t.Fatalf("Version=%v, want true", opts.Version)
+	}
+}
+
 func TestParseFlags_ProgressControls(t *testing.T) {
 	cases := []struct {
 		name           string

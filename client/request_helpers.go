@@ -31,6 +31,11 @@ func applyMediaRequestHeaders(req *http.Request, headers http.Header, videoID st
 	applyRequestHeaders(req, merged)
 }
 
+func applyMediaRequestHeadersForSourceClient(req *http.Request, headers http.Header, videoID string, sourceClient string) {
+	merged := buildMediaRequestHeadersForSourceClient(headers, videoID, sourceClient)
+	applyRequestHeaders(req, merged)
+}
+
 func cloneHeader(h http.Header) http.Header {
 	if h == nil {
 		return nil
@@ -45,13 +50,17 @@ func cloneHeader(h http.Header) http.Header {
 }
 
 func buildMediaRequestHeaders(headers http.Header, videoID string) http.Header {
+	return buildMediaRequestHeadersForSourceClient(headers, videoID, "")
+}
+
+func buildMediaRequestHeadersForSourceClient(headers http.Header, videoID string, sourceClient string) http.Header {
 	merged := cloneHeader(headers)
 	if merged == nil {
 		merged = make(http.Header)
 	}
 
 	if merged.Get("User-Agent") == "" {
-		merged.Set("User-Agent", innertube.WebClient.UserAgent)
+		merged.Set("User-Agent", mediaUserAgentForSourceClient(sourceClient))
 	}
 	if merged.Get("Origin") == "" {
 		merged.Set("Origin", "https://www.youtube.com")
@@ -65,6 +74,13 @@ func buildMediaRequestHeaders(headers http.Header, videoID string) http.Header {
 	}
 
 	return merged
+}
+
+func mediaUserAgentForSourceClient(sourceClient string) string {
+	if profile, ok := resolveSourceClientProfile(sourceClient); ok && profile.UserAgent != "" {
+		return profile.UserAgent
+	}
+	return innertube.WebClient.UserAgent
 }
 
 func mergeHeaders(dst http.Header, src http.Header) {

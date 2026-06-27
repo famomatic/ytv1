@@ -12,7 +12,7 @@ func TestEffectiveOutputTemplateOutputPathDir(t *testing.T) {
 		opts OutputTemplateOptions
 		want string
 	}{
-		{name: "default template under dir", opts: OutputTemplateOptions{OutputPathDir: dir}, want: filepath.Join(dir, "%(id)s-%(itag)s.%(ext)s")},
+		{name: "default template under dir", opts: OutputTemplateOptions{OutputPathDir: dir}, want: filepath.Join(dir, "%(title)s [%(id)s].%(ext)s")},
 		{name: "relative template under dir", opts: OutputTemplateOptions{OutputPathDir: dir, OutputTemplate: "%(title)s.%(ext)s"}, want: filepath.Join(dir, "%(title)s.%(ext)s")},
 		{name: "absolute template unchanged", opts: OutputTemplateOptions{OutputPathDir: "ignored", OutputTemplate: filepath.Join(dir, "fixed.%(ext)s")}, want: filepath.Join(dir, "fixed.%(ext)s")},
 		{name: "id shortcut under dir", opts: OutputTemplateOptions{OutputPathDir: dir, OutputUseID: true}, want: filepath.Join(dir, "%(id)s.%(ext)s")},

@@ -112,11 +112,27 @@ type Config struct {
 
 	// OnExtractionEvent receives extraction lifecycle events (optional).
 	// If nil, extraction events are suppressed.
+	//
+	// Concurrency contract: this callback may be invoked from multiple
+	// goroutines concurrently (extraction races across client profiles).
+	// Implementations must be goroutine-safe; the bundled CLI printer is.
 	OnExtractionEvent func(ExtractionEvent)
 
 	// OnDownloadEvent receives download lifecycle events (optional).
 	// If nil, download events are suppressed.
+	//
+	// Concurrency contract: this callback may be invoked from multiple
+	// goroutines concurrently (parallel chunk/segment downloads). It must be
+	// goroutine-safe; the bundled CLI printer is.
 	OnDownloadEvent func(DownloadEvent)
+
+	// OnDownloadProgress receives byte-level direct media download progress (optional).
+	// If nil, progress events are suppressed.
+	//
+	// Concurrency contract: this callback may be invoked from multiple
+	// goroutines concurrently (parallel chunk downloads). It must be
+	// goroutine-safe; the bundled CLI printer is.
+	OnDownloadProgress func(DownloadProgressEvent)
 
 	// KeepIntermediateFiles keeps intermediate video/audio files after merge download.
 	// Default is false (remove intermediates on successful/failed merge attempt).

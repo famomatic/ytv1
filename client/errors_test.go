@@ -18,6 +18,7 @@ func TestClassifyError(t *testing.T) {
 		{name: "challenge", err: ErrChallengeNotSolved, want: ErrorCategoryChallengeNotSolved},
 		{name: "all clients", err: ErrAllClientsFailed, want: ErrorCategoryAllClientsFailed},
 		{name: "mp3", err: ErrMP3TranscoderNotConfigured, want: ErrorCategoryMP3TranscoderNotConfigured},
+		{name: "muxer unavailable", err: ErrMuxerUnavailable, want: ErrorCategoryDownloadFailed},
 		{name: "transcript parse", err: ErrTranscriptParse, want: ErrorCategoryTranscriptParse},
 		{name: "download detail", err: &DownloadFailureDetailError{}, want: ErrorCategoryDownloadFailed},
 		{name: "unknown", err: errors.New("boom"), want: ErrorCategoryUnknown},

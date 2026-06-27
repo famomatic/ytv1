@@ -33,7 +33,7 @@
 ## 1. Current Snapshot (Update Every Session)
 
 ### 1.1 Session Date
-- `2026-02-16`
+- `2026-06-21`
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -188,6 +188,17 @@
 - B128 completion increment landed: moved diagnostics/remediation and lifecycle event formatting from `cmd/ytv1/main.go` into package APIs.
 - B129 completion increment landed: split remaining CLI adapter helpers and video workflow out of `cmd/ytv1/main.go`, leaving `main.go` as a thin entrypoint/run-loop wrapper over package and command adapters.
 - B130 completion increment landed: explicit video-only `video/mp4; codecs="avc1..."` entries no longer inherit progressive audio flags, while codec-less progressive fallback remains intact; verified against `oaevSXpWhdo` and `go test ./...`.
+- B131 completion increment landed: merged PR #9 security hardening into `dev` while preserving dev-first flow, bounded response/body reads, hardened player JS execution/cache behavior, validated encrypted HLS padding, bounded DASH concurrent buffering without rejecting long static streams, hardened ffmpeg merge inputs/metadata, and added regression coverage for JS timeout and long DASH segment batching.
+- B132 completion increment landed: default downloads preserve highest video+audio selections instead of downgrading ciphered high-quality formats to low non-ciphered alternatives, missing muxer support now fails explicitly instead of silently falling back to low progressive files, default media filenames remain `%(title)s [%(id)s].%(ext)s`, live selection for `8IY44RZHyw8` resolves to 4K `315+251`, and `go test ./...` is green.
+- B133 completion increment landed: default unauthenticated extraction now prefers the iOS client before MWEB to avoid current POT-less MWEB high-quality direct media 403s, while preserving 4K `315+251` selection for `8IY44RZHyw8`; live one-byte Range checks return `206` for both selected video and audio URLs, and `go test ./...` is green.
+- B134 completion increment landed: ported current yt-dlp YouTube multi-client extraction behavior from upstream `9ae7df9a22b29e2f81825230c9bba7d444190de0` by merging successful client streaming formats in deterministic order, preserving per-format source client metadata, replacing metadata-only duplicate itags with later playable URLs, and aligning the default unauthenticated order with current yt-dlp bypass clients first while retaining iOS as a ytv1 high-quality fallback; live `8IY44RZHyw8` selection remains 4K `315+251`, selected URLs return `206`, and `go test ./...` is green.
+- B135 completion increment landed: installed ffmpeg in the runtime environment, fixed direct media downloads to send source-client-aware headers, switched fresh direct downloads to Range-first requests with full-GET fallback, removed MWEB from default unauthenticated extraction, and added default-download 403 recovery to retry a progressive single-file fallback (with one refreshed extraction for stale/bad googlevideo hosts) while preserving explicit selector/itag failures.
+- B136 completion increment landed: aligned Android VR with current yt-dlp's stable `1.65.10` profile to avoid SABR-only Android VR responses, disabled implicit direct-media chunked concurrency unless callers explicitly request it, and verified default `8IY44RZHyw8` download produces a merged VP9 `3840x2160` file.
+- B137 completion increment landed: ported yt-dlp's YouTube HTTPS download chunk policy (`10 MiB` sequential Range chunks) into the package direct downloader, with access-denied fallback to single-stream rewrite, bringing `8IY44RZHyw8` 4K download+merge time to roughly yt-dlp parity while preserving client-level defaults.
+- B138 completion increment landed: added release-build GitHub latest-release tag outdated warnings, package-level direct download progress callbacks, CLI progress output with percentage/Mbps/current-total size, and default human-mode client attempt/download destination/warning logs while preserving quiet/JSON suppression.
+- B139 completion increment landed: replaced plain progress text with a cleaner single-line refreshing progress bar (`[####----]`) showing part, percent, current/total size, Mbps, and ETA, with duplicate completion suppression and clean log handoff before lifecycle/warning lines.
+- B140 completion increment landed: progress output now collapses to one final progress line when stdout is not an interactive terminal, uses ANSI clear-line refresh plus a compact bar for interactive terminals, and avoids captured/piped output that appears as many refresh lines.
+- B141 completion increment landed: interactive progress finish now clears the active progress line instead of leaving a final duplicated-looking 100% line before subsequent status output, while captured/non-TTY output still retains a single final progress line.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -321,6 +332,17 @@
 129. `[x]` B128. Thin CLI refactor for diagnostics and lifecycle formatting
 130. `[x]` B129. Thin `cmd/ytv1/main.go` entrypoint split
 131. `[x]` B130. Explicit codec media-flag correction for video-only MP4 formats
+132. `[x]` B131. PR #9 security hardening integration on `dev`
+133. `[x]` B132. Default best-quality downloads and yt-dlp-style default filename
+134. `[x]` B133. Default client order mitigation for high-quality media 403s
+135. `[x]` B134. Latest yt-dlp multi-client YouTube bypass alignment
+136. `[x]` B135. Default download 403 recovery and ffmpeg runtime verification
+137. `[x]` B136. Android VR stable profile and default 4K download verification
+138. `[x]` B137. yt-dlp-style YouTube HTTPS chunk speed parity
+139. `[x]` B138. CLI operator visibility: release tag outdated check, progress metrics, and default client attempt logs
+140. `[x]` B139. Polished refreshing progress bar UX
+141. `[x]` B140. Single-line progress behavior for captured/non-TTY output
+142. `[x]` B141. Clear interactive progress line on completion
 
 ---
 
@@ -2705,6 +2727,17 @@ Cycle B is complete only when all are true:
 - `2026-05-29`: Completed `B128` by adding package-level diagnostics/remediation hint generation and lifecycle event formatting/timing helpers, reducing CLI diagnostics to print dispatch, and verifying with `go test ./...`.
 - `2026-05-30`: Completed `B129` by moving the video workflow body to `cmd/ytv1/video_workflow.go` and remaining CLI adapter helpers to `cmd/ytv1/adapters.go`, reducing `cmd/ytv1/main.go` to the entrypoint/startup/run-loop layer and verifying with `go test ./...`.
 - `2026-05-30`: Completed `B130` by trusting explicit codec metadata before progressive AV fallback, preventing video-only MP4 formats from being marked audio-capable, preserving codec-less progressive fallback behavior, verifying `oaevSXpWhdo` selection (`299+251`) and `-F` notes, and running `go test ./...`.
+- `2026-05-30`: Completed `B131` by applying PR #9 security hardening to `dev`, fixing the PR's JS timeout cancellation bug, preserving long static DASH downloads by batching concurrent segment buffers instead of rejecting segment lists over 64 entries, restoring the root JSON `.gitignore` rule, adding targeted regression tests, and verifying with `go test ./...`.
+- `2026-06-20`: Completed `B132` by removing the non-ciphered selection downgrade that could turn default high-quality video+audio downloads into low-quality plain streams, returning an explicit muxer-unavailable error instead of silently falling back when separate best video/audio formats require merging, preserving yt-dlp-style default output naming, validating live `8IY44RZHyw8` selection as `315+251`, and verifying with `go test ./...`.
+- `2026-06-20`: Completed `B133` by moving the default unauthenticated client order to `ios, mweb, android_vr, web_safari` after reproducing MWEB 4K direct media `403` responses and validating that the default iOS-selected `315+251` URLs for `8IY44RZHyw8` return `206` to one-byte Range requests; verified with `go test ./...`.
+- `2026-06-20`: Completed `B134` by comparing latest yt-dlp YouTube extractor commit `9ae7df9a22b29e2f81825230c9bba7d444190de0`, porting multi-client streaming format merge behavior into the Go orchestrator, preserving source-client metadata per raw format, replacing metadata-only duplicate itags with later playable URLs, changing default unauthenticated order to `android_vr, web_safari, ios, mweb`, and verifying `8IY44RZHyw8` default 4K `315+251` selection plus `206` Range responses and `go test ./...`.
+- `2026-06-21`: Completed `B135` after installing ffmpeg and reproducing default download failures from current YouTube direct media `403` responses; media requests now keep source-client-aware headers, fresh direct downloads try Range first, default unauthenticated extraction uses `android_vr, web_safari, ios` (MWEB removed), default selections retry a progressive single-file fallback on download `403` with one refreshed extraction, failed merge intermediates clean up `.part` files, and live `8IY44RZHyw8` default download completes via fallback when iOS high-quality URLs are rejected.
+- `2026-06-21`: Completed `B136` by validating latest `yt-dlp 2026.06.09` uses Android VR `1.65.10` for `8IY44RZHyw8` 4K `315+251` URLs, changing ytv1's Android VR profile from `1.71.26` to `1.65.10`, disabling implicit direct-media chunked concurrency that caused YouTube GVS `401` responses on 4K chunk requests, and verifying default ytv1 download completes as VP9 `3840x2160` (`513278259` bytes).
+- `2026-06-21`: Completed `B137` by comparing latest yt-dlp's YouTube extractor/downloader behavior (`downloader_options.http_chunk_size = 10 << 20`, sequential HTTP Range chunks), changing ytv1 direct downloads to default to `10 MiB` sequential chunks with `401/403` fallback to single-stream rewrite, and verifying `8IY44RZHyw8` 4K download+merge completes as VP9 `3840x2160` in `0:05.57` versus yt-dlp's `0:05.10` on the same host.
+- `2026-06-21`: Completed `B138` by adding `--version` parsing, release-build outdated warnings based on GitHub latest release `tag_name`, package-level `OnDownloadProgress` callbacks for direct media downloads, CLI progress rendering with percent/Mbps/current-total size, and default human-mode extraction client attempt/download destination/warning logs; verified with a live `8IY44RZHyw8 -f 18 --newline` CLI download and `go test ./...`.
+- `2026-06-21`: Completed `B139` by replacing the CLI progress text with a single-line refreshing ASCII progress bar, adding ETA and duplicate completion suppression, finishing active progress lines before lifecycle/warning logs, and verifying with a live `8IY44RZHyw8 -f 18` download plus `go test ./...`.
+- `2026-06-21`: Completed `B140` by detecting non-interactive stdout, suppressing intermediate refresh frames in captured/piped output, emitting only the final 100% progress line outside TTYs, using ANSI clear-line refresh and a compact progress bar in interactive terminals, preserving `--newline` behavior, and verifying with a live piped `8IY44RZHyw8 -f 18` download plus `go test ./...`.
+- `2026-06-21`: Completed `B141` by changing interactive progress `Finish()` to clear the active line instead of emitting a newline that can look like a repeated completed progress row, adding regression coverage for the clear-line sequence, and verifying with `go test ./...`; live media verification is currently blocked by YouTube `LOGIN_REQUIRED` bot confirmation on the test video.
 
 ---
 

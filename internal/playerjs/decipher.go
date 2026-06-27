@@ -2,6 +2,7 @@ package playerjs
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -274,17 +276,59 @@ func firstNonEmptySubmatch(groups ...[]byte) string {
 	return ""
 }
 
+var jsExecTimeout = 5 * time.Second
+
 func evalJavascript(jsFunction, arg string) (string, error) {
 	const fnName = "ytv1NsigFunction"
 	vm := goja.New()
-	if _, err := vm.RunString(fnName + "=" + jsFunction); err != nil {
+	vm.SetMaxCallStackSize(20)
+	hardenVM(vm)
+
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(fnName + "=" + jsFunction)
+		return err
+	}); err != nil {
 		return "", err
 	}
-	var output func(string) string
-	if err := vm.ExportTo(vm.Get(fnName), &output); err != nil {
+	output, ok := goja.AssertFunction(vm.Get(fnName))
+	if !ok {
+		return "", errors.New("javascript challenge export is not callable")
+	}
+
+	var result goja.Value
+	if err := runJSWithTimeout(vm, func() error {
+		var err error
+		result, err = output(goja.Undefined(), vm.ToValue(arg))
+		return err
+	}); err != nil {
 		return "", err
 	}
-	return output(arg), nil
+	return result.String(), nil
+}
+
+func wrapVMError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("js execution timed out after %s: %w", jsExecTimeout, err)
+	}
+	return err
+}
+
+func runJSWithTimeout(vm *goja.Runtime, fn func() error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), jsExecTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				vm.Interrupt(context.DeadlineExceeded)
+			}
+		case <-done:
+		}
+	}()
+	err := fn()
+	close(done)
+	return wrapVMError(err)
 }
 
 type runtimeDecipherer struct {
@@ -296,7 +340,7 @@ type runtimeDecipherer struct {
 
 var (
 	signatureRuntimeNameRegexp = regexp.MustCompile(`const\s+[A-Za-z0-9_$]+=([A-Za-z0-9_$]+)\(16,decodeURIComponent\([^\)]*\.s\)\)`)
-	nURLRuntimeNameRegexp      = regexp.MustCompile(`([A-Za-z0-9_$]+)=function\([A-Za-z0-9_$]+\)\{try\{const\s+[A-Za-z0-9_$]+=\(new\s+g\.[A-Za-z0-9_$]+\([A-Za-z0-9_$]+,!0\)\)\.get\("n"\)`)
+	nURLRuntimeNameRegexp      = regexp.MustCompile(`([A-Za-z0-9_$]+)=function\([A-Za-z0-9_$]+\)\{try\{(?:const|let|var)\s+[A-Za-z0-9_$]+=\(new\s+g\.[A-Za-z0-9_$]+\([A-Za-z0-9_$]+,!0\)\)\.get\("n"\)`)
 	nPathExtractRegexp         = regexp.MustCompile(`/n/([^/?]+)`)
 )
 
@@ -312,8 +356,12 @@ func (d *Decipherer) decipherSignatureWithRuntime(s string) (string, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	out, err := rt.sigFunc(goja.Undefined(), rt.vm.ToValue(16), rt.vm.ToValue(s))
-	if err != nil {
+	var out goja.Value
+	if err := runJSWithTimeout(rt.vm, func() error {
+		var err error
+		out, err = rt.sigFunc(goja.Undefined(), rt.vm.ToValue(16), rt.vm.ToValue(s))
+		return err
+	}); err != nil {
 		return "", err
 	}
 	return out.String(), nil
@@ -332,7 +380,12 @@ func (d *Decipherer) decipherNWithRuntime(n string) (string, error) {
 	inputURL := "https://www.youtube.com/videoplayback/n/" + escaped + "/x?n=" + url.QueryEscape(n)
 
 	rt.mu.Lock()
-	out, err := rt.nURLFunc(goja.Undefined(), rt.vm.ToValue(inputURL))
+	var out goja.Value
+	err = runJSWithTimeout(rt.vm, func() error {
+		var callErr error
+		out, callErr = rt.nURLFunc(goja.Undefined(), rt.vm.ToValue(inputURL))
+		return callErr
+	})
 	rt.mu.Unlock()
 	if err != nil {
 		return "", err
@@ -387,10 +440,19 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 	jsBody = jsBody[:markerPos] + inject + jsBody[markerPos:]
 
 	vm := goja.New()
-	if _, err := vm.RunString(runtimePreludeJS); err != nil {
+	vm.SetMaxCallStackSize(20)
+	hardenVM(vm)
+
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(runtimePreludeJS)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	if _, err := vm.RunString(jsBody); err != nil {
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(jsBody)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 
@@ -517,3 +579,28 @@ if (!document.removeEventListener) { document.removeEventListener = function(){}
 if (!document.location) { document.location = window.location; }
 if (!document.documentElement) { document.documentElement = { style: {} }; }
 `
+
+// hardenVM disables dangerous JavaScript globals that could be abused if the
+// fetched player JS is malicious or has been tampered with. goja is a pure Go
+// interpreter (no OS or network access), but these globals can still consume
+// unbounded CPU/memory or interfere with the sandbox.
+func hardenVM(vm *goja.Runtime) {
+	for _, name := range []string{
+		"eval",
+		"Function",
+		"WebAssembly",
+		"importScripts",
+		"Proxy",
+		"Reflect",
+		"SharedArrayBuffer",
+		"Atomics",
+		"fetch",
+		"Worker",
+		"SharedWorker",
+		"ServiceWorker",
+		"MessageChannel",
+		"BroadcastChannel",
+	} {
+		_ = vm.GlobalObject().Delete(name)
+	}
+}

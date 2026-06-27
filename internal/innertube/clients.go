@@ -192,9 +192,9 @@ var (
 	AndroidVRClient = ClientProfile{
 		ID:              "android_vr",
 		Name:            "ANDROID_VR",
-		Version:         "1.71.26",
+		Version:         "1.65.10",
 		ContextNameID:   28,
-		UserAgent:       "com.google.android.apps.youtube.vr.oculus/1.71.26 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+		UserAgent:       "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
 		RequireJSPlayer: false,
 		APIKey:          defaultInnertubeAPIKey,
 		Host:            "www.youtube.com",

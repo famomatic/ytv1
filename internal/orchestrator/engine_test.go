@@ -874,6 +874,101 @@ func TestEngineDisableFallbackClients(t *testing.T) {
 	}
 }
 
+func TestEngineMergesSuccessfulClientFormats(t *testing.T) {
+	androidVR := innertube.AndroidVRClient
+	ios, ok := innertube.NewRegistry().Get("ios")
+	if !ok {
+		t.Fatal("ios client missing from registry")
+	}
+
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		payload := string(body)
+		switch {
+		case strings.Contains(payload, `"clientName":"ANDROID_VR"`):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewBufferString(`{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"},
+					"streamingData":{"formats":[{"itag":18,"url":"https://media.example/low.mp4","mimeType":"video/mp4","width":640,"height":360}]}
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		case strings.Contains(payload, `"clientName":"IOS"`):
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(bytes.NewBufferString(`{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"ok","author":"yt"},
+					"streamingData":{"adaptiveFormats":[{"itag":315,"url":"https://media.example/4k.webm","mimeType":"video/webm","width":3840,"height":2160}]}
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(bytes.NewBufferString(`{}`)), Header: make(http.Header)}, nil
+		}
+	})
+
+	engine := NewEngine(
+		selectorStub{clients: []innertube.ClientProfile{androidVR, ios}},
+		innertube.Config{
+			HTTPClient:             &http.Client{Transport: tr},
+			DisableFallbackClients: true,
+		},
+	)
+
+	resp, err := engine.GetVideoInfo(context.Background(), "jNQXAC9IVRw")
+	if err != nil {
+		t.Fatalf("GetVideoInfo() error = %v", err)
+	}
+	if len(resp.StreamingData.Formats) != 1 || resp.StreamingData.Formats[0].Itag != 18 {
+		t.Fatalf("formats = %+v, want itag 18", resp.StreamingData.Formats)
+	}
+	if len(resp.StreamingData.AdaptiveFormats) != 1 || resp.StreamingData.AdaptiveFormats[0].Itag != 315 {
+		t.Fatalf("adaptive formats = %+v, want itag 315", resp.StreamingData.AdaptiveFormats)
+	}
+	if resp.StreamingData.Formats[0].SourceClient != "android_vr" {
+		t.Fatalf("format source client = %q, want android_vr", resp.StreamingData.Formats[0].SourceClient)
+	}
+	if resp.StreamingData.AdaptiveFormats[0].SourceClient != "ios" {
+		t.Fatalf("adaptive source client = %q, want ios", resp.StreamingData.AdaptiveFormats[0].SourceClient)
+	}
+}
+
+func TestMergePlayerResponsesReplacesMetadataOnlyDuplicate(t *testing.T) {
+	first := &innertube.PlayerResponse{
+		SourceClient: "web_safari",
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{{
+				SourceClient: "web_safari",
+				Itag:         315,
+				MimeType:     `video/webm; codecs="vp9"`,
+			}},
+		},
+	}
+	second := &innertube.PlayerResponse{
+		SourceClient: "ios",
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{{
+				SourceClient: "ios",
+				Itag:         315,
+				URL:          "https://media.example/315.webm",
+				MimeType:     `video/webm; codecs="vp9"`,
+			}},
+		},
+	}
+
+	merged := mergePlayerResponses([]*innertube.PlayerResponse{first, second})
+	if len(merged.StreamingData.AdaptiveFormats) != 1 {
+		t.Fatalf("adaptive len=%d, want 1", len(merged.StreamingData.AdaptiveFormats))
+	}
+	got := merged.StreamingData.AdaptiveFormats[0]
+	if got.URL == "" || got.SourceClient != "ios" {
+		t.Fatalf("merged format = %+v, want playable ios replacement", got)
+	}
+}
+
 func TestEngineEmitsPlayerAPIEventsInDeterministicStartOrder(t *testing.T) {
 	web := innertube.WebClient
 	mweb := innertube.MWebClient
@@ -902,6 +997,10 @@ func TestEngineEmitsPlayerAPIEventsInDeterministicStartOrder(t *testing.T) {
 		selectorStub{clients: []innertube.ClientProfile{web, mweb}},
 		innertube.Config{
 			HTTPClient: &http.Client{Transport: tr},
+			// Serialize client starts in configured order so the start-event
+			// ordering this test asserts is deterministic rather than
+			// racing on goroutine scheduling.
+			ClientHedgeDelay: 5 * time.Millisecond,
 			OnExtractionEvent: func(evt innertube.ExtractionEvent) {
 				mu.Lock()
 				defer mu.Unlock()

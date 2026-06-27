@@ -49,6 +49,108 @@ func TestDownloadURLToWriter_HTTPError(t *testing.T) {
 	}
 }
 
+func TestDownloadStream_UsesSourceClientMediaHeaders(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		if !strings.Contains(gotUA, "youtube.vr.oculus") {
+			http.Error(w, "wrong user agent", http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer srv.Close()
+
+	c := &Client{config: Config{
+		HTTPClient:        srv.Client(),
+		DownloadTransport: DownloadTransportConfig{EnableChunked: false},
+	}}
+	outputPath := filepath.Join(t.TempDir(), "out.bin")
+	err := c.downloadStream(context.Background(), "video-id", srv.URL, outputPath, FormatInfo{
+		Itag:         315,
+		URL:          srv.URL,
+		Protocol:     "https",
+		SourceClient: "android_vr",
+	}, false, false)
+	if err != nil {
+		t.Fatalf("downloadStream() error = %v, ua=%q", err, gotUA)
+	}
+	body, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if got := string(body); got != "payload" {
+		t.Fatalf("downloaded body=%q, want payload", got)
+	}
+}
+
+func TestDownloadStream_EmitsProgress(t *testing.T) {
+	payload := []byte("payload")
+	var events []DownloadProgressEvent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", len(payload)-1, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	c := &Client{config: Config{
+		HTTPClient:        srv.Client(),
+		DownloadTransport: DownloadTransportConfig{EnableChunked: false},
+		OnDownloadProgress: func(evt DownloadProgressEvent) {
+			events = append(events, evt)
+		},
+	}}
+	outputPath := filepath.Join(t.TempDir(), "out.bin")
+	err := c.downloadStream(context.Background(), "video-id", srv.URL, outputPath, FormatInfo{
+		Itag:     18,
+		URL:      srv.URL,
+		Protocol: "https",
+	}, false, false)
+	if err != nil {
+		t.Fatalf("downloadStream() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatalf("expected progress events")
+	}
+	last := events[len(events)-1]
+	if last.VideoID != "video-id" || last.Itag != 18 || last.Downloaded != int64(len(payload)) || last.Total != int64(len(payload)) {
+		t.Fatalf("last progress event=%+v", last)
+	}
+}
+
+func TestShouldRetryDefaultWithFallbackSingleOnDownload403(t *testing.T) {
+	err := wrapDownloadFailure(&downloadHTTPStatusError{StatusCode: http.StatusForbidden}, AttemptDetail{
+		HTTPStatus: http.StatusForbidden,
+	})
+	if !shouldRetryDefaultWithFallbackSingle(err, DownloadOptions{}) {
+		t.Fatalf("expected default download 403 to retry fallback single")
+	}
+	if shouldRetryDefaultWithFallbackSingle(err, DownloadOptions{Itag: 18}) {
+		t.Fatalf("explicit itag should not retry fallback single")
+	}
+	if shouldRetryDefaultWithFallbackSingle(err, DownloadOptions{FormatSelector: "315+251"}) {
+		t.Fatalf("explicit selector should not retry fallback single")
+	}
+}
+
+func TestNormalizeDownloadTransportConfig_DefaultsToYTDLPStyleSequentialChunks(t *testing.T) {
+	cfg := normalizeDownloadTransportConfig(DownloadTransportConfig{})
+	if !cfg.EnableChunked {
+		t.Fatalf("EnableChunked=false, want true by default")
+	}
+	if cfg.ChunkSize != 10<<20 {
+		t.Fatalf("ChunkSize=%d, want 10MiB", cfg.ChunkSize)
+	}
+	if cfg.MaxConcurrency != 1 {
+		t.Fatalf("MaxConcurrency=%d, want sequential chunk downloads", cfg.MaxConcurrency)
+	}
+}
+
 func TestDownloadURLToWriter_RetryOnTransientStatus(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -288,9 +390,10 @@ func TestDownloadURLToPath_ResumeFallbackToFull(t *testing.T) {
 func TestDownloadURLToPath_FullRewriteRetryTruncatesPartialAttempt(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := strings.TrimSpace(r.Header.Get("Range")); got != "" {
-			t.Fatalf("range header=%q, want empty", got)
+		if got := strings.TrimSpace(r.Header.Get("Range")); got != "bytes=0-" {
+			t.Fatalf("range header=%q, want bytes=0-", got)
 		}
+		w.WriteHeader(http.StatusPartialContent)
 		if atomic.AddInt32(&calls, 1) == 1 {
 			flusher, _ := w.(http.Flusher)
 			for i := 0; i < 8; i++ {
@@ -856,6 +959,42 @@ func (m testMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPath s
 	return os.WriteFile(outputPath, append(v, a...), 0o644)
 }
 
+func TestDownloadRequiresMuxerForSeparateBestVideoAudio(t *testing.T) {
+	videoID := "jNQXAC9IVRw"
+	httpClient := &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/youtubei/v1/player"):
+				body := `{
+					"playabilityStatus":{"status":"OK"},
+					"videoDetails":{"videoId":"jNQXAC9IVRw","title":"x","author":"y"},
+					"streamingData":{
+						"formats":[{"itag":18,"url":"https://media.example/low.mp4","mimeType":"video/mp4","bitrate":120000,"width":256,"height":144}],
+						"adaptiveFormats":[
+							{"itag":315,"url":"https://media.example/4k.webm","mimeType":"video/webm","bitrate":12000000,"width":3840,"height":2160},
+							{"itag":251,"url":"https://media.example/audio.webm","mimeType":"audio/webm","bitrate":192000}
+						]
+					}
+				}`
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/watch":
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`<html><script src="/s/player/test/base.js"></script></html>`)), Header: make(http.Header)}, nil
+			default:
+				return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header)}, nil
+			}
+		}),
+	}
+
+	c := New(Config{
+		HTTPClient:      httpClient,
+		ClientOverrides: []string{"mweb"},
+	})
+	_, err := c.Download(context.Background(), videoID, DownloadOptions{Mode: SelectionModeBest})
+	if !errors.Is(err, ErrMuxerUnavailable) {
+		t.Fatalf("Download() error = %v, want ErrMuxerUnavailable", err)
+	}
+}
+
 func TestDownloadAndMerge_DefaultCleansIntermediateFiles(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	var events []DownloadEvent
@@ -1014,8 +1153,8 @@ func TestDownloadAndMerge_MergeOutputFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
 	}
-	if res.OutputPath != "jNQXAC9IVRw-248+251.mkv" {
-		t.Fatalf("OutputPath=%q, want jNQXAC9IVRw-248+251.mkv", res.OutputPath)
+	if res.OutputPath != "x [jNQXAC9IVRw].mkv" {
+		t.Fatalf("OutputPath=%q, want x [jNQXAC9IVRw].mkv", res.OutputPath)
 	}
 }
 
@@ -1156,7 +1295,7 @@ func TestDownloadFailureProvidesAttemptDetails(t *testing.T) {
 	}
 }
 
-func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
+func TestDownloadKeepsCipheredHighQualitySelection(t *testing.T) {
 	videoID := "jNQXAC9IVRw"
 	httpClient := &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1186,7 +1325,8 @@ func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
 					Header:     make(http.Header),
 				}, nil
 			case r.Method == http.MethodGet && r.URL.Path == "/s/player/test/player_ias.vflset/en_US/base.js":
-				// Intentionally broken JS: if ciphered selection is attempted, resolve should fail.
+				// Intentionally broken JS: preserving the ciphered high-quality
+				// selection should fail before falling back to lower plain URLs.
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(`var broken = true;`)),
@@ -1204,12 +1344,6 @@ func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
 					Body:       io.NopCloser(strings.NewReader("audio")),
 					Header:     make(http.Header),
 				}, nil
-			case r.Method == http.MethodGet && strings.Contains(r.URL.String(), "cipher-video.webm"):
-				t.Fatalf("ciphered video should not be selected")
-				return nil, nil
-			case r.Method == http.MethodGet && strings.Contains(r.URL.String(), "cipher-audio.webm"):
-				t.Fatalf("ciphered audio should not be selected")
-				return nil, nil
 			default:
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
@@ -1227,15 +1361,12 @@ func TestDownloadPrefersNonCipheredFallbackSelection(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "merged.mp4")
-	res, err := c.Download(context.Background(), videoID, DownloadOptions{
+	_, err := c.Download(context.Background(), videoID, DownloadOptions{
 		Mode:       SelectionModeBest,
 		OutputPath: out,
 	})
-	if err != nil {
-		t.Fatalf("Download() error = %v", err)
-	}
-	if res.OutputPath != out {
-		t.Fatalf("output path=%q want=%q", res.OutputPath, out)
+	if !errors.Is(err, ErrChallengeNotSolved) {
+		t.Fatalf("Download() error = %v, want ErrChallengeNotSolved", err)
 	}
 }
 

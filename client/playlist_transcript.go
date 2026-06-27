@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/famomatic/ytv1/internal/iox"
 
 	"github.com/famomatic/ytv1/internal/innertube"
 )
@@ -133,7 +134,7 @@ func (c *Client) GetPlaylist(ctx context.Context, input string) (*PlaylistInfo, 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("playlist fetch failed: status=%d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 20<<20) // 20 MB playlist limit
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +456,7 @@ func fetchTranscriptXML(ctx context.Context, httpClient *http.Client, headers ht
 		}
 		return nil, fmt.Errorf("transcript fetch failed: status=%d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	return iox.ReadAllLimit(resp.Body, 5<<20) // 5 MB transcript limit
 }
 
 func parseTranscriptXML(raw []byte) ([]TranscriptEntry, error) {

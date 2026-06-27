@@ -27,14 +27,14 @@ func TestPredictOutputFilename_MergedTemplate(t *testing.T) {
 }
 
 func TestPredictOutputFilename_DefaultSingleAndTrim(t *testing.T) {
-	info := &VideoInfo{ID: "video123"}
+	info := &VideoInfo{ID: "video123", Title: "Video title"}
 	formats := []FormatInfo{{Itag: 140, MimeType: "audio/mp4", HasAudio: true}}
-	got, err := PredictOutputFilename(info, formats, OutputFilenameOptions{TrimFilenames: 5})
+	got, err := PredictOutputFilename(info, formats, OutputFilenameOptions{})
 	if err != nil {
 		t.Fatalf("PredictOutputFilename() error = %v", err)
 	}
-	if got != "video.mp4" {
-		t.Fatalf("PredictOutputFilename()=%q, want video.mp4", got)
+	if got != "Video title [video123].mp4" {
+		t.Fatalf("PredictOutputFilename()=%q, want Video title [video123].mp4", got)
 	}
 }
 

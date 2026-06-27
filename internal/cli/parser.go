@@ -362,6 +362,7 @@ func ParseFlags() Options {
 	flag.BoolVar(&opts.PlayerJSURLOnly, "playerjs", false, "Print player base.js URL only (debug)")
 
 	flag.BoolVar(&opts.Verbose, "verbose", false, "Print various debugging information")
+	flag.BoolVar(&opts.Version, "version", false, "Print version information and exit")
 
 	// Advanced / Debug flags from original main.go
 	flag.StringVar(&opts.ClientsOverrides, "clients", "", "Comma-separated Innertube client order override")

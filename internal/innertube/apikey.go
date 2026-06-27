@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/famomatic/ytv1/internal/iox"
 )
 
 var innertubeAPIKeyPattern = regexp.MustCompile(`(?i)["']INNERTUBE_API_KEY["']\s*:\s*["']([^"']+)["']`)
@@ -34,15 +35,17 @@ type resolvedWatchData struct {
 }
 
 type APIKeyResolver struct {
-	httpClient *http.Client
-	mu         sync.RWMutex
-	cache      map[string]resolvedWatchData
+	httpClient  *http.Client
+	mu          sync.RWMutex
+	cache       map[string]resolvedWatchData
+	fetchLocks  *keyLock
 }
 
 func NewAPIKeyResolver(httpClient *http.Client) *APIKeyResolver {
 	return &APIKeyResolver{
 		httpClient: httpClient,
 		cache:      make(map[string]resolvedWatchData),
+		fetchLocks: newKeyLock(),
 	}
 }
 
@@ -60,24 +63,17 @@ func (r *APIKeyResolver) Resolve(ctx context.Context, profile ClientProfile, vid
 		return fallback, nil
 	}
 
-	if data, ok := r.get(cacheKey); ok {
-		if strings.TrimSpace(data.APIKey) == "" {
-			return fallback, nil
-		}
-		return data.APIKey, nil
-	}
-
-	resolved, err := r.fetchFromWatch(ctx, profile, videoID)
-	if err != nil || strings.TrimSpace(resolved.APIKey) == "" {
+	data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID)
+	if err != nil {
+		// fetch failed; persist the fallback so concurrent callers don't
+		// re-issue the watch-page request within the same failure window.
 		r.set(cacheKey, resolvedWatchData{APIKey: fallback})
-		if err != nil {
-			return fallback, err
-		}
+		return fallback, err
+	}
+	if strings.TrimSpace(data.APIKey) == "" {
 		return fallback, nil
 	}
-
-	r.set(cacheKey, resolved)
-	return resolved.APIKey, nil
+	return data.APIKey, nil
 }
 
 func (r *APIKeyResolver) ResolveVisitorData(ctx context.Context, profile ClientProfile, videoID string) string {
@@ -88,15 +84,11 @@ func (r *APIKeyResolver) ResolveVisitorData(ctx context.Context, profile ClientP
 	if cacheKey == "" {
 		return ""
 	}
-	if data, ok := r.get(cacheKey); ok {
-		return strings.TrimSpace(data.VisitorData)
-	}
-	resolved, err := r.fetchFromWatch(ctx, profile, videoID)
+	data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID)
 	if err != nil {
 		return ""
 	}
-	r.set(cacheKey, resolved)
-	return strings.TrimSpace(resolved.VisitorData)
+	return strings.TrimSpace(data.VisitorData)
 }
 
 func (r *APIKeyResolver) ResolveCookieAuthContext(ctx context.Context, profile ClientProfile, videoID string) CookieAuthContext {
@@ -107,15 +99,11 @@ func (r *APIKeyResolver) ResolveCookieAuthContext(ctx context.Context, profile C
 	if cacheKey == "" {
 		return CookieAuthContext{}
 	}
-	if data, ok := r.get(cacheKey); ok {
-		return data.toCookieAuthContext()
-	}
-	resolved, err := r.fetchFromWatch(ctx, profile, videoID)
-	if err != nil && resolved.APIKey == "" && resolved.VisitorData == "" {
+	data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID)
+	if err != nil {
 		return CookieAuthContext{}
 	}
-	r.set(cacheKey, resolved)
-	return resolved.toCookieAuthContext()
+	return data.toCookieAuthContext()
 }
 
 func (r *APIKeyResolver) ResolveSignatureTimestamp(ctx context.Context, profile ClientProfile, videoID string) int {
@@ -126,17 +114,44 @@ func (r *APIKeyResolver) ResolveSignatureTimestamp(ctx context.Context, profile 
 	if cacheKey == "" {
 		return 0
 	}
-	if data, ok := r.get(cacheKey); ok {
-		return data.SignatureTimestamp
-	}
-	resolved, err := r.fetchFromWatch(ctx, profile, videoID)
-	if err != nil && resolved.APIKey == "" && resolved.VisitorData == "" {
+	data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID)
+	if err != nil {
 		return 0
 	}
-	r.set(cacheKey, resolved)
-	return resolved.SignatureTimestamp
+	return data.SignatureTimestamp
 }
 
+// resolveWatchDataCached returns the cached resolved data for the given
+// profile cache key, fetching from the watch page on miss. Concurrent
+// callers for the same key share a single fetch (per-key serialization)
+// to avoid thundering-herd watch-page requests. On a successful fetch the
+// result is merged into the cache; on error the cache is left untouched so
+// the next caller can retry. The fetch error is propagated to the caller.
+func (r *APIKeyResolver) resolveWatchDataCached(ctx context.Context, cacheKey string, profile ClientProfile, videoID string) (resolvedWatchData, error) {
+	if data, ok := r.get(cacheKey); ok {
+		return data, nil
+	}
+
+	lock, release := r.fetchLocks.acquire(cacheKey)
+	defer release()
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check under the lock: a concurrent caller may have populated it.
+	if data, ok := r.get(cacheKey); ok {
+		return data, nil
+	}
+
+	resolved, err := r.fetchFromWatch(ctx, profile, videoID)
+	if err == nil {
+		r.set(cacheKey, resolved)
+		return resolved, nil
+	}
+	// A successful fetch (err == nil) with an empty payload is still a
+	// cacheable miss for individual fields; only hard fetch errors are
+	// propagated so callers can surface them as before.
+	return resolved, err
+}
 func (r *APIKeyResolver) get(host string) (resolvedWatchData, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -147,7 +162,33 @@ func (r *APIKeyResolver) get(host string) (resolvedWatchData, bool) {
 func (r *APIKeyResolver) set(host string, key resolvedWatchData) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cache[host] = key
+	// Merge instead of overwrite so concurrent resolves for different
+	// fields (APIKey vs VisitorData vs STS) of the same profile do not
+	// clobber each other. Non-empty values in the incoming entry win.
+	existing, ok := r.cache[host]
+	if !ok {
+		r.cache[host] = key
+		return
+	}
+	if strings.TrimSpace(key.APIKey) != "" {
+		existing.APIKey = key.APIKey
+	}
+	if strings.TrimSpace(key.VisitorData) != "" {
+		existing.VisitorData = key.VisitorData
+	}
+	if strings.TrimSpace(key.DelegatedSessionID) != "" {
+		existing.DelegatedSessionID = key.DelegatedSessionID
+	}
+	if strings.TrimSpace(key.UserSessionID) != "" {
+		existing.UserSessionID = key.UserSessionID
+	}
+	if key.SessionIndex != nil {
+		existing.SessionIndex = key.SessionIndex
+	}
+	if key.SignatureTimestamp != 0 {
+		existing.SignatureTimestamp = key.SignatureTimestamp
+	}
+	r.cache[host] = existing
 }
 
 func (r *APIKeyResolver) fetchFromWatch(ctx context.Context, profile ClientProfile, videoID string) (resolvedWatchData, error) {
@@ -171,7 +212,7 @@ func (r *APIKeyResolver) fetchFromWatch(ctx context.Context, profile ClientProfi
 		return resolvedWatchData{}, fmt.Errorf("watch request failed: status=%d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 10<<20) // 10 MB watch page limit
 	if err != nil {
 		return resolvedWatchData{}, err
 	}
@@ -271,7 +312,7 @@ func (r *APIKeyResolver) extractSignatureTimestampFromPlayerJS(ctx context.Conte
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("player js request failed: status=%d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := iox.ReadAllLimit(resp.Body, 20<<20) // 20 MB player JS limit
 	if err != nil {
 		return 0, err
 	}

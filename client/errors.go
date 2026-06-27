@@ -17,6 +17,8 @@ var (
 	ErrAllClientsFailed = errors.New("all clients failed")
 	// ErrMP3TranscoderNotConfigured indicates mp3 mode was requested without a transcoder.
 	ErrMP3TranscoderNotConfigured = errors.New("mp3 transcoder not configured")
+	// ErrMuxerUnavailable indicates separate video/audio formats were selected but no muxer is available.
+	ErrMuxerUnavailable = errors.New("muxer unavailable")
 	// ErrTranscriptParse indicates transcript payload could not be parsed.
 	ErrTranscriptParse = errors.New("transcript parse failed")
 )
@@ -259,6 +261,8 @@ func ClassifyError(err error) ErrorCategory {
 		return ErrorCategoryAllClientsFailed
 	case errors.Is(err, ErrMP3TranscoderNotConfigured):
 		return ErrorCategoryMP3TranscoderNotConfigured
+	case errors.Is(err, ErrMuxerUnavailable):
+		return ErrorCategoryDownloadFailed
 	case errors.Is(err, ErrTranscriptParse):
 		return ErrorCategoryTranscriptParse
 	default:

@@ -14,6 +14,7 @@ func TestFFmpegMuxerMergeArgsIncludesExtraArgs(t *testing.T) {
 		Artist: "Artist",
 	})
 	want := []string{
+		"-protocol_whitelist", "file",
 		"-i", "video.mp4",
 		"-i", "audio.m4a",
 		"-c:v", "copy",

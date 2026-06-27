@@ -48,6 +48,160 @@ func TestFormatDownloadEvent(t *testing.T) {
 	}
 }
 
+func TestCompareReleaseTags(t *testing.T) {
+	if compareReleaseTags("v1.2.3", "v1.2.4") >= 0 {
+		t.Fatalf("expected v1.2.3 to be older than v1.2.4")
+	}
+	if compareReleaseTags("1.3.0", "v1.2.9") <= 0 {
+		t.Fatalf("expected 1.3.0 to be newer than v1.2.9")
+	}
+	if compareReleaseTags("dev", "v9.9.9") != 0 {
+		t.Fatalf("dev builds should not compare as outdated")
+	}
+}
+
+func TestCheckAndPrintOutdated(t *testing.T) {
+	prevVersion := currentVersion
+	prevFetch := httpGetLatestRelease
+	defer func() {
+		currentVersion = prevVersion
+		httpGetLatestRelease = prevFetch
+	}()
+	currentVersion = "v1.0.0"
+	httpGetLatestRelease = func(context.Context) (string, error) {
+		return "v1.1.0", nil
+	}
+
+	var buf bytes.Buffer
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	checkAndPrintOutdated(cli.Options{})
+	w.Close()
+	os.Stdout = prevStdout
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "ytv1 is outdated") || !strings.Contains(got, "current=v1.0.0") || !strings.Contains(got, "latest=v1.1.0") {
+		t.Fatalf("outdated output=%q", got)
+	}
+}
+
+func TestFormatDownloadProgress(t *testing.T) {
+	got := formatDownloadProgress(client.DownloadProgressEvent{
+		Part:           "video",
+		Downloaded:     50 * 1024 * 1024,
+		Total:          100 * 1024 * 1024,
+		BytesPerSecond: 10 * 1000 * 1000,
+	})
+	for _, want := range []string{"[download] video", "[#########---------]", "50.0%", "80.00Mbps", "50.0MiB/100.0MiB", "eta 00:06"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress output missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestRenderProgressBarAndETA(t *testing.T) {
+	if got := renderProgressBar(0.25, true, 8); got != "[##------]" {
+		t.Fatalf("renderProgressBar()=%q, want [##------]", got)
+	}
+	if got := renderProgressBar(0, false, 4); got != "[----]" {
+		t.Fatalf("unknown total bar=%q, want [----]", got)
+	}
+	if got := formatETA(25, 100, 10); got != "00:08" {
+		t.Fatalf("formatETA()=%q, want 00:08", got)
+	}
+	if got := formatETA(100, 100, 10); got != "--:--" {
+		t.Fatalf("complete ETA=%q, want --:--", got)
+	}
+}
+
+func TestProgressPrinter_NonInteractivePrintsOnlyFinalLine(t *testing.T) {
+	var buf bytes.Buffer
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = prevStdout
+	}()
+
+	printer := &cliProgressPrinter{
+		interactive: false,
+		completed:   make(map[string]bool),
+	}
+	base := client.DownloadProgressEvent{
+		Path:           "out.webm",
+		Part:           "video",
+		Total:          100,
+		BytesPerSecond: 10,
+	}
+	printer.Print(withProgressDownloaded(base, 50))
+	printer.Print(withProgressDownloaded(base, 100))
+	printer.Print(withProgressDownloaded(base, 100))
+	w.Close()
+	os.Stdout = prevStdout
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	got := strings.TrimSpace(buf.String())
+	if strings.Count(buf.String(), "\n") != 1 {
+		t.Fatalf("output=%q, want exactly one final progress line", buf.String())
+	}
+	if !strings.Contains(got, "100.0%") || strings.Contains(got, "50.0%") {
+		t.Fatalf("output=%q, want only final progress", got)
+	}
+}
+
+func TestProgressPrinter_InteractiveFinishClearsLine(t *testing.T) {
+	var buf bytes.Buffer
+	prevStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = prevStdout
+	}()
+
+	printer := &cliProgressPrinter{
+		interactive: true,
+		completed:   make(map[string]bool),
+	}
+	printer.Print(client.DownloadProgressEvent{
+		Path:           "out.webm",
+		Part:           "video",
+		Downloaded:     50,
+		Total:          100,
+		BytesPerSecond: 10,
+	})
+	printer.Finish()
+	w.Close()
+	os.Stdout = prevStdout
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "\n") {
+		t.Fatalf("interactive Finish output=%q, want no newline", got)
+	}
+	if !strings.Contains(got, "\r\x1b[2K") {
+		t.Fatalf("interactive Finish output=%q, want clear-line sequence", got)
+	}
+}
+
+func withProgressDownloaded(evt client.DownloadProgressEvent, downloaded int64) client.DownloadProgressEvent {
+	evt.Downloaded = downloaded
+	return evt
+}
+
 func TestLifecyclePrinter_ExtractionElapsed(t *testing.T) {
 	clock := []time.Time{
 		time.Unix(0, 0),
@@ -139,7 +293,7 @@ func TestEffectiveOutputTemplate_OutputPathDir(t *testing.T) {
 		{
 			name: "default template under dir",
 			opts: cli.Options{OutputPathDir: dir},
-			want: filepath.Join(dir, "%(id)s-%(itag)s.%(ext)s"),
+			want: filepath.Join(dir, "%(title)s [%(id)s].%(ext)s"),
 		},
 		{
 			name: "relative template under dir",
@@ -169,7 +323,7 @@ func TestEffectiveOutputTemplate_OutputPathDir(t *testing.T) {
 func TestBuildDownloadOptions_OutputPathDir(t *testing.T) {
 	dir := t.TempDir()
 	got := buildDownloadOptions(cli.Options{OutputPathDir: dir})
-	want := filepath.Join(dir, "%(id)s-%(itag)s.%(ext)s")
+	want := filepath.Join(dir, "%(title)s [%(id)s].%(ext)s")
 	if got.OutputPath != want {
 		t.Fatalf("OutputPath = %q, want %q", got.OutputPath, want)
 	}
@@ -708,8 +862,8 @@ func TestPredictedOutputFilename_MergeOutputFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("predictedOutputFilename() default error = %v", err)
 	}
-	if got != "jNQXAC9IVRw-137+140.webm" {
-		t.Fatalf("filename=%q, want jNQXAC9IVRw-137+140.webm", got)
+	if got != "A_B [jNQXAC9IVRw].webm" {
+		t.Fatalf("filename=%q, want A_B [jNQXAC9IVRw].webm", got)
 	}
 }
 
@@ -737,7 +891,8 @@ func TestPredictedOutputFilename_RemuxVideo(t *testing.T) {
 
 func TestPredictedOutputFilename_NumericDefault(t *testing.T) {
 	info := &client.VideoInfo{
-		ID: "jNQXAC9IVRw",
+		ID:    "jNQXAC9IVRw",
+		Title: "Audio title",
 		Formats: []client.FormatInfo{
 			{Itag: 140, MimeType: "audio/mp4", Bitrate: 128000, HasAudio: true},
 		},
@@ -746,8 +901,8 @@ func TestPredictedOutputFilename_NumericDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("predictedOutputFilename() error = %v", err)
 	}
-	if got != "jNQXAC9IVRw-140.mp4" {
-		t.Fatalf("filename=%q, want jNQXAC9IVRw-140.mp4", got)
+	if got != "Audio title [jNQXAC9IVRw].mp4" {
+		t.Fatalf("filename=%q, want Audio title [jNQXAC9IVRw].mp4", got)
 	}
 }
 
@@ -2090,8 +2245,8 @@ func TestRecordCompletedDownload_EnforcesMaxDownloads(t *testing.T) {
 	if err := recordCompletedDownload("DSYFmhjDbvs"); !errors.Is(err, errMaxDownloadsReached) {
 		t.Fatalf("second recordCompletedDownload() error = %v, want max downloads", err)
 	}
-	if activeDownloadLimit.Count != 2 {
-		t.Fatalf("download count=%d, want 2", activeDownloadLimit.Count)
+	if got := activeDownloadLimit.Count.Load(); got != 2 {
+		t.Fatalf("download count=%d, want 2", got)
 	}
 }
 
@@ -2278,7 +2433,7 @@ func TestWriteDescriptionSidecar_OutputPathDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeDescriptionSidecar() error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "jNQXAC9IVRw-description.description")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "Example [jNQXAC9IVRw].description")); err != nil {
 		t.Fatalf("description sidecar not written under output path dir: %v", err)
 	}
 }
