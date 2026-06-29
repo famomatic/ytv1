@@ -66,6 +66,13 @@ func New(config Config) *Client {
 func NewClient(config Config) *Client {
 	if config.HTTPClient == nil {
 		config.HTTPClient = defaultHTTPClient(config.ProxyURL, config.SourceAddress, config.InsecureSkipVerify)
+	} else {
+		// Avoid mutating a caller-owned *http.Client (which may be shared
+		// across many ytv1 clients or used elsewhere) when we only need to
+		// attach a cookie jar. Take a shallow copy so the jar assignment is
+		// local to this client.
+		owned := *config.HTTPClient
+		config.HTTPClient = &owned
 	}
 	if config.CookieJar != nil {
 		config.HTTPClient.Jar = config.CookieJar

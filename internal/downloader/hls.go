@@ -27,6 +27,10 @@ type HLSDownloader struct {
 	seenSegments     map[string]bool
 	lastSeq          int
 	skippedFragments int
+	// writtenInit tracks whether the initialization segment referenced by
+	// an EXT-X-MAP has been written to the output, so it is not duplicated
+	// on playlist refreshes.
+	writtenInit bool
 }
 
 type hlsSegment struct {
@@ -82,11 +86,20 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 		}
 
 		// 2. Parse Segments
-		segments, targetDuration, err := h.parseSegments(ctx, manifest, h.PlaylistURL)
+		segments, initSegment, targetDuration, err := h.parseSegments(ctx, manifest, h.PlaylistURL)
 		if err != nil {
 			return err
 		}
 		isLive := !strings.Contains(manifest, "#EXT-X-ENDLIST")
+
+		// 2a. Write the initialization segment (EXT-X-MAP) exactly once
+		// before any media segment. fMP4 streams are unusable without it.
+		if initSegment != nil && !h.writtenInit {
+			if err := h.downloadInitSegment(ctx, *initSegment, w); err != nil {
+				return fmt.Errorf("failed to download init segment: %w", err)
+			}
+			h.writtenInit = true
+		}
 
 		// 3. Process new segments
 		newSegments := 0
@@ -107,14 +120,14 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
 					}
 					h.lastSeq = seg.Seq
-					h.seenSegments[seg.URL] = true
+					h.seenSegments = trackSeen(h.seenSegments, seg.URL)
 					continue
 				}
 				return fmt.Errorf("failed to download segment seq=%d: %w", seg.Seq, err)
 			}
 
 			h.lastSeq = seg.Seq
-			h.seenSegments[seg.URL] = true
+			h.seenSegments = trackSeen(h.seenSegments, seg.URL)
 			newSegments++
 		}
 
@@ -128,9 +141,6 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 		if sleepTime == 0 {
 			sleepTime = 5 * time.Second
 		}
-		// If we found no new segments, maybe backoff slightly not needed as we sleep targetDuration
-		// Usually targetDuration / 2 or full targetDuration.
-		// yt-dlp logic is complex, simple approach: wait targetDuration.
 
 		timer := time.NewTimer(sleepTime)
 		select {
@@ -150,8 +160,10 @@ func (h *HLSDownloader) fetchManifest(ctx context.Context, url string) (string, 
 	return string(body), nil
 }
 
-func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL string) ([]hlsSegment, float64, error) {
+func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL string) ([]hlsSegment, *hlsMap, float64, error) {
 	scanner := bufio.NewScanner(strings.NewReader(manifest))
+	// Bound individual line length to avoid OOM on malicious manifests.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // 1 MiB max line
 	var segments []hlsSegment
 	var currentKey *hlsKey
 	var currentMap *hlsMap
@@ -182,7 +194,7 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 		if strings.HasPrefix(line, "#EXT-X-KEY:") {
 			k, err := parseKey(line[11:], manifestURL)
 			if err != nil {
-				return nil, 0, err
+				return nil, nil, 0, err
 			}
 			currentKey = k
 			continue
@@ -191,7 +203,7 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 		if strings.HasPrefix(line, "#EXT-X-MAP:") {
 			m, err := parseMap(line[11:])
 			if err != nil {
-				return nil, 0, fmt.Errorf("parse EXT-X-MAP: %w", err)
+				return nil, nil, 0, fmt.Errorf("parse EXT-X-MAP: %w", err)
 			}
 			currentMap = m
 			continue
@@ -208,7 +220,7 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 				if currentKey != nil && currentKey.Method == "AES-128" && len(currentKey.Key) == 0 {
 					keyBytes, err := h.fetchKey(ctx, currentKey.URI)
 					if err != nil {
-						return nil, 0, fmt.Errorf("failed to fetch key: %w", err)
+						return nil, nil, 0, fmt.Errorf("failed to fetch key: %w", err)
 					}
 					currentKey.Key = keyBytes
 				}
@@ -223,7 +235,14 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 			}
 		}
 	}
-	return segments, targetDuration, nil
+	if err := scanner.Err(); err != nil {
+		return nil, nil, 0, err
+	}
+	// Resolve the EXT-X-MAP URI to an absolute URL so it can be fetched.
+	if currentMap != nil {
+		currentMap.URI = resolveURL(manifestURL, currentMap.URI)
+	}
+	return segments, currentMap, targetDuration, nil
 }
 
 func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w io.Writer) error {
@@ -240,7 +259,14 @@ func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w i
 		if err != nil {
 			return err
 		}
-		cbc := cipher.NewCBCDecrypter(block, seg.Key.IV)
+		// The HLS spec says: if EXT-X-KEY has no IV, the IV is the segment
+		// sequence number as a 128-bit big-endian integer. cipher.NewCBCDecrypter
+		// panics if the IV is nil, so we must synthesize it here.
+		iv := seg.Key.IV
+		if len(iv) == 0 {
+			iv = defaultAESIVForSeq(seg.Seq)
+		}
+		cbc := cipher.NewCBCDecrypter(block, iv)
 		if len(body) == 0 {
 			return nil
 		}
@@ -268,6 +294,33 @@ func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w i
 	return err
 }
 
+// downloadInitSegment fetches the EXT-X-MAP initialization segment and writes
+// it to the output. The init segment of an fMP4 stream is not encrypted, so
+// it is written verbatim.
+func (h *HLSDownloader) downloadInitSegment(ctx context.Context, m hlsMap, w io.Writer) error {
+	if strings.TrimSpace(m.URI) == "" {
+		return nil
+	}
+	body, err := doGETBytesWithRetry(ctx, h.Client, m.URI, h.Headers, h.Transport)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(body)
+	return err
+}
+
+// defaultAESIVForSeq builds the default IV used by HLS AES-128 when the
+// EXT-X-KEY does not specify one: the segment's media sequence number as a
+// 128-bit big-endian integer.
+func defaultAESIVForSeq(seq int) []byte {
+	iv := make([]byte, aes.BlockSize)
+	u := uint64(seq)
+	for i := 0; i < 8; i++ {
+		iv[aes.BlockSize-1-i] = byte(u >> (8 * uint(i)))
+	}
+	return iv
+}
+
 func (h *HLSDownloader) fetchKey(ctx context.Context, url string) ([]byte, error) {
 	return doGETBytesWithRetry(ctx, h.Client, url, h.Headers, h.Transport)
 }
@@ -277,7 +330,7 @@ func parseKey(attrs, manifestURL string) (*hlsKey, error) {
 
 	key := &hlsKey{
 		Method: m["METHOD"],
-		URI:    m["URI"],
+		URI:    resolveURL(manifestURL, m["URI"]),
 	}
 	if ivHex, ok := m["IV"]; ok {
 		ivHex = strings.TrimPrefix(ivHex, "0x")
@@ -298,3 +351,4 @@ func parseMap(attrs string) (*hlsMap, error) {
 	}
 	return &hlsMap{URI: uri}, nil
 }
+

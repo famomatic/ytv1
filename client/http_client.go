@@ -12,11 +12,14 @@ func defaultHTTPClient(proxyURL, sourceAddress string, insecureSkipVerify bool) 
 	proxyURL = strings.TrimSpace(proxyURL)
 	sourceAddress = strings.TrimSpace(sourceAddress)
 	if proxyURL == "" && sourceAddress == "" && !insecureSkipVerify {
-		return http.DefaultClient
+		// Return a dedicated client sharing the default transport rather than
+		// http.DefaultClient, so a later caller mutating this client's Jar or
+		// Transport does not poison the shared global default client.
+		return &http.Client{Transport: http.DefaultTransport}
 	}
 	baseTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return http.DefaultClient
+		return &http.Client{Transport: http.DefaultTransport}
 	}
 	transport := baseTransport.Clone()
 	if proxyURL != "" {

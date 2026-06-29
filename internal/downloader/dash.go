@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,14 +144,14 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
 					}
 					d.lastSeq = seg.Seq
-					d.seenSegments[seg.URL] = true
+					d.seenSegments = trackSeen(d.seenSegments, seg.URL)
 					continue
 				}
 				return err
 			}
 
 			d.lastSeq = seg.Seq
-			d.seenSegments[seg.URL] = true
+			d.seenSegments = trackSeen(d.seenSegments, seg.URL)
 		}
 
 		if !isDynamic {
@@ -376,8 +377,73 @@ func (d *DASHDownloader) downloadSegment(ctx context.Context, seg dashSegment, w
 }
 
 func parseDuration(s string) (time.Duration, error) {
-	// ISO 8601 duration parser (PT1S)
-	// Go doesn't have native ISO duration parser.
-	// Simple approximation for PT#S
-	return time.ParseDuration(strings.ToLower(strings.ReplaceAll(s, "PT", "")))
+	return parseISO8601Duration(s)
+}
+
+// parseISO8601Duration parses a subset of ISO 8601 durations used in DASH
+// manifests: forms like "PT1S", "PT1H30M", "PT2.5S", "PT0S", and the optional
+// leading date component "P1DT2H". The previous implementation lowercased the
+// string and then did a case-sensitive ReplaceAll of "PT", which never
+// matched, so every DASH refresh interval was mis-parsed.
+func parseISO8601Duration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	if !strings.HasPrefix(s, "P") {
+		return 0, fmt.Errorf("invalid ISO 8601 duration: %q", s)
+	}
+	body := s[1:]
+	var d time.Duration
+	consumed := false
+	// Optional days: split on "T" if a date portion precedes the time portion.
+	if idx := strings.Index(body, "T"); idx >= 0 {
+		datePart := body[:idx]
+		timePart := body[idx+1:]
+		if err := scanDurationComponents(datePart, map[byte]time.Duration{'D': 24 * time.Hour, 'W': 7 * 24 * time.Hour, 'M': 30 * 24 * time.Hour, 'Y': 365 * 24 * time.Hour}, &d, &consumed); err != nil {
+			return 0, err
+		}
+		if err := scanDurationComponents(timePart, map[byte]time.Duration{'H': time.Hour, 'M': time.Minute, 'S': time.Second}, &d, &consumed); err != nil {
+			return 0, err
+		}
+	} else {
+		// No time portion: only date units are valid.
+		if err := scanDurationComponents(body, map[byte]time.Duration{'D': 24 * time.Hour, 'W': 7 * 24 * time.Hour, 'M': 30 * 24 * time.Hour, 'Y': 365 * 24 * time.Hour}, &d, &consumed); err != nil {
+			return 0, err
+		}
+	}
+	// "P" or "PT" with no components is not a valid duration.
+	if !consumed {
+		return 0, fmt.Errorf("invalid ISO 8601 duration: %q", s)
+	}
+	return d, nil
+}
+
+// scanDurationComponents scans a sequence like "1H30M" or "2.5S", adding each
+// value (scaled by its unit) into d. units maps the unit suffix byte to its
+// duration scale.
+func scanDurationComponents(part string, units map[byte]time.Duration, d *time.Duration, consumed *bool) error {
+	i := 0
+	for i < len(part) {
+		// Read the numeric value (integer or fractional).
+		j := i
+		for j < len(part) && (part[j] == '.' || (part[j] >= '0' && part[j] <= '9')) {
+			j++
+		}
+		if j == i {
+			return fmt.Errorf("invalid ISO 8601 duration segment: %q", part)
+		}
+		scale, ok := units[part[j]]
+		if !ok {
+			return fmt.Errorf("unknown ISO 8601 duration unit %q in %q", string(part[j]), part)
+		}
+		f, err := strconv.ParseFloat(part[i:j], 64)
+		if err != nil {
+			return fmt.Errorf("invalid ISO 8601 duration value %q: %w", part[i:j], err)
+		}
+		*d += time.Duration(f * float64(scale))
+		*consumed = true
+		i = j + 1
+	}
+	return nil
 }

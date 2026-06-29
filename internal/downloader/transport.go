@@ -85,7 +85,7 @@ func normalizeTransportConfig(cfg TransportConfig) effectiveTransportConfig {
 		InitialBackoff:              initialBackoff,
 		MaxBackoff:                  maxBackoff,
 		RetryStatusCodes:            statusCodes,
-		MaxConcurrency:              max(1, cfg.MaxConcurrency),
+		MaxConcurrency:              maxInt(1, cfg.MaxConcurrency),
 		SkipUnavailableFragments:    cfg.SkipUnavailableFragments,
 		MaxSkippedFragments:         cfg.MaxSkippedFragments,
 		ThrottledRateBytesPerSecond: throttledRate,
@@ -283,7 +283,10 @@ func parseRetryAfter(raw string) time.Duration {
 	return 0
 }
 
-func max(a, b int) int {
+// maxInt returns the larger of a or b. Go 1.21+ provides a builtin max, but
+// this package is imported transitively and we avoid relying on the builtin
+// here to keep the intent explicit and compatible.
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}

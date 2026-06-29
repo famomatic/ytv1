@@ -23,6 +23,11 @@ func ReadAllLimit(r io.Reader, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > maxBytes {
+		// Drain the remainder of the stream so the underlying connection can
+		// be returned to the pool for reuse. We discard everything but cap the
+		// work to avoid a hostile server keeping us busy indefinitely; any
+		// drain error is ignored since we are already returning ErrBodyTooLarge.
+		_, _ = io.Copy(io.Discard, io.LimitReader(r, 1<<30))
 		return nil, fmt.Errorf("%w: %d bytes", ErrBodyTooLarge, int64(len(data)))
 	}
 	return data, nil
