@@ -1497,8 +1497,11 @@ func ToClientConfig(opts Options) (client.Config, error) {
 	}
 	cfg.DownloadTransport.SkipUnavailableFragments = opts.SkipUnavailableFragments
 
-	// Muxer check (ffmpeg)
-	cfg.Muxer = muxer.NewFFmpegMuxerWithExtraArgs(opts.FFmpegLocation, ffmpegMergerPostprocessorArgs(opts.PostprocessorArgs))
+	// Muxer: puremux (pure Go; reads WebM/MKV/MP4 input, writes WebM/MKV) is
+	// the primary muxer. FFmpeg handles MP4 output, metadata embedding, and
+	// any puremux failure; FFmpegLocation/postprocessor-args configure it.
+	ffmpegFallback := muxer.NewFFmpegMuxerWithExtraArgs(opts.FFmpegLocation, ffmpegMergerPostprocessorArgs(opts.PostprocessorArgs))
+	cfg.Muxer = muxer.NewPureMuxMuxer(ffmpegFallback)
 
 	if opts.ClientsOverrides != "" {
 		cfg.ClientOverrides = strings.Split(opts.ClientsOverrides, ",")

@@ -33,7 +33,7 @@
 ## 1. Current Snapshot (Update Every Session)
 
 ### 1.1 Session Date
-- `2026-06-21`
+- `2026-06-30`
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -343,6 +343,8 @@
 140. `[x]` B139. Polished refreshing progress bar UX
 141. `[x]` B140. Single-line progress behavior for captured/non-TTY output
 142. `[x]` B141. Clear interactive progress line on completion
+143. `[x]` B142. puremux package as primary muxer with FFmpeg fallback
+144. `[-]` B143. (reserved for follow-up muxer validation)
 
 ---
 
@@ -2461,7 +2463,26 @@ Make `ytv1` a practical **YouTube-focused** CLI substitute for yt-dlp in daily o
   - `cmd/ytv1/adapters.go`
   - `docs/IMPLEMENTATION_PLAN.md`
 - Acceptance:
-  - `cmd/ytv1/main.go` is substantially reduced and no longer owns extraction/download workflow bodies; `go test ./...` remains green.
+ - `cmd/ytv1/main.go` is substantially reduced and no longer owns extraction/download workflow bodies; `go test ./...` remains green.
+
+---
+
+### B142. puremux Package as Primary Muxer with FFmpeg Fallback
+- Status: `[x]`
+- Goal: Reduce FFmpeg dependency by muxing WebM (VP8/VP9/AV1 + Opus) selections through the pure Go `github.com/famomatic/puremux` package, while falling back to FFmpeg for non-WebM containers or when metadata embedding is requested.
+- Work:
+  1. Add `internal/muxer.PureMuxMuxer` implementing the existing `Muxer` interface (`Available`, `Merge`), backed by `puremux.RemuxInputs`.
+  2. Add container/codec compatibility detection from `types.FormatInfo.MimeType` so puremux is only attempted for WebM-compatible video+audio pairs.
+  3. Add a `Fallback Muxer` field; route non-WebM inputs, metadata-embed requests, and puremux errors to FFmpeg when available.
+  4. Wire CLI/package default muxer to `PureMuxMuxer{Fallback: FFmpegMuxer}` so unauthenticated WebM downloads no longer require a local ffmpeg binary.
+  5. Add tests for WebM merge via puremux, FFmpeg fallback on non-WebM/metadata, and explicit unavailable error when neither can merge.
+- Target files:
+  - `internal/muxer/puremux.go`
+  - `internal/muxer/puremux_test.go`
+  - `client/download.go` (container detection plumbing)
+  - `internal/cli/parser.go` (default muxer wiring)
+- Acceptance:
+  - WebM video+audio merge works with no ffmpeg binary present; non-WebM/metadata merges fall back to FFmpeg; `go test ./...` green.
 
 ---
 
@@ -2738,6 +2759,7 @@ Cycle B is complete only when all are true:
 - `2026-06-21`: Completed `B139` by replacing the CLI progress text with a single-line refreshing ASCII progress bar, adding ETA and duplicate completion suppression, finishing active progress lines before lifecycle/warning logs, and verifying with a live `8IY44RZHyw8 -f 18` download plus `go test ./...`.
 - `2026-06-21`: Completed `B140` by detecting non-interactive stdout, suppressing intermediate refresh frames in captured/piped output, emitting only the final 100% progress line outside TTYs, using ANSI clear-line refresh and a compact progress bar in interactive terminals, preserving `--newline` behavior, and verifying with a live piped `8IY44RZHyw8 -f 18` download plus `go test ./...`.
 - `2026-06-21`: Completed `B141` by changing interactive progress `Finish()` to clear the active line instead of emitting a newline that can look like a repeated completed progress row, adding regression coverage for the clear-line sequence, and verifying with `go test ./...`; live media verification is currently blocked by YouTube `LOGIN_REQUIRED` bot confirmation on the test video.
+- `2026-06-30`: Completed `B142` by implementing `internal/muxer.PureMuxMuxer` over `github.com/famomatic/puremux` (pure-Go WebM/MKV/MP4 input -> WebM/MKV output via `puremux.Merge`), routing MP4 output, metadata-embedding requests, and puremux failures to an optional FFmpeg fallback, wiring the CLI default muxer to `PureMuxMuxer{Fallback: FFmpegMuxer}`, defaulting the merge container to `.webm` for WebM video+audio pairs (mirrored in filename prediction) so unauthenticated WebM downloads no longer require an ffmpeg binary, updating the `TestToClientConfig_PostprocessorArgsForFFmpegMuxer` expectation to unwrap the fallback, adding muxer, client-merge, and prediction regression tests, updating README requirements, and verifying with `go build ./...`, `go vet ./...`, and `go test ./...`.
 
 ---
 

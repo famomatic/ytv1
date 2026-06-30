@@ -12,8 +12,9 @@ ytv1 is a Go-native library for extracting and downloading from YouTube. It prov
 ## Requirements
 
 -   Go: `1.23+` (see `go.mod`)
--   External tool: `ffmpeg` is required for merging separate video+audio streams and for MP3 transcoding
-    -   If `ffmpeg` is not available on `PATH`, those flows will fail; direct single-stream downloads can still work.
+-   External tool: `ffmpeg` is optional. Merging WebM (VP8/VP9/AV1 + Opus) video+audio streams is handled by the pure-Go [`puremux`](https://github.com/famomatic/puremux) muxer with no binary dependency.
+    -   `ffmpeg` is still required for MP4/MKV output with non-WebM codecs, metadata embedding (`--embed-metadata`), and MP3 transcoding.
+    -   If `ffmpeg` is not available on `PATH` and the selected formats require it, those flows fail; direct single-stream and WebM-pair downloads still work.
 
 ## Why ytv1
 

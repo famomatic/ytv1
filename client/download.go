@@ -326,7 +326,7 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	}
 
 	basePath := options.OutputPath
-	mergeExt := normalizedMergeOutputExt(options.MergeOutputFormat)
+	mergeExt := defaultMergeExtForFormats(options.MergeOutputFormat, vidF, audF)
 	if basePath == "" {
 		basePath = defaultOutputPathForExt(videoID, meta.Title, fmt.Sprintf("%d+%d", vidF.Itag, audF.Itag), mergeExt)
 	} else {
@@ -1589,6 +1589,34 @@ func normalizedMergeOutputExt(raw string) string {
 		return "mp4"
 	}
 	return ext
+}
+
+// defaultMergeExtForFormats resolves the merged-output container extension.
+// When the caller requested an explicit merge-output format, that wins.
+// Otherwise, when both selected formats are WebM (VP8/VP9/AV1 video + Opus
+// audio), default to "webm" so the pure-Go puremux muxer can handle the
+// merge without an FFmpeg binary. For any other codec pair, keep "mp4" so
+// FFmpeg (when available) produces a broadly compatible container.
+func defaultMergeExtForFormats(requested string, vidF, audF FormatInfo) string {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return normalizedMergeOutputExt(requested)
+	}
+	if isWebMMimeType(vidF.MimeType) && isWebMMimeType(audF.MimeType) {
+		return "webm"
+	}
+	return normalizedMergeOutputExt("")
+}
+
+// isWebMMimeType reports whether a format MIME type describes a WebM
+// container stream (video/webm or audio/webm). puremux remuxes these
+// through its pure-Go pipeline without touching codec payloads.
+func isWebMMimeType(mimeType string) bool {
+	mediaType, _, err := mime.ParseMediaType(mimeType)
+	if err != nil {
+		return strings.Contains(strings.ToLower(mimeType), "webm")
+	}
+	return mediaType == "video/webm" || mediaType == "audio/webm"
 }
 
 func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
