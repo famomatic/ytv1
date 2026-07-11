@@ -1,6 +1,9 @@
 package client
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrInvalidInput indicates malformed input (not a video ID/url).
@@ -21,6 +24,9 @@ var (
 	ErrMuxerUnavailable = errors.New("muxer unavailable")
 	// ErrTranscriptParse indicates transcript payload could not be parsed.
 	ErrTranscriptParse = errors.New("transcript parse failed")
+	// ErrTruncatedDownload indicates the downloaded stream is shorter than
+	// the expected size reported by YouTube (silent truncation).
+	ErrTruncatedDownload = errors.New("downloaded stream is shorter than expected size")
 )
 
 // ErrorCategory is a stable machine-readable error class.
@@ -37,6 +43,7 @@ const (
 	ErrorCategoryMP3TranscoderNotConfigured ErrorCategory = "mp3_transcoder_not_configured"
 	ErrorCategoryTranscriptParse            ErrorCategory = "transcript_parse_failed"
 	ErrorCategoryDownloadFailed             ErrorCategory = "download_failed"
+	ErrorCategoryTruncatedDownload          ErrorCategory = "truncated_download"
 )
 
 // InvalidInputDetailError preserves ErrInvalidInput while exposing parsing reason/context.
@@ -218,6 +225,25 @@ func (e *TranscriptParseDetailError) Is(target error) bool {
 	return target == ErrTranscriptParse
 }
 
+// TruncatedDownloadError preserves ErrTruncatedDownload while exposing the
+// expected vs actual byte counts so callers can distinguish a silent
+// truncation (server closed the connection early) from a hard HTTP error.
+type TruncatedDownloadError struct {
+	Expected int64
+	Actual   int64
+	Itag     int
+}
+
+// Error returns a human-readable truncation summary.
+func (e *TruncatedDownloadError) Error() string {
+	return fmt.Sprintf("download truncated: got %d bytes, expected %d (itag=%d)", e.Actual, e.Expected, e.Itag)
+}
+
+// Is reports sentinel compatibility with ErrTruncatedDownload.
+func (e *TruncatedDownloadError) Is(target error) bool {
+	return target == ErrTruncatedDownload
+}
+
 // AttemptDetails extracts attempt matrix details from typed package errors.
 func AttemptDetails(err error) ([]AttemptDetail, bool) {
 	if err == nil {
@@ -265,6 +291,8 @@ func ClassifyError(err error) ErrorCategory {
 		return ErrorCategoryDownloadFailed
 	case errors.Is(err, ErrTranscriptParse):
 		return ErrorCategoryTranscriptParse
+	case errors.Is(err, ErrTruncatedDownload):
+		return ErrorCategoryTruncatedDownload
 	default:
 		var downloadErr *DownloadFailureDetailError
 		if errors.As(err, &downloadErr) {

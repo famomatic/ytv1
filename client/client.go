@@ -449,6 +449,7 @@ func toFormatInfo(f formats.Format) FormatInfo {
 		Quality:      f.Quality,
 		QualityLabel: f.QualityLabel,
 		SourceClient: f.SourceClient,
+		ContentLength: f.ContentLength,
 	}
 }
 

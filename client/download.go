@@ -387,6 +387,18 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 	c.emitDownloadEvent("download", "complete", videoID, audioPath, fmt.Sprintf("bytes=%d", getFileSize(audioPath)))
 	defer c.cleanupIntermediateFile(videoID, audioPath, keepIntermediates)
 
+	// Final guard before merge: reject empty intermediate files. A zero-byte
+	// video or audio track would produce a broken merged file that plays
+	// with corruption or no media.
+	if getFileSize(videoPath) == 0 {
+		c.cleanupIntermediateFile(videoID, videoPath, keepIntermediates)
+		return nil, &TruncatedDownloadError{Expected: vidF.ContentLength, Actual: 0, Itag: vidF.Itag}
+	}
+	if getFileSize(audioPath) == 0 {
+		c.cleanupIntermediateFile(videoID, audioPath, keepIntermediates)
+		return nil, &TruncatedDownloadError{Expected: audF.ContentLength, Actual: 0, Itag: audF.Itag}
+	}
+
 	// Merge
 	c.emitDownloadEvent("merge", "start", videoID, basePath, fmt.Sprintf("video_itag=%d,audio_itag=%d", vidF.Itag, audF.Itag))
 	if err := c.config.Muxer.Merge(ctx, videoPath, audioPath, basePath, meta); err != nil {
@@ -424,7 +436,23 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 		buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient),
 		newDownloadProgressReporter(c.config.OnDownloadProgress, videoID, outputPath, f.Itag, inferProgressPart(outputPath)),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Post-download integrity check: verify the file size matches the
+	// expected ContentLength reported by YouTube. A mismatch means the
+	// stream was silently truncated (server closed early, partial write).
+	if f.ContentLength > 0 {
+		actual := getFileSize(outputPath)
+		if actual < f.ContentLength {
+			return &TruncatedDownloadError{
+				Expected: f.ContentLength,
+				Actual:   actual,
+				Itag:     f.Itag,
+			}
+		}
+	}
+	return nil
 }
 
 func transcodeURLToMP3(
@@ -541,7 +569,14 @@ func downloadURLToWriterOnceProgress(
 	if progress != nil {
 		progress.setTotal(resp.ContentLength)
 	}
-	return copyWithDownloadConfig(ctx, w, resp.Body, cfg, progress)
+	// Propagate the server-advertised Content-Length into the copy config so
+	// that a premature connection close (short read + clean EOF) is detected
+	// instead of silently producing a truncated file.
+	copyCfg := cfg
+	if resp.ContentLength > 0 {
+		copyCfg.expectedContentLength = resp.ContentLength
+	}
+	return copyWithDownloadConfig(ctx, w, resp.Body, copyCfg, progress)
 }
 
 func downloadURLToPath(
@@ -729,7 +764,31 @@ func copyWithDownloadConfig(ctx context.Context, dst io.Writer, src io.Reader, c
 	if progress != nil {
 		reader = &progressReader{src: reader, progress: progress}
 	}
-	return io.Copy(dst, reader)
+	n, err := io.Copy(dst, reader)
+	if err != nil {
+		// Map premature EOF from a short Content-Length read to a typed
+		// truncation error so callers can distinguish it from hard I/O
+		// failures and retry appropriately.
+		if errors.Is(err, io.ErrUnexpectedEOF) && cfg.expectedContentLength > 0 && n < cfg.expectedContentLength {
+			return n, &TruncatedDownloadError{
+				Expected: cfg.expectedContentLength,
+				Actual:   n,
+			}
+		}
+		return n, err
+	}
+	// Detect premature EOF: if the server advertised a Content-Length but
+	// closed the connection before delivering all bytes, io.Copy returns
+	// (n, nil) because the HTTP body reader treats a short read followed by
+	// a clean close as a normal EOF. Without this check the caller would
+	// silently accept a truncated file.
+	if cfg.expectedContentLength > 0 && n < cfg.expectedContentLength {
+		return n, &TruncatedDownloadError{
+			Expected: cfg.expectedContentLength,
+			Actual:   n,
+		}
+	}
+	return n, nil
 }
 
 func rateLimitedReader(ctx context.Context, src io.Reader, bytesPerSecond int64) io.Reader {
@@ -1053,7 +1112,15 @@ func downloadRangeOnce(
 		if progress != nil {
 			progress.setTotal(totalFromContentRange(resp.Header.Get("Content-Range")))
 		}
-		return copyWithDownloadConfig(ctx, w, resp.Body, cfg, progress)
+		// For range requests, the expected length is the size of the range
+		// being fetched (end - start + 1), not the full Content-Length. We
+		// derive it from the Content-Range header when available so a short
+		// read is caught rather than silently accepted.
+		copyCfg := cfg
+		if expected := rangeSizeFromContentRange(resp.Header.Get("Content-Range"), startOffset); expected > 0 {
+			copyCfg.expectedContentLength = expected
+		}
+		return copyWithDownloadConfig(ctx, w, resp.Body, copyCfg, progress)
 	case http.StatusRequestedRangeNotSatisfiable:
 		return 0, errRangeNotSatisfiable
 	case http.StatusOK:
@@ -1131,6 +1198,10 @@ type effectiveDownloadTransportConfig struct {
 	ThrottledRateMinDuration    time.Duration
 	FileAccessRetries           int
 	FileAccessBackoff           time.Duration
+	// expectedContentLength is the expected total byte count for a single
+	// non-chunked download, used to detect premature EOF. 0 disables the
+	// check (used by chunked/range paths that verify completeness separately).
+	expectedContentLength int64
 }
 
 func normalizeDownloadTransportConfig(cfg DownloadTransportConfig) effectiveDownloadTransportConfig {
@@ -1304,11 +1375,13 @@ func downloadURLChunked(
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 
-	for _, chunk := range chunks {
+	completed := make([]bool, len(chunks))
+	for i, chunk := range chunks {
 		if ctx.Err() != nil {
 			break
 		}
 		chunk := chunk
+		idx := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1325,7 +1398,9 @@ func downloadURLChunked(
 				default:
 				}
 				cancel()
+				return
 			}
+			completed[idx] = true
 		}()
 	}
 
@@ -1334,6 +1409,18 @@ func downloadURLChunked(
 	case err := <-errCh:
 		return 0, err
 	default:
+		// Context cancellation can cause goroutines to return via the
+		// <-ctx.Done() branch without writing their chunk and without
+		// sending to errCh. If any chunk is missing, the file has
+		// zero-filled gaps, so we must not report success.
+		if ctx.Err() != nil {
+			return 0, ctx.Err()
+		}
+		for _, ok := range completed {
+			if !ok {
+				return 0, &TruncatedDownloadError{Expected: total, Actual: -1}
+			}
+		}
 		return total, nil
 	}
 }
@@ -1380,6 +1467,32 @@ func totalFromContentRange(raw string) int64 {
 		return 0
 	}
 	return total
+}
+
+// rangeSizeFromContentRange derives the expected byte count for a partial
+// content response from its Content-Range header (e.g. "bytes 100-199/1000"
+// yields 100). Returns 0 if the header is absent or unparseable, in which
+// case the caller skips the premature-EOF check.
+func rangeSizeFromContentRange(raw string, startOffset int64) int64 {
+	cr := strings.TrimSpace(raw)
+	if !strings.HasPrefix(cr, "bytes ") {
+		return 0
+	}
+	body := strings.TrimPrefix(cr, "bytes ")
+	slash := strings.LastIndex(body, "/")
+	if slash < 0 {
+		return 0
+	}
+	rangePart := body[:slash]
+	dash := strings.Index(rangePart, "-")
+	if dash < 0 {
+		return 0
+	}
+	var end int64
+	if _, err := fmt.Sscanf(rangePart[dash+1:], "%d", &end); err != nil || end < startOffset {
+		return 0
+	}
+	return end - startOffset + 1
 }
 
 func buildChunks(total, chunkSize int64) [][2]int64 {

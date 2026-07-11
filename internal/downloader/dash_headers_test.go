@@ -251,3 +251,53 @@ func TestDASHDownloader_StaticConcurrentDownloadBatchesLongSegmentLists(t *testi
 		t.Fatalf("downloaded bytes = %d, want %d", got, segmentCount)
 	}
 }
+
+// TestDASHDownloader_RejectsEmptySegment verifies that a segment which
+// downloads as an empty body is rejected rather than silently producing a
+// truncated stream.
+func TestDASHDownloader_RejectsEmptySegment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.mpd":
+			w.Header().Set("Content-Type", "application/dash+xml")
+			w.Write([]byte(`<?xml version="1.0"?>
+<MPD type="static" xmlns="urn:mpeg:dash:schema:mpd:2011">
+  <Period>
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="248" bandwidth="1000000">
+        <SegmentTemplate timescale="1" media="seg-$Number$.m4s" startNumber="1">
+          <SegmentTimeline>
+            <S d="1" r="2"/>
+          </SegmentTimeline>
+        </SegmentTemplate>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`))
+		case "/seg-2.m4s":
+			// Return an empty 200 OK body for one segment.
+			// Write nothing; the response body is empty.
+			return
+		default:
+			if strings.HasPrefix(r.URL.Path, "/seg-") {
+				w.Write([]byte("x"))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	dl := NewDASHDownloader(server.Client(), server.URL+"/manifest.mpd", "248").WithTransportConfig(TransportConfig{
+		MaxConcurrency: 1,
+	})
+
+	var buf bytes.Buffer
+	err := dl.Download(context.Background(), &buf)
+	if err == nil {
+		t.Fatal("expected error for empty segment, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty body") {
+		t.Fatalf("expected empty body error, got %v", err)
+	}
+}

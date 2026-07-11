@@ -34,6 +34,7 @@
 
 ### 1.1 Session Date
 - `2026-06-30`
+- `2026-07-12` (B144 silent truncation prevention)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -199,6 +200,7 @@
 - B139 completion increment landed: replaced plain progress text with a cleaner single-line refreshing progress bar (`[####----]`) showing part, percent, current/total size, Mbps, and ETA, with duplicate completion suppression and clean log handoff before lifecycle/warning lines.
 - B140 completion increment landed: progress output now collapses to one final progress line when stdout is not an interactive terminal, uses ANSI clear-line refresh plus a compact bar for interactive terminals, and avoids captured/piped output that appears as many refresh lines.
 - B141 completion increment landed: interactive progress finish now clears the active progress line instead of leaving a final duplicated-looking 100% line before subsequent status output, while captured/non-TTY output still retains a single final progress line.
+- B144 completion increment landed: silent download truncation prevention across the full download pipeline. `copyWithDownloadConfig` now verifies the copied byte count against the server-advertised Content-Length (and range size for partial requests), mapping short reads to a typed `ErrTruncatedDownload`; `downloadURLChunked` now tracks per-chunk completion and refuses to return success when context cancellation leaves zero-filled gaps; `downloadSegmentBatchConcurrent` (DASH) now rejects empty segment bodies and surfaces context errors instead of silently writing gaps; DASH `r=-1` in static manifests is now expanded from `mediaPresentationDuration` (ported from yt-dlp) instead of generating a single segment; `downloadStream` performs a post-download file-size integrity check against the format's `ContentLength`; and `downloadAndMerge` guards against empty intermediate files before merging. New `TruncatedDownloadError` type and `ErrorCategoryTruncatedDownload` classification added. Covered by reproduction tests for premature EOF, chunked cancellation, chunked-transfer short reads, DASH r=-1 static/dynamic expansion, and empty DASH segment rejection.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -345,6 +347,7 @@
 142. `[x]` B141. Clear interactive progress line on completion
 143. `[x]` B142. puremux package as primary muxer with FFmpeg fallback
 144. `[-]` B143. (reserved for follow-up muxer validation)
+145. `[x]` B144. Silent download truncation prevention (premature EOF detection, chunked completeness verification, DASH r=-1 expansion, post-download ContentLength integrity check)
 
 ---
 

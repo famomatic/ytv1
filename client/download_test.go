@@ -1437,3 +1437,165 @@ func TestDownloadFallsBackToSingleWhenMergeChallengeUnsolved(t *testing.T) {
 		t.Fatalf("expected fallback muxed itag=18, got %d", res.Itag)
 	}
 }
+
+// TestDownloadURLToWriter_DetectsPrematureEOF verifies that a server which
+// advertises a Content-Length but closes the connection before delivering
+// all bytes is detected as a truncated download rather than silently accepted.
+func TestDownloadURLToWriter_DetectsPrematureEOF(t *testing.T) {
+	// Server claims 1000 bytes but only sends 500, then closes cleanly.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 500))
+		// Flush and close — the HTTP body reader will see this as a clean EOF.
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	_, err := downloadURLToWriterWithConfig(context.Background(), srv.Client(), srv.URL, &buf, DownloadTransportConfig{
+		MaxRetries: 0,
+	})
+	if err == nil {
+		t.Fatal("expected truncation error, got nil")
+	}
+	if !errors.Is(err, ErrTruncatedDownload) {
+		t.Fatalf("expected ErrTruncatedDownload, got %v", err)
+	}
+}
+
+// TestDownloadURLToPath_ChunkedDetectsMissingChunk verifies that when a
+// chunk download is cancelled mid-flight, the chunked downloader does not
+// return success with a zero-filled gap in the output file.
+func TestDownloadURLToPath_ChunkedDetectsMissingChunk(t *testing.T) {
+	payload := []byte(strings.Repeat("chunk-data-", 512))
+	var rangeCalls int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rangeHeader := r.Header.Get("Range")
+		if rangeHeader == "" {
+			http.Error(w, "range required", http.StatusBadRequest)
+			return
+		}
+		var start, end int
+		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		atomic.AddInt32(&rangeCalls, 1)
+		// Stall so the context cancels mid-download.
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(payload[start : end+1])
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	out := filepath.Join(t.TempDir(), "chunked-missing.bin")
+	_, err := downloadURLToPath(ctx, srv.Client(), srv.URL, out, false, DownloadTransportConfig{
+		EnableChunked:  true,
+		ChunkSize:      1024,
+		MaxConcurrency: 4,
+		MaxRetries:     0,
+	})
+	if err == nil {
+		t.Fatal("expected error for cancelled chunked download, got nil")
+	}
+	// The error must be a context cancellation, not a silent success.
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrTruncatedDownload) {
+		t.Fatalf("expected context/truncation error, got %v", err)
+	}
+}
+
+// TestDownloadStream_RejectsTruncatedFile verifies that downloadStream
+// detects a file that is shorter than the expected ContentLength and returns
+// ErrTruncatedDownload instead of reporting success.
+func TestDownloadStream_RejectsTruncatedFile(t *testing.T) {
+	payload := []byte(strings.Repeat("x", 500))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	c := New(Config{HTTPClient: srv.Client()})
+	out := filepath.Join(t.TempDir(), "truncated.bin")
+	f := types.FormatInfo{
+		Itag:           999,
+		Protocol:       "https",
+		ContentLength:  1000,
+	}
+	err := c.downloadStream(context.Background(), "test", srv.URL, out, f, false, false)
+	if err == nil {
+		t.Fatal("expected truncation error, got nil")
+	}
+	if !errors.Is(err, ErrTruncatedDownload) {
+		t.Fatalf("expected ErrTruncatedDownload, got %v", err)
+	}
+}
+
+// TestDownloadStream_AcceptsCompleteFile verifies that downloadStream
+// accepts a file whose size matches the expected ContentLength.
+func TestDownloadStream_AcceptsCompleteFile(t *testing.T) {
+	payload := []byte(strings.Repeat("x", 1000))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	c := New(Config{HTTPClient: srv.Client()})
+	out := filepath.Join(t.TempDir(), "complete.bin")
+	f := types.FormatInfo{
+		Itag:           999,
+		Protocol:       "https",
+		ContentLength:  1000,
+	}
+	if err := c.downloadStream(context.Background(), "test", srv.URL, out, f, false, false); err != nil {
+		t.Fatalf("downloadStream() unexpected error = %v", err)
+	}
+	body, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(body, payload) {
+		t.Fatal("output file content mismatch")
+	}
+}
+
+// TestDownloadStream_DetectsChunkedPrematureEOF verifies truncation detection
+// when the server sends fewer bytes than the format's known ContentLength
+// without setting Content-Length on the response (chunked transfer). Go's
+// http client treats the early close as a clean EOF, so the post-download
+// file-size guard is the only defense.
+func TestDownloadStream_DetectsChunkedPrematureEOF(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No Content-Length header: body is streamed. A short write + close
+		// looks like a normal EOF to the HTTP client.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 500))
+	}))
+	defer srv.Close()
+
+	c := New(Config{HTTPClient: srv.Client()})
+	out := filepath.Join(t.TempDir(), "chunked-trunc.bin")
+	f := types.FormatInfo{
+		Itag:          999,
+		Protocol:      "https",
+		ContentLength: 1000,
+	}
+	err := c.downloadStream(context.Background(), "test", srv.URL, out, f, false, false)
+	if err == nil {
+		t.Fatal("expected truncation error for short chunked stream, got nil")
+	}
+	if !errors.Is(err, ErrTruncatedDownload) {
+		t.Fatalf("expected ErrTruncatedDownload, got %v", err)
+	}
+}
