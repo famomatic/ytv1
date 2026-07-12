@@ -64,3 +64,41 @@ func TestEffectiveMergeOutputExt(t *testing.T) {
 		t.Fatalf("EffectiveMergeOutputExt(default)=%q, want mp4", got)
 	}
 }
+
+// TestPredictOutputFilename_WebMDefaultNoFFmpeg verifies that a WebM
+// video+audio pair predicts a .webm merge container by default (no explicit
+// MergeOutputExt), so the pure-Go puremux muxer can handle it without ffmpeg.
+func TestPredictOutputFilename_WebMDefaultNoFFmpeg(t *testing.T) {
+	info := &VideoInfo{ID: "video123", Title: "Some title"}
+	formats := []FormatInfo{
+		{Itag: 248, MimeType: "video/webm; codecs=\"vp9\"", HasVideo: true, Width: 1920, Height: 1080, Bitrate: 2000000},
+		{Itag: 251, MimeType: "audio/webm; codecs=\"opus\"", HasAudio: true, Bitrate: 128000},
+	}
+	got, err := PredictOutputFilename(info, formats, OutputFilenameOptions{})
+	if err != nil {
+		t.Fatalf("PredictOutputFilename() error = %v", err)
+	}
+	want := "Some title [video123].webm"
+	if got != want {
+		t.Fatalf("PredictOutputFilename()=%q, want %q (webm default for WebM pairs)", got, want)
+	}
+}
+
+// TestPredictOutputFilename_MP4PairStaysMP4 verifies that a non-WebM (MP4)
+// video+audio pair still predicts .mp4 by default, preserving broad
+// compatibility and falling back to ffmpeg.
+func TestPredictOutputFilename_MP4PairStaysMP4(t *testing.T) {
+	info := &VideoInfo{ID: "video123", Title: "Some title"}
+	formats := []FormatInfo{
+		{Itag: 299, MimeType: "video/mp4; codecs=\"avc1\"", HasVideo: true, Width: 1920, Height: 1080, Bitrate: 2000000},
+		{Itag: 140, MimeType: "audio/mp4; codecs=\"mp4a\"", HasAudio: true, Bitrate: 128000},
+	}
+	got, err := PredictOutputFilename(info, formats, OutputFilenameOptions{})
+	if err != nil {
+		t.Fatalf("PredictOutputFilename() error = %v", err)
+	}
+	want := "Some title [video123].mp4"
+	if got != want {
+		t.Fatalf("PredictOutputFilename()=%q, want %q (mp4 default for MP4 pairs)", got, want)
+	}
+}

@@ -51,9 +51,27 @@ func (c *Client) DownloadThumbnail(ctx context.Context, info *VideoInfo, outputP
 	if err != nil {
 		return fmt.Errorf("failed to create thumbnail file: %w", err)
 	}
-	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	// Bound the thumbnail size so a malicious or misbehaving URL cannot fill
+	// the disk or exhaust memory while streaming to the file. We also drop
+	// the partial file on any write/sync/close failure so callers do not see
+	// a truncated thumbnail that looks like a successful download.
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxThumbnailBytes)); err != nil {
+		f.Close()
+		_ = os.Remove(outputPath)
 		return fmt.Errorf("failed to write thumbnail: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(outputPath)
+		return fmt.Errorf("failed to sync thumbnail file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(outputPath)
+		return fmt.Errorf("failed to close thumbnail file: %w", err)
 	}
 	return nil
 }
+
+// maxThumbnailBytes bounds the size of a downloaded thumbnail to prevent
+// unbounded disk/memory consumption from a hostile or malfunctioning URL.
+const maxThumbnailBytes int64 = 64 << 20 // 64 MiB

@@ -236,9 +236,15 @@ func TestToClientConfig_PostprocessorArgsForFFmpegMuxer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToClientConfig() error = %v", err)
 	}
-	ffmpegMuxer, ok := cfg.Muxer.(*muxer.FFmpegMuxer)
+	// The CLI wraps FFmpeg as the puremux fallback; postprocessor args must
+	// still reach the FFmpegMuxer.
+	pureMuxMuxer, ok := cfg.Muxer.(*muxer.PureMuxMuxer)
 	if !ok {
-		t.Fatalf("Muxer=%T, want *muxer.FFmpegMuxer", cfg.Muxer)
+		t.Fatalf("Muxer=%T, want *muxer.PureMuxMuxer", cfg.Muxer)
+	}
+	ffmpegMuxer, ok := pureMuxMuxer.Fallback.(*muxer.FFmpegMuxer)
+	if !ok {
+		t.Fatalf("Fallback=%T, want *muxer.FFmpegMuxer", pureMuxMuxer.Fallback)
 	}
 	got := strings.Join(ffmpegMuxer.ExtraArgs, "\x00")
 	want := strings.Join([]string{"-movflags", "+faststart", "--flag", "two words"}, "\x00")

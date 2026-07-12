@@ -1,8 +1,11 @@
 module github.com/famomatic/ytv1
 
-go 1.23.0
+go 1.23.5
 
-require github.com/dop251/goja v0.0.0-20260106131823-651366fbe6e3
+require (
+	github.com/dop251/goja v0.0.0-20260106131823-651366fbe6e3
+	github.com/famomatic/puremux v0.0.2
+)
 
 require (
 	github.com/dlclark/regexp2 v1.11.4 // indirect

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/famomatic/ytv1/internal/challenge"
@@ -33,8 +34,8 @@ type Client struct {
 	// fetchLocks serializes per-video-id fetch paths (session build,
 	// player URL resolution, challenge solve) to avoid thundering-herd
 	// duplicate network requests and lost cache updates.
-	fetchLocks       *keyLock
-	fetchLocksOnce   sync.Once
+	fetchLocks     *keyLock
+	fetchLocksOnce sync.Once
 }
 
 // fetchLock returns the per-video-id lock manager, initializing it lazily
@@ -50,11 +51,17 @@ func (c *Client) fetchLock() *keyLock {
 }
 
 type videoSession struct {
-	Response   *innertube.PlayerResponse
-	PlayerURL  string
-	Info       *VideoInfo
-	CachedAt   time.Time
-	LastAccess time.Time
+	Response  *innertube.PlayerResponse
+	PlayerURL string
+	Info      *VideoInfo
+	CachedAt  time.Time
+	// lastAccess tracks the most recent read/write time for LRU eviction.
+	// Stored as a *atomic.Int64 (UnixNano) so reads under the RLock can
+	// update access time without upgrading to a write lock, avoiding
+	// serialization of concurrent GetVideo/ResolveStreamURL callers that
+	// share the same session cache. A pointer is used because atomic types
+	// cannot be stored directly as map values (alignment constraints).
+	lastAccess *atomic.Int64
 }
 
 // New creates a new YouTube client.
@@ -66,6 +73,13 @@ func New(config Config) *Client {
 func NewClient(config Config) *Client {
 	if config.HTTPClient == nil {
 		config.HTTPClient = defaultHTTPClient(config.ProxyURL, config.SourceAddress, config.InsecureSkipVerify)
+	} else {
+		// Avoid mutating a caller-owned *http.Client (which may be shared
+		// across many ytv1 clients or used elsewhere) when we only need to
+		// attach a cookie jar. Take a shallow copy so the jar assignment is
+		// local to this client.
+		owned := *config.HTTPClient
+		config.HTTPClient = &owned
 	}
 	if config.CookieJar != nil {
 		config.HTTPClient.Jar = config.CookieJar
@@ -426,22 +440,23 @@ func toFormatInfo(f formats.Format) FormatInfo {
 	hasVideo := f.HasVideo
 	hasAudio := f.HasAudio
 	return FormatInfo{
-		Itag:         f.Itag,
-		URL:          f.URL,
-		MimeType:     f.MimeType,
-		Protocol:     f.Protocol,
-		HasAudio:     hasAudio,
-		HasVideo:     hasVideo,
-		Bitrate:      f.Bitrate,
-		Width:        f.Width,
-		Height:       f.Height,
-		FPS:          f.FPS,
-		Ciphered:     f.Ciphered,
-		IsDRM:        f.IsDRM,
-		IsDamaged:    f.IsDamaged,
-		Quality:      f.Quality,
-		QualityLabel: f.QualityLabel,
-		SourceClient: f.SourceClient,
+		Itag:          f.Itag,
+		URL:           f.URL,
+		MimeType:      f.MimeType,
+		Protocol:      f.Protocol,
+		HasAudio:      hasAudio,
+		HasVideo:      hasVideo,
+		Bitrate:       f.Bitrate,
+		Width:         f.Width,
+		Height:        f.Height,
+		FPS:           f.FPS,
+		Ciphered:      f.Ciphered,
+		IsDRM:         f.IsDRM,
+		IsDamaged:     f.IsDamaged,
+		Quality:       f.Quality,
+		QualityLabel:  f.QualityLabel,
+		SourceClient:  f.SourceClient,
+		ContentLength: f.ContentLength,
 	}
 }
 
@@ -576,20 +591,50 @@ func attemptDetailFromSingle(client string, err error) AttemptDetail {
 }
 
 func (c *Client) getSession(videoID string) (videoSession, bool) {
-	c.sessionsMu.Lock()
-	defer c.sessionsMu.Unlock()
+	// Fast path: an RLock lets concurrent readers share the session cache
+	// without serializing against each other. lastAccess is updated
+	// atomically for LRU eviction accuracy without upgrading to a write
+	// lock.
+	c.sessionsMu.RLock()
 	s, ok := c.sessions[videoID]
+	if ok {
+		expired := false
+		if ttl := c.config.SessionCacheTTL; ttl > 0 && !s.CachedAt.IsZero() && time.Since(s.CachedAt) > ttl {
+			expired = true
+		}
+		if !expired {
+			if s.lastAccess != nil {
+				s.lastAccess.Store(time.Now().UnixNano())
+			}
+			c.sessionsMu.RUnlock()
+			return s, true
+		}
+	}
+	c.sessionsMu.RUnlock()
+
 	if !ok {
 		return videoSession{}, false
 	}
-	now := time.Now()
-	if ttl := c.config.SessionCacheTTL; ttl > 0 && !s.CachedAt.IsZero() && now.Sub(s.CachedAt) > ttl {
+
+	// Slow path: the entry exists but is expired. Upgrade to a write lock
+	// (after releasing the RLock to avoid self-deadlock) and remove it so
+	// the map does not accumulate stale entries between putSession calls.
+	// Re-check under the write lock because a concurrent putSession may have
+	// already refreshed or removed it.
+	c.sessionsMu.Lock()
+	defer c.sessionsMu.Unlock()
+	cur, ok := c.sessions[videoID]
+	if !ok {
+		return videoSession{}, false
+	}
+	if ttl := c.config.SessionCacheTTL; ttl > 0 && !cur.CachedAt.IsZero() && time.Since(cur.CachedAt) > ttl {
 		delete(c.sessions, videoID)
 		return videoSession{}, false
 	}
-	s.LastAccess = now
-	c.sessions[videoID] = s
-	return s, ok
+	if cur.lastAccess != nil {
+		cur.lastAccess.Store(time.Now().UnixNano())
+	}
+	return cur, true
 }
 
 func (c *Client) putSession(videoID string, session videoSession) {
@@ -597,7 +642,10 @@ func (c *Client) putSession(videoID string, session videoSession) {
 	if session.CachedAt.IsZero() {
 		session.CachedAt = now
 	}
-	session.LastAccess = now
+	if session.lastAccess == nil {
+		session.lastAccess = new(atomic.Int64)
+	}
+	session.lastAccess.Store(now.UnixNano())
 
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
@@ -609,7 +657,6 @@ func (c *Client) putSession(videoID string, session videoSession) {
 	c.sessions[videoID] = session
 	c.evictLRULocked()
 }
-
 func (c *Client) deleteSession(videoID string) {
 	c.sessionsMu.Lock()
 	defer c.sessionsMu.Unlock()
@@ -638,14 +685,18 @@ func (c *Client) evictLRULocked() {
 	}
 	for len(c.sessions) > maxEntries {
 		var oldestID string
-		var oldest time.Time
+		var oldest int64
 		first := true
 		for id, session := range c.sessions {
-			candidate := session.LastAccess
-			if candidate.IsZero() {
-				candidate = session.CachedAt
+			candidate := int64(0)
+			if session.lastAccess != nil {
+				candidate = session.lastAccess.Load()
 			}
-			if first || candidate.Before(oldest) {
+			if candidate == 0 {
+				// Fall back to CachedAt for sessions populated before any read.
+				candidate = session.CachedAt.UnixNano()
+			}
+			if first || candidate < oldest {
 				first = false
 				oldestID = id
 				oldest = candidate

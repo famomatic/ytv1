@@ -57,3 +57,41 @@ func TestSelectedFormatTemplateTokens(t *testing.T) {
 		t.Fatalf("codec/protocol tokens=%+v", tokens)
 	}
 }
+
+func TestSanitizeOutputToken_WindowsReservedNames(t *testing.T) {
+	cases := map[string]string{
+		"CON":     "unknown",
+		"con":     "unknown",
+		"PRN.txt": "unknown",
+		"AUX":     "unknown",
+		"NUL":     "unknown",
+		"COM1":    "unknown",
+		"LPT9":    "unknown",
+		"normal":  "normal",
+		"video":   "video",
+	}
+	for input, want := range cases {
+		got := SanitizeOutputTemplateToken(input)
+		if got != want {
+			t.Errorf("SanitizeOutputTemplateToken(%q)=%q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestSanitizeOutputToken_TrailingDotsAndDotsOnly(t *testing.T) {
+	cases := map[string]string{
+		"foo.":    "foo",
+		"foo..":   "foo",
+		"foo ":    "foo",
+		".":       "unknown",
+		"..":      "unknown",
+		"   ":     "unknown",
+		"trail. ": "trail",
+	}
+	for input, want := range cases {
+		got := SanitizeOutputTemplateToken(input)
+		if got != want {
+			t.Errorf("SanitizeOutputTemplateToken(%q)=%q, want %q", input, got, want)
+		}
+	}
+}

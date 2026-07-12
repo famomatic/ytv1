@@ -27,6 +27,11 @@ func PredictOutputFilename(info *VideoInfo, selected []FormatInfo, opts OutputFi
 	}
 	mergeExt := NormalizeMergeOutputExt(opts.MergeOutputExt)
 	if IsMergedSelection(selected) {
+		// Mirror download.go: when no explicit container was requested, prefer
+		// webm for WebM pairs so puremux (pure Go) can merge without ffmpeg.
+		if strings.TrimSpace(opts.MergeOutputExt) == "" && selectionIsWebM(selected) {
+			mergeExt = "webm"
+		}
 		videoItag, audioItag := MergedItags(selected)
 		defaultPath := defaultOutputFilenameFromTemplate(info, mergeExt, fmt.Sprintf("%d+%d", videoItag, audioItag), selected, opts)
 		if strings.TrimSpace(opts.OutputTemplate) == "" {
@@ -226,6 +231,28 @@ func RemuxVideoTargetExt(raw string) string {
 		}
 	}
 	return raw
+}
+
+// selectionIsWebM reports whether every selected format is a WebM stream
+// (video/webm or audio/webm). Used to pick a webm merge container by default
+// so the pure-Go puremux muxer can handle the merge without an ffmpeg binary.
+func selectionIsWebM(selected []FormatInfo) bool {
+	if len(selected) == 0 {
+		return false
+	}
+	for _, f := range selected {
+		mediaType, _, err := mime.ParseMediaType(f.MimeType)
+		if err != nil {
+			if !strings.Contains(strings.ToLower(f.MimeType), "webm") {
+				return false
+			}
+			continue
+		}
+		if mediaType != "video/webm" && mediaType != "audio/webm" {
+			return false
+		}
+	}
+	return true
 }
 
 // EffectiveMergeOutputExt resolves explicit merge-output preference first,

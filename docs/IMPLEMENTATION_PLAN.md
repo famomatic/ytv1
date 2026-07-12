@@ -33,7 +33,9 @@
 ## 1. Current Snapshot (Update Every Session)
 
 ### 1.1 Session Date
-- `2026-06-21`
+- `2026-06-30`
+- `2026-07-12` (B144 silent truncation prevention)
+- `2026-07-12` (B145 concurrency/resource-safety/edge-case hardening)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -199,6 +201,7 @@
 - B139 completion increment landed: replaced plain progress text with a cleaner single-line refreshing progress bar (`[####----]`) showing part, percent, current/total size, Mbps, and ETA, with duplicate completion suppression and clean log handoff before lifecycle/warning lines.
 - B140 completion increment landed: progress output now collapses to one final progress line when stdout is not an interactive terminal, uses ANSI clear-line refresh plus a compact bar for interactive terminals, and avoids captured/piped output that appears as many refresh lines.
 - B141 completion increment landed: interactive progress finish now clears the active progress line instead of leaving a final duplicated-looking 100% line before subsequent status output, while captured/non-TTY output still retains a single final progress line.
+- B144 completion increment landed: silent download truncation prevention across the full download pipeline. `copyWithDownloadConfig` now verifies the copied byte count against the server-advertised Content-Length (and range size for partial requests), mapping short reads to a typed `ErrTruncatedDownload`; `downloadURLChunked` now tracks per-chunk completion and refuses to return success when context cancellation leaves zero-filled gaps; `downloadSegmentBatchConcurrent` (DASH) now rejects empty segment bodies and surfaces context errors instead of silently writing gaps; DASH `r=-1` in static manifests is now expanded from `mediaPresentationDuration` (ported from yt-dlp) instead of generating a single segment; `downloadStream` performs a post-download file-size integrity check against the format's `ContentLength`; and `downloadAndMerge` guards against empty intermediate files before merging. New `TruncatedDownloadError` type and `ErrorCategoryTruncatedDownload` classification added. Covered by reproduction tests for premature EOF, chunked cancellation, chunked-transfer short reads, DASH r=-1 static/dynamic expansion, and empty DASH segment rejection.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -343,6 +346,10 @@
 140. `[x]` B139. Polished refreshing progress bar UX
 141. `[x]` B140. Single-line progress behavior for captured/non-TTY output
 142. `[x]` B141. Clear interactive progress line on completion
+143. `[x]` B142. puremux package as primary muxer with FFmpeg fallback
+144. `[-]` B143. (reserved for follow-up muxer validation)
+145. `[x]` B144. Silent download truncation prevention (premature EOF detection, chunked completeness verification, DASH r=-1 expansion, post-download ContentLength integrity check)
+146. `[x]` B145. Concurrency, resource-safety, and edge-case hardening pass (owned HTTP transport isolation, RLock session cache read path with atomic LRU tracking, HLS EXT-X-MAP per-segment init rewrite on rotation, downloadAndMerge same-itag intermediate path collision guard, challenge cache TTL semantics aligned with session cache, sanitizeOutputToken Windows reserved-name and trailing-dot handling)
 
 ---
 
@@ -2461,7 +2468,26 @@ Make `ytv1` a practical **YouTube-focused** CLI substitute for yt-dlp in daily o
   - `cmd/ytv1/adapters.go`
   - `docs/IMPLEMENTATION_PLAN.md`
 - Acceptance:
-  - `cmd/ytv1/main.go` is substantially reduced and no longer owns extraction/download workflow bodies; `go test ./...` remains green.
+ - `cmd/ytv1/main.go` is substantially reduced and no longer owns extraction/download workflow bodies; `go test ./...` remains green.
+
+---
+
+### B142. puremux Package as Primary Muxer with FFmpeg Fallback
+- Status: `[x]`
+- Goal: Reduce FFmpeg dependency by muxing WebM (VP8/VP9/AV1 + Opus) selections through the pure Go `github.com/famomatic/puremux` package, while falling back to FFmpeg for non-WebM containers or when metadata embedding is requested.
+- Work:
+  1. Add `internal/muxer.PureMuxMuxer` implementing the existing `Muxer` interface (`Available`, `Merge`), backed by `puremux.RemuxInputs`.
+  2. Add container/codec compatibility detection from `types.FormatInfo.MimeType` so puremux is only attempted for WebM-compatible video+audio pairs.
+  3. Add a `Fallback Muxer` field; route non-WebM inputs, metadata-embed requests, and puremux errors to FFmpeg when available.
+  4. Wire CLI/package default muxer to `PureMuxMuxer{Fallback: FFmpegMuxer}` so unauthenticated WebM downloads no longer require a local ffmpeg binary.
+  5. Add tests for WebM merge via puremux, FFmpeg fallback on non-WebM/metadata, and explicit unavailable error when neither can merge.
+- Target files:
+  - `internal/muxer/puremux.go`
+  - `internal/muxer/puremux_test.go`
+  - `client/download.go` (container detection plumbing)
+  - `internal/cli/parser.go` (default muxer wiring)
+- Acceptance:
+  - WebM video+audio merge works with no ffmpeg binary present; non-WebM/metadata merges fall back to FFmpeg; `go test ./...` green.
 
 ---
 
@@ -2738,6 +2764,7 @@ Cycle B is complete only when all are true:
 - `2026-06-21`: Completed `B139` by replacing the CLI progress text with a single-line refreshing ASCII progress bar, adding ETA and duplicate completion suppression, finishing active progress lines before lifecycle/warning logs, and verifying with a live `8IY44RZHyw8 -f 18` download plus `go test ./...`.
 - `2026-06-21`: Completed `B140` by detecting non-interactive stdout, suppressing intermediate refresh frames in captured/piped output, emitting only the final 100% progress line outside TTYs, using ANSI clear-line refresh and a compact progress bar in interactive terminals, preserving `--newline` behavior, and verifying with a live piped `8IY44RZHyw8 -f 18` download plus `go test ./...`.
 - `2026-06-21`: Completed `B141` by changing interactive progress `Finish()` to clear the active line instead of emitting a newline that can look like a repeated completed progress row, adding regression coverage for the clear-line sequence, and verifying with `go test ./...`; live media verification is currently blocked by YouTube `LOGIN_REQUIRED` bot confirmation on the test video.
+- `2026-06-30`: Completed `B142` by implementing `internal/muxer.PureMuxMuxer` over `github.com/famomatic/puremux` (pure-Go WebM/MKV/MP4 input -> WebM/MKV output via `puremux.Merge`), routing MP4 output, metadata-embedding requests, and puremux failures to an optional FFmpeg fallback, wiring the CLI default muxer to `PureMuxMuxer{Fallback: FFmpegMuxer}`, defaulting the merge container to `.webm` for WebM video+audio pairs (mirrored in filename prediction) so unauthenticated WebM downloads no longer require an ffmpeg binary, updating the `TestToClientConfig_PostprocessorArgsForFFmpegMuxer` expectation to unwrap the fallback, adding muxer, client-merge, and prediction regression tests, updating README requirements, and verifying with `go build ./...`, `go vet ./...`, and `go test ./...`.
 
 ---
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,14 +144,14 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
 					}
 					d.lastSeq = seg.Seq
-					d.seenSegments[seg.URL] = true
+					d.seenSegments = trackSeen(d.seenSegments, seg.URL)
 					continue
 				}
 				return err
 			}
 
 			d.lastSeq = seg.Seq
-			d.seenSegments[seg.URL] = true
+			d.seenSegments = trackSeen(d.seenSegments, seg.URL)
 		}
 
 		if !isDynamic {
@@ -205,6 +206,11 @@ func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, seg
 	}
 	sem := make(chan struct{}, concurrency)
 	out := make([]item, len(segments))
+	// started tracks whether each goroutine actually ran to completion
+	// (set its out[i] entry). A goroutine that bails on ctx.Done() before
+	// setting out[i] leaves a zero-value item with err==nil, which would
+	// otherwise be written as an empty body — silently truncating the stream.
+	started := make([]bool, len(segments))
 	var wg sync.WaitGroup
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -228,6 +234,7 @@ func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, seg
 				body:  body,
 				err:   err,
 			}
+			started[i] = true
 			if err != nil {
 				cancel()
 			}
@@ -235,9 +242,21 @@ func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, seg
 	}
 	wg.Wait()
 
+	// If the context was cancelled, some goroutines may have returned
+	// without setting out[i]. Surface the context error instead of
+	// writing zero-value (empty) bodies.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	for _, it := range out {
+		if !started[it.index] {
+			return fmt.Errorf("segment seq=%d was not downloaded (cancelled)", it.seq)
+		}
 		if it.err != nil {
 			return fmt.Errorf("failed to download segment seq=%d: %w", it.seq, it.err)
+		}
+		if len(it.body) == 0 {
+			return fmt.Errorf("segment seq=%d downloaded as empty body", it.seq)
 		}
 		if _, err := w.Write(it.body); err != nil {
 			return err
@@ -323,14 +342,45 @@ func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Dura
 			currentTime = *s.T
 		}
 
-		// Cap repeat count for safety. The DASH spec defines r=-1 as
-		// "repeat until the next S element", but we don't have the next S
-		// boundary here. Cap at a reasonable maximum and treat r=-1 as
-		// a single occurrence (the caller will re-fetch for dynamic manifests).
+		// DASH spec: r=-1 means "repeat until the end of the Period" (or
+		// until the next S element's t boundary). For static manifests this
+		// must be expanded using the mediaPresentationDuration, otherwise the
+		// stream is silently truncated. yt-dlp handles this by computing the
+		// repeat count from the remaining presentation duration.
 		const maxSegmentRepeatCount = 10000
 		repeatCount := s.R
 		if repeatCount < 0 {
-			repeatCount = 0 // r=-1: generate one segment; dynamic manifests re-fetch
+			// r=-1: expand to fill the remaining presentation duration.
+			// For dynamic manifests (isDynamic), the caller re-fetches the
+			// manifest periodically, so we only need the currently-available
+			// segments. For static manifests, we must compute the full count
+			// from mediaPresentationDuration to avoid truncation.
+			if mpd.Type != "dynamic" && mpd.MediaPresentationDuration != "" {
+				if totalDur, derr := parseDuration(mpd.MediaPresentationDuration); derr == nil && totalDur > 0 && s.D > 0 {
+					// timescale defaults to 1 when absent (DASH spec 5.3.9.2)
+					timescale := tmpl.Timescale
+					if timescale <= 0 {
+						timescale = 1
+					}
+					segmentDur := time.Duration(s.D) * time.Second / time.Duration(timescale)
+					if segmentDur > 0 {
+						elapsed := time.Duration(currentTime) * time.Second / time.Duration(timescale)
+						remaining := totalDur - elapsed
+						if remaining > 0 {
+							// r counts additional repeats after the first
+							// segment, so subtract 1 from the total segment
+							// count to get the repeat count.
+							repeatCount = int64(remaining/segmentDur) - 1
+						}
+					}
+				}
+			}
+			if repeatCount < 0 {
+				// Could not compute (dynamic manifest or missing duration):
+				// generate a single segment; the caller re-fetches for
+				// dynamic manifests.
+				repeatCount = 0
+			}
 		}
 		if repeatCount > maxSegmentRepeatCount {
 			repeatCount = maxSegmentRepeatCount
@@ -371,13 +421,81 @@ func (d *DASHDownloader) downloadSegment(ctx context.Context, seg dashSegment, w
 	if err != nil {
 		return err
 	}
+	if len(body) == 0 {
+		return fmt.Errorf("segment seq=%d downloaded as empty body", seg.Seq)
+	}
 	_, err = w.Write(body)
 	return err
 }
 
 func parseDuration(s string) (time.Duration, error) {
-	// ISO 8601 duration parser (PT1S)
-	// Go doesn't have native ISO duration parser.
-	// Simple approximation for PT#S
-	return time.ParseDuration(strings.ToLower(strings.ReplaceAll(s, "PT", "")))
+	return parseISO8601Duration(s)
+}
+
+// parseISO8601Duration parses a subset of ISO 8601 durations used in DASH
+// manifests: forms like "PT1S", "PT1H30M", "PT2.5S", "PT0S", and the optional
+// leading date component "P1DT2H". The previous implementation lowercased the
+// string and then did a case-sensitive ReplaceAll of "PT", which never
+// matched, so every DASH refresh interval was mis-parsed.
+func parseISO8601Duration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	if !strings.HasPrefix(s, "P") {
+		return 0, fmt.Errorf("invalid ISO 8601 duration: %q", s)
+	}
+	body := s[1:]
+	var d time.Duration
+	consumed := false
+	// Optional days: split on "T" if a date portion precedes the time portion.
+	if idx := strings.Index(body, "T"); idx >= 0 {
+		datePart := body[:idx]
+		timePart := body[idx+1:]
+		if err := scanDurationComponents(datePart, map[byte]time.Duration{'D': 24 * time.Hour, 'W': 7 * 24 * time.Hour, 'M': 30 * 24 * time.Hour, 'Y': 365 * 24 * time.Hour}, &d, &consumed); err != nil {
+			return 0, err
+		}
+		if err := scanDurationComponents(timePart, map[byte]time.Duration{'H': time.Hour, 'M': time.Minute, 'S': time.Second}, &d, &consumed); err != nil {
+			return 0, err
+		}
+	} else {
+		// No time portion: only date units are valid.
+		if err := scanDurationComponents(body, map[byte]time.Duration{'D': 24 * time.Hour, 'W': 7 * 24 * time.Hour, 'M': 30 * 24 * time.Hour, 'Y': 365 * 24 * time.Hour}, &d, &consumed); err != nil {
+			return 0, err
+		}
+	}
+	// "P" or "PT" with no components is not a valid duration.
+	if !consumed {
+		return 0, fmt.Errorf("invalid ISO 8601 duration: %q", s)
+	}
+	return d, nil
+}
+
+// scanDurationComponents scans a sequence like "1H30M" or "2.5S", adding each
+// value (scaled by its unit) into d. units maps the unit suffix byte to its
+// duration scale.
+func scanDurationComponents(part string, units map[byte]time.Duration, d *time.Duration, consumed *bool) error {
+	i := 0
+	for i < len(part) {
+		// Read the numeric value (integer or fractional).
+		j := i
+		for j < len(part) && (part[j] == '.' || (part[j] >= '0' && part[j] <= '9')) {
+			j++
+		}
+		if j == i {
+			return fmt.Errorf("invalid ISO 8601 duration segment: %q", part)
+		}
+		scale, ok := units[part[j]]
+		if !ok {
+			return fmt.Errorf("unknown ISO 8601 duration unit %q in %q", string(part[j]), part)
+		}
+		f, err := strconv.ParseFloat(part[i:j], 64)
+		if err != nil {
+			return fmt.Errorf("invalid ISO 8601 duration value %q: %w", part[i:j], err)
+		}
+		*d += time.Duration(f * float64(scale))
+		*consumed = true
+		i = j + 1
+	}
+	return nil
 }
