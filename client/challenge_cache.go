@@ -298,23 +298,28 @@ func canonicalPlayerCacheKey(playerURL string) string {
 	return raw
 }
 
-// defaultChallengeTTL is the maximum age for cached challenge solutions.
-// YouTube rotates player JS frequently; stale solutions will fail softly
-// (the caller re-fetches and re-solves).
+// defaultChallengeTTL documents the recommended maximum age for cached
+// challenge solutions when a caller does not set SessionCacheTTL. It is
+// not applied automatically; callers must set SessionCacheTTL explicitly
+// if they want expiration. YouTube rotates player JS frequently;
 const defaultChallengeTTL = 2 * time.Hour
 
 func (c *Client) isChallengeExpired(s challengeSolutions) bool {
 	ttl := c.config.SessionCacheTTL
+	// A zero/negative SessionCacheTTL means expiration is disabled, matching
+	// the video session cache behavior where ttl <= 0 keeps entries indefinitely.
 	if ttl <= 0 {
-		ttl = defaultChallengeTTL
+		return false
 	}
 	return !s.created.IsZero() && time.Since(s.created) > ttl
 }
 
 func (c *Client) evictExpiredChallenges() {
 	ttl := c.config.SessionCacheTTL
+	// A zero/negative SessionCacheTTL disables expiration, matching the video
+	// session cache behavior.
 	if ttl <= 0 {
-		ttl = defaultChallengeTTL
+		return
 	}
 	for key, s := range c.challenges {
 		if !s.created.IsZero() && time.Since(s.created) > ttl {

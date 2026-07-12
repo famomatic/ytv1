@@ -32,8 +32,11 @@ func TestDefaultHTTPClient_WithProxyURL(t *testing.T) {
 
 func TestDefaultHTTPClient_InvalidProxyFallsBack(t *testing.T) {
 	httpClient := defaultHTTPClient("://bad-url", "", false)
-	if httpClient != http.DefaultClient {
-		t.Fatalf("expected fallback to http.DefaultClient")
+	if httpClient == http.DefaultClient {
+		// An invalid proxy URL must not fall back to the shared global
+		// http.DefaultClient, whose Jar/Transport are shared state. It should
+		// return a dedicated client with an owned (cloned) transport instead.
+		t.Fatalf("expected fallback to a dedicated owned client, not http.DefaultClient")
 	}
 }
 
@@ -88,5 +91,26 @@ func TestDefaultHTTPClient_InsecureSkipVerify(t *testing.T) {
 	}
 	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
 		t.Fatalf("InsecureSkipVerify=false, want true")
+	}
+}
+
+func TestDefaultHTTPClient_DefaultReturnsOwnedTransport(t *testing.T) {
+	// With no customization the client must still own its transport (a clone
+	// of http.DefaultTransport), never sharing the global default transport
+	// directly. Otherwise a later Jar assignment or Transport mutation leaks
+	// into shared global state.
+	httpClient := defaultHTTPClient("", "", false)
+	if httpClient == nil {
+		t.Fatalf("defaultHTTPClient() returned nil")
+	}
+	if httpClient.Transport == http.DefaultTransport {
+		t.Fatalf("default client shares http.DefaultTransport; expected an owned clone")
+	}
+	transport, ok := httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", httpClient.Transport)
+	}
+	if transport == http.DefaultTransport.(*http.Transport) {
+		t.Fatalf("transport is the same pointer as http.DefaultTransport; expected an owned clone")
 	}
 }

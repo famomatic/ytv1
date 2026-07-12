@@ -27,10 +27,11 @@ type HLSDownloader struct {
 	seenSegments     map[string]bool
 	lastSeq          int
 	skippedFragments int
-	// writtenInit tracks whether the initialization segment referenced by
-	// an EXT-X-MAP has been written to the output, so it is not duplicated
-	// on playlist refreshes.
-	writtenInit bool
+	// writtenInitURI tracks the URI of the initialization segment that has
+	// already been written to the output, so a changed EXT-X-MAP (e.g. during
+	// a live rotation) triggers a rewrite of the new init, and the same URI is
+	// not written twice across playlist refreshes.
+	writtenInitURI string
 }
 
 type hlsSegment struct {
@@ -86,20 +87,11 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 		}
 
 		// 2. Parse Segments
-		segments, initSegment, targetDuration, err := h.parseSegments(ctx, manifest, h.PlaylistURL)
+		segments, targetDuration, err := h.parseSegments(ctx, manifest, h.PlaylistURL)
 		if err != nil {
 			return err
 		}
 		isLive := !strings.Contains(manifest, "#EXT-X-ENDLIST")
-
-		// 2a. Write the initialization segment (EXT-X-MAP) exactly once
-		// before any media segment. fMP4 streams are unusable without it.
-		if initSegment != nil && !h.writtenInit {
-			if err := h.downloadInitSegment(ctx, *initSegment, w); err != nil {
-				return fmt.Errorf("failed to download init segment: %w", err)
-			}
-			h.writtenInit = true
-		}
 
 		// 3. Process new segments
 		newSegments := 0
@@ -111,6 +103,17 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 			if h.seenSegments[seg.URL] {
 				// Fallback dedup (shouldn't happen with proper Seq)
 				continue
+			}
+
+			// A segment may carry its own EXT-X-MAP (initialization segment) that
+			// differs from the playlist-level one. If the referenced init URI has
+			// not been written yet (or changed since the last write), download and
+			// write it before the segment body so the fMP4 stream stays valid.
+			if seg.Map != nil && seg.Map.URI != h.writtenInitURI {
+				if err := h.downloadInitSegment(ctx, *seg.Map, w); err != nil {
+					return fmt.Errorf("failed to download init segment for seq=%d: %w", seg.Seq, err)
+				}
+				h.writtenInitURI = seg.Map.URI
 			}
 
 			if err := h.downloadSegment(ctx, seg, w); err != nil {
@@ -160,7 +163,7 @@ func (h *HLSDownloader) fetchManifest(ctx context.Context, url string) (string, 
 	return string(body), nil
 }
 
-func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL string) ([]hlsSegment, *hlsMap, float64, error) {
+func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL string) ([]hlsSegment, float64, error) {
 	scanner := bufio.NewScanner(strings.NewReader(manifest))
 	// Bound individual line length to avoid OOM on malicious manifests.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20) // 1 MiB max line
@@ -194,16 +197,16 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 		if strings.HasPrefix(line, "#EXT-X-KEY:") {
 			k, err := parseKey(line[11:], manifestURL)
 			if err != nil {
-				return nil, nil, 0, err
+				return nil, 0, err
 			}
 			currentKey = k
 			continue
 		}
 
 		if strings.HasPrefix(line, "#EXT-X-MAP:") {
-			m, err := parseMap(line[11:])
+			m, err := parseMap(line[11:], manifestURL)
 			if err != nil {
-				return nil, nil, 0, fmt.Errorf("parse EXT-X-MAP: %w", err)
+				return nil, 0, fmt.Errorf("parse EXT-X-MAP: %w", err)
 			}
 			currentMap = m
 			continue
@@ -220,7 +223,7 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 				if currentKey != nil && currentKey.Method == "AES-128" && len(currentKey.Key) == 0 {
 					keyBytes, err := h.fetchKey(ctx, currentKey.URI)
 					if err != nil {
-						return nil, nil, 0, fmt.Errorf("failed to fetch key: %w", err)
+						return nil, 0, fmt.Errorf("failed to fetch key: %w", err)
 					}
 					currentKey.Key = keyBytes
 				}
@@ -236,13 +239,9 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, 0, err
+		return nil, 0, err
 	}
-	// Resolve the EXT-X-MAP URI to an absolute URL so it can be fetched.
-	if currentMap != nil {
-		currentMap.URI = resolveURL(manifestURL, currentMap.URI)
-	}
-	return segments, currentMap, targetDuration, nil
+	return segments, targetDuration, nil
 }
 
 func (h *HLSDownloader) downloadSegment(ctx context.Context, seg hlsSegment, w io.Writer) error {
@@ -342,13 +341,12 @@ func parseKey(attrs, manifestURL string) (*hlsKey, error) {
 	return key, nil
 }
 
-func parseMap(attrs string) (*hlsMap, error) {
+func parseMap(attrs, manifestURL string) (*hlsMap, error) {
 	m := formats.ParseM3U8Attrs(attrs)
 	// URI is mandatory for MAP
 	uri, ok := m["URI"]
 	if !ok {
 		return nil, fmt.Errorf("URI missing in EXT-X-MAP")
 	}
-	return &hlsMap{URI: uri}, nil
+	return &hlsMap{URI: resolveURL(manifestURL, uri)}, nil
 }
-

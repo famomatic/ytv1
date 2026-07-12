@@ -121,3 +121,38 @@ func TestHLSDownloader_InitSegmentWrittenOnce(t *testing.T) {
 	}
 }
 
+func TestHLSDownloader_InitSegmentRewrittenOnMapChange(t *testing.T) {
+	// When a playlist changes its EXT-X-MAP URI (e.g. live rotation), the
+	// new init segment must be downloaded and written before segments that
+	// reference it. This verifies the writtenInitURI tracking rewrites a
+	// changed init instead of silently dropping it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/playlist.m3u8":
+			fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init-v1.mp4\"\n#EXTINF:1.0,\nseg-0.m4s\n#EXT-X-MAP:URI=\"init-v2.mp4\"\n#EXTINF:1.0,\nseg-1.m4s\n#EXT-X-ENDLIST\n")
+		case "/init-v1.mp4":
+			w.Write([]byte("INIT1"))
+		case "/init-v2.mp4":
+			w.Write([]byte("INIT2"))
+		case "/seg-0.m4s":
+			w.Write([]byte("S0"))
+		case "/seg-1.m4s":
+			w.Write([]byte("S1"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dl := NewHLSDownloader(srv.Client(), srv.URL+"/playlist.m3u8")
+	var buf bytes.Buffer
+	if err := dl.Download(context.Background(), &buf); err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	// Both inits must appear: INIT1 before S0, INIT2 before S1.
+	got := buf.String()
+	want := "INIT1S0INIT2S1"
+	if got != want {
+		t.Fatalf("rotated init not written before its segment:\n got: %q\nwant: %q", got, want)
+	}
+}

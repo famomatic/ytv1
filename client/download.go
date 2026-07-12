@@ -1669,9 +1669,44 @@ func sanitizeOutputToken(v string) string {
 	if out == "" {
 		return "unknown"
 	}
-	// Collapse path traversal sequences so ../../etc becomes __etc
+	// Strip trailing dots and spaces first, which Windows silently drops and
+	// which can cause files to resolve to unexpected paths (e.g. "foo." -> "foo").
+	out = strings.TrimRight(out, ". ")
+	if out == "" {
+		return "unknown"
+	}
+	// Collapse path traversal sequences so ../../etc becomes __etc. Applied
+	// after trimming so a bare "." or ".." reduces to "" and falls through.
 	out = strings.ReplaceAll(out, "..", "_")
+	if out == "" || out == "." || out == ".." {
+		return "unknown"
+	}
+	// Reject Windows reserved device names (CON, PRN, AUX, NUL, COM1-9,
+	// LPT1-9) with any extension, since they cannot be used as filenames.
+	if isWindowsReservedName(out) {
+		return "unknown"
+	}
 	return out
+}
+
+// extension, and creating them can fail or have surprising effects.
+func isWindowsReservedName(name string) bool {
+	base := name
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		base = name[:i]
+	}
+	base = strings.ToUpper(strings.TrimSpace(base))
+	if base == "" {
+		return false
+	}
+	reserved := map[string]bool{
+		"CON": true, "PRN": true, "AUX": true, "NUL": true,
+		"COM1": true, "COM2": true, "COM3": true, "COM4": true,
+		"COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
+		"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true,
+		"LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+	}
+	return reserved[base]
 }
 
 func detectOutputExt(mimeType string, mode SelectionMode) string {

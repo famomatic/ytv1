@@ -35,6 +35,7 @@
 ### 1.1 Session Date
 - `2026-06-30`
 - `2026-07-12` (B144 silent truncation prevention)
+- `2026-07-12` (B145 concurrency/resource-safety/edge-case hardening)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -348,6 +349,7 @@
 143. `[x]` B142. puremux package as primary muxer with FFmpeg fallback
 144. `[-]` B143. (reserved for follow-up muxer validation)
 145. `[x]` B144. Silent download truncation prevention (premature EOF detection, chunked completeness verification, DASH r=-1 expansion, post-download ContentLength integrity check)
+146. `[x]` B145. Concurrency, resource-safety, and edge-case hardening pass (owned HTTP transport isolation, RLock session cache read path with atomic LRU tracking, HLS EXT-X-MAP per-segment init rewrite on rotation, downloadAndMerge same-itag intermediate path collision guard, challenge cache TTL semantics aligned with session cache, sanitizeOutputToken Windows reserved-name and trailing-dot handling)
 
 ---
 
