@@ -17,21 +17,29 @@ type StreamOptions struct {
 // OpenStream resolves and opens a readable stream without writing a local file.
 // Returned FormatInfo describes the selected stream format.
 func (c *Client) OpenStream(ctx context.Context, input string, options StreamOptions) (io.ReadCloser, FormatInfo, error) {
-	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	// Metadata requests (format list, URL resolution) are bounded by the
+	// package RequestTimeout via metaCtx. The media GET request uses
+	// streamCtx (cancel-only, no deadline) so the caller's read is not
+	// aborted when RequestTimeout expires; a context deadline cannot be
+	// deferred, and net/http cancels in-flight body reads at deadline.
+	metaCtx, metaCancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
+	defer metaCancel()
+
+	streamCtx, streamCancel := streamCtxForMediaRequest(ctx)
 
 	videoID, err := normalizeVideoID(input)
 	if err != nil {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, err
 	}
 
-	formats, err := c.GetFormats(ctx, videoID)
+	formats, err := c.GetFormats(metaCtx, videoID)
 	if err != nil {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, err
 	}
 	if len(formats) == 0 {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, ErrNoPlayableFormats
 	}
 	filteredFormats, skipReasons := filterFormatsByPoTokenPolicy(formats, c.config)
@@ -39,7 +47,7 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 		for _, skip := range skipReasons {
 			c.warnf("format skipped by po token policy: itag=%d protocol=%s reason=%s", skip.Itag, skip.Protocol, skip.Reason)
 		}
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, &NoPlayableFormatsDetailError{
 			Mode:  normalizeSelectionMode(options.Mode),
 			Skips: skipReasons,
@@ -54,36 +62,52 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 		Mode: options.Mode,
 	})
 	if !ok {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, fmt.Errorf("%w: itag=%d mode=%s", ErrNoPlayableFormats, options.Itag, normalizeSelectionMode(options.Mode))
 	}
 
-	streamURL, err := c.resolveSelectedFormatURL(ctx, videoID, chosen)
+	streamURL, err := c.resolveSelectedFormatURL(metaCtx, videoID, chosen)
 	if err != nil {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
 	if err != nil {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, err
 	}
 	applyMediaRequestHeadersForSourceClient(req, c.config.RequestHeaders, videoID, chosen.SourceClient)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
-		cancel()
+		streamCancel()
 		return nil, FormatInfo{}, fmt.Errorf("stream open failed: status=%s", resp.Status)
 	}
-	// Wrap the body so the request context (and its timeout/cancel) is only
-	// torn down once the caller has finished reading the stream. Returning
-	// resp.Body directly with `defer cancel()` would cancel the context as
-	// soon as OpenStream returns, aborting the caller's read of the body.
-	return &streamBody{rc: resp.Body, cancel: cancel}, chosen, nil
+	// Hand the caller a body whose Close() cancels streamCtx, releasing the
+	// underlying connection. streamCtx carries no deadline, so the caller
+	// controls the read lifetime. streamCancel is NOT deferred here: doing so
+	// would cancel streamCtx as soon as OpenStream returns, aborting the
+	// caller's read. Each error path above calls streamCancel() explicitly;
+	// the success path transfers ownership to streamBody.Close().
+	return &streamBody{rc: resp.Body, cancel: streamCancel}, chosen, nil
+}
+
+// streamCtxForMediaRequest returns a cancel-only context derived from the
+// caller's ctx with no deadline of its own. A context deadline cannot be
+// deferred, and net/http aborts an in-flight body read once the request
+// context deadline expires; using the caller's ctx directly for the media
+// GET would surface context.DeadlineExceeded to the caller mid-read when
+// RequestTimeout is short. The returned cancel func is intended to be wired
+// into the streamBody closer so an abandoned read can still be torn down.
+func streamCtxForMediaRequest(ctx context.Context) (context.Context, context.CancelFunc) {
+	// Derive from the caller's ctx so the caller's own deadline/cancellation
+	// still propagate, but never impose a new deadline here. RequestTimeout
+	// is applied separately to metadata requests via metaCtx.
+	return context.WithCancel(ctx)
 }
 
 // streamBody wraps an HTTP response body and ensures the request context's

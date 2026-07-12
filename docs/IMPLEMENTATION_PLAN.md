@@ -36,6 +36,7 @@
 - `2026-06-30`
 - `2026-07-12` (B144 silent truncation prevention)
 - `2026-07-12` (B145 concurrency/resource-safety/edge-case hardening)
+- `2026-07-13` (B146 OpenStream context deadline leak fix)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -350,6 +351,7 @@
 144. `[-]` B143. (reserved for follow-up muxer validation)
 145. `[x]` B144. Silent download truncation prevention (premature EOF detection, chunked completeness verification, DASH r=-1 expansion, post-download ContentLength integrity check)
 146. `[x]` B145. Concurrency, resource-safety, and edge-case hardening pass (owned HTTP transport isolation, RLock session cache read path with atomic LRU tracking, HLS EXT-X-MAP per-segment init rewrite on rotation, downloadAndMerge same-itag intermediate path collision guard, challenge cache TTL semantics aligned with session cache, sanitizeOutputToken Windows reserved-name and trailing-dot handling)
+147. `[x]` B146. OpenStream context deadline leak fix (media GET request bound to the metadata-timeout context, so RequestTimeout deadline aborts caller body reads)
 
 ---
 
@@ -2487,7 +2489,42 @@ Make `ytv1` a practical **YouTube-focused** CLI substitute for yt-dlp in daily o
   - `client/download.go` (container detection plumbing)
   - `internal/cli/parser.go` (default muxer wiring)
 - Acceptance:
-  - WebM video+audio merge works with no ffmpeg binary present; non-WebM/metadata merges fall back to FFmpeg; `go test ./...` green.
+ - WebM video+audio merge works with no ffmpeg binary present; non-WebM/metadata merges fall back to FFmpeg; `go test ./...` green.
+
+---
+
+### B146. OpenStream Context Deadline Leak Fix
+
+**Problem.** `Client.OpenStream` wraps the caller context with
+`withDefaultTimeout(ctx, config.RequestTimeout)` at the very top and then
+uses that single timeout context for every downstream operation: `GetFormats`,
+`resolveSelectedFormatURL`, and `http.NewRequestWithContext(ctx, ...)` for the
+media GET. Although the returned `streamBody` defers the `cancel` call until
+`Close()`, the context itself still carries the `RequestTimeout` deadline. Go's
+`net/http` aborts an in-flight body read when the request context's deadline
+expires, so any stream that takes longer than `RequestTimeout` (default 20s) to
+read surfaces a `context.DeadlineExceeded` error to the caller mid-read. The
+existing comment ("wrap the body so the request context is only torn down once
+the caller has finished reading") is misleading: deferring `cancel` does not
+defer the deadline.
+
+`Download` does not exhibit this because it reads the body to completion inside
+the same function scope (`io.Copy` under `defer resp.Body.Close()`); only
+`OpenStream`/`OpenFormatStream` hand a still-open body back to the caller while
+bound to a deadline-bearing context.
+
+**Fix.** Decouple the stream-read lifetime from the metadata-request timeout.
+Metadata requests (`GetFormats`, `resolveSelectedFormatURL`) use the
+timeout-bounded context; the media GET request is issued with a separate
+cancel-only context (no deadline) derived from the caller's context, so body
+reads are governed solely by the caller's deadline and the HTTP transport, not
+by `RequestTimeout`. The cancel func is still wired into `streamBody.Close()`
+so an abandoned read can be torn down.
+
+**Acceptance.** Body remains readable after the `RequestTimeout` deadline
+elapses; existing `TestOpenStream_BodyReadableAfterReturn` is preserved; new
+regression test asserts a slow stream completes past the deadline; `go test
+./...` green.
 
 ---
 
@@ -2765,6 +2802,7 @@ Cycle B is complete only when all are true:
 - `2026-06-21`: Completed `B140` by detecting non-interactive stdout, suppressing intermediate refresh frames in captured/piped output, emitting only the final 100% progress line outside TTYs, using ANSI clear-line refresh and a compact progress bar in interactive terminals, preserving `--newline` behavior, and verifying with a live piped `8IY44RZHyw8 -f 18` download plus `go test ./...`.
 - `2026-06-21`: Completed `B141` by changing interactive progress `Finish()` to clear the active line instead of emitting a newline that can look like a repeated completed progress row, adding regression coverage for the clear-line sequence, and verifying with `go test ./...`; live media verification is currently blocked by YouTube `LOGIN_REQUIRED` bot confirmation on the test video.
 - `2026-06-30`: Completed `B142` by implementing `internal/muxer.PureMuxMuxer` over `github.com/famomatic/puremux` (pure-Go WebM/MKV/MP4 input -> WebM/MKV output via `puremux.Merge`), routing MP4 output, metadata-embedding requests, and puremux failures to an optional FFmpeg fallback, wiring the CLI default muxer to `PureMuxMuxer{Fallback: FFmpegMuxer}`, defaulting the merge container to `.webm` for WebM video+audio pairs (mirrored in filename prediction) so unauthenticated WebM downloads no longer require an ffmpeg binary, updating the `TestToClientConfig_PostprocessorArgsForFFmpegMuxer` expectation to unwrap the fallback, adding muxer, client-merge, and prediction regression tests, updating README requirements, and verifying with `go build ./...`, `go vet ./...`, and `go test ./...`.
+- `2026-07-13`: Completed `B146` by splitting `OpenStream`'s context into a timeout-bounded `metaCtx` (for `GetFormats`/`resolveSelectedFormatURL`) and a deadline-free cancel-only `streamCtx` (for the media GET request), so `RequestTimeout` no longer aborts caller body reads with `context.DeadlineExceeded`; `streamCancel` is invoked explicitly on every error path and ownership transfers to `streamBody.Close()` on success; added `streamCtxForMediaRequest` helper and a context-aware regression test (`ctxAwareStreamingBody`) that reproduces the pre-fix failure (`context canceled`) when the media GET is bound to `metaCtx`; verified with `go build ./...`, `go vet ./...`, and `go test ./...`.
 
 ---
 
