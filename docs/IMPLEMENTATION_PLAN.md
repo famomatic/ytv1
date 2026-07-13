@@ -37,6 +37,7 @@
 - `2026-07-12` (B144 silent truncation prevention)
 - `2026-07-12` (B145 concurrency/resource-safety/edge-case hardening)
 - `2026-07-13` (B146 OpenStream context deadline leak fix)
+- `2026-07-14` (B147 session cache expiration fix)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -352,6 +353,7 @@
 145. `[x]` B144. Silent download truncation prevention (premature EOF detection, chunked completeness verification, DASH r=-1 expansion, post-download ContentLength integrity check)
 146. `[x]` B145. Concurrency, resource-safety, and edge-case hardening pass (owned HTTP transport isolation, RLock session cache read path with atomic LRU tracking, HLS EXT-X-MAP per-segment init rewrite on rotation, downloadAndMerge same-itag intermediate path collision guard, challenge cache TTL semantics aligned with session cache, sanitizeOutputToken Windows reserved-name and trailing-dot handling)
 147. `[x]` B146. OpenStream context deadline leak fix (media GET request bound to the metadata-timeout context, so RequestTimeout deadline aborts caller body reads)
+148. `[x]` B147. Session cache expiration fix (default SessionCacheTTL + URL expire-param validation so stale googlevideo URLs are refreshed instead of serving 403)
 
 ---
 
@@ -2528,6 +2530,38 @@ regression test asserts a slow stream completes past the deadline; `go test
 
 ---
 
+### B147. Session Cache Expiration Fix
+
+**Problem.** The video session cache never expired by default
+(`SessionCacheTTL == 0` means "never expire"), so a single extraction's
+googlevideo URLs were reused indefinitely. YouTube media URLs carry an
+`expire` query parameter (a UNIX timestamp, typically 6 hours ahead of the
+request). Once that timestamp passes, the cached URLs return `403` and every
+downstream `Download`/`OpenStream`/`ResolveStreamURL` call fails until the
+caller manually constructs a fresh client.
+
+Even when a caller set `SessionCacheTTL`, the cache only checked
+`session.CachedAt` (when ytv1 cached it), never the URL's own `expire`
+value. A session cached 1 minute ago still served URLs that YouTube had
+already expired server-side.
+
+**Fix.** Two layers:
+
+1. Default `SessionCacheTTL` to `6h` (yt-dlp's effective URL lifetime) when
+   unset, so sessions age out even without caller configuration. An explicit
+   zero still disables expiration (preserving the opt-out escape hatch).
+2. URL-expire validation in `getSession`: parse each cached format URL's
+   `expire` param and treat the session as expired when the earliest URL
+   expiry has passed (with a small safety margin). This catches server-side
+   expiry independent of the local TTL.
+
+**Acceptance.** Default-config clients refresh sessions whose URLs are
+expired; explicit `SessionCacheTTL=0` still disables the local TTL but URL
+expiry still applies; regression tests cover both default TTL and
+URL-expire invalidation; `go test ./...` green.
+
+---
+
 ## 4. Public API Contract
 
 1. Preserve `client.New`, `GetVideo`, `GetFormats`, `ResolveStreamURL` behavior.
@@ -2803,6 +2837,8 @@ Cycle B is complete only when all are true:
 - `2026-06-21`: Completed `B141` by changing interactive progress `Finish()` to clear the active line instead of emitting a newline that can look like a repeated completed progress row, adding regression coverage for the clear-line sequence, and verifying with `go test ./...`; live media verification is currently blocked by YouTube `LOGIN_REQUIRED` bot confirmation on the test video.
 - `2026-06-30`: Completed `B142` by implementing `internal/muxer.PureMuxMuxer` over `github.com/famomatic/puremux` (pure-Go WebM/MKV/MP4 input -> WebM/MKV output via `puremux.Merge`), routing MP4 output, metadata-embedding requests, and puremux failures to an optional FFmpeg fallback, wiring the CLI default muxer to `PureMuxMuxer{Fallback: FFmpegMuxer}`, defaulting the merge container to `.webm` for WebM video+audio pairs (mirrored in filename prediction) so unauthenticated WebM downloads no longer require an ffmpeg binary, updating the `TestToClientConfig_PostprocessorArgsForFFmpegMuxer` expectation to unwrap the fallback, adding muxer, client-merge, and prediction regression tests, updating README requirements, and verifying with `go build ./...`, `go vet ./...`, and `go test ./...`.
 - `2026-07-13`: Completed `B146` by splitting `OpenStream`'s context into a timeout-bounded `metaCtx` (for `GetFormats`/`resolveSelectedFormatURL`) and a deadline-free cancel-only `streamCtx` (for the media GET request), so `RequestTimeout` no longer aborts caller body reads with `context.DeadlineExceeded`; `streamCancel` is invoked explicitly on every error path and ownership transfers to `streamBody.Close()` on success; added `streamCtxForMediaRequest` helper and a context-aware regression test (`ctxAwareStreamingBody`) that reproduces the pre-fix failure (`context canceled`) when the media GET is bound to `metaCtx`; verified with `go build ./...`, `go vet ./...`, and `go test ./...`.
+
+- `2026-07-14`: Completed `B147` by defaulting `SessionCacheTTL` to `6h` (matching YouTube's googlevideo URL lifetime) when unset instead of never expiring, adding `effectiveSessionCacheTTL` so a zero config value applies the default and a negative value opts out of local TTL aging, adding `sessionURLsExpired` to parse each cached format URL's `expire` query param (UNIX timestamp) and invalidate the session when the earliest URL expiry passes (with a 30s safety margin to avoid in-flight races), wiring URL-expire validation into both `getSession` read paths and `evictExpiredLocked` so server-side URL expiry is always honored regardless of TTL config, updating the `Config.SessionCacheTTL` doc comment, and adding regression tests for default TTL expiration, URL-expire invalidation, safety margin, and negative-value opt-out; verified with `go build ./...`, `go vet ./...`, and `go test ./...`.
 
 ---
 

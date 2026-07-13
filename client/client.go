@@ -64,6 +64,77 @@ type videoSession struct {
 	lastAccess *atomic.Int64
 }
 
+// defaultSessionCacheTTL is applied when SessionCacheTTL is unset (zero).
+// YouTube googlevideo URLs typically expire 6 hours after issuance, so this
+// matches the effective URL lifetime and prevents stale-URL reuse without
+// forcing every caller to configure a TTL. An explicit zero still disables
+// local TTL expiration (the opt-out escape hatch).
+const defaultSessionCacheTTL = 6 * time.Hour
+
+// urlExpirySafetyMargin is subtracted from a URL's expire timestamp before
+// comparing against the current time, so a URL is treated as expired
+// slightly before YouTube actually rejects it. This avoids races where a
+// URL passes validation but expires during the in-flight request.
+const urlExpirySafetyMargin = 30 * time.Second
+
+// effectiveSessionCacheTTL returns the configured TTL, defaulting to
+// defaultSessionCacheTTL when unset (zero). A negative value disables
+// local TTL expiration (the opt-out escape hatch); URL-expire validation
+// still applies independently.
+func effectiveSessionCacheTTL(ttl time.Duration) time.Duration {
+	if ttl == 0 {
+		return defaultSessionCacheTTL
+	}
+	if ttl < 0 {
+		return 0
+	}
+	return ttl
+}
+
+// sessionURLsExpired reports whether the cached session's format URLs have
+// expired according to their own `expire` query parameter. YouTube embeds a
+// UNIX timestamp (seconds) in each googlevideo URL; once it passes, the URL
+// returns 403. This check is independent of SessionCacheTTL so server-side
+// URL expiry is always honored. Returns false when no URL carries an
+// expire param (e.g. ciphered-only or manifest sessions).
+func sessionURLsExpired(resp *innertube.PlayerResponse, now time.Time) bool {
+	if resp == nil {
+		return false
+	}
+	earliest := int64(0)
+	checkURL := func(raw string) {
+		if raw == "" {
+			return
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return
+		}
+		expireStr := u.Query().Get("expire")
+		if expireStr == "" {
+			return
+		}
+		expire, err := strconv.ParseInt(expireStr, 10, 64)
+		if err != nil || expire <= 0 {
+			return
+		}
+		if earliest == 0 || expire < earliest {
+			earliest = expire
+		}
+	}
+	for _, f := range resp.StreamingData.Formats {
+		checkURL(f.URL)
+	}
+	for _, f := range resp.StreamingData.AdaptiveFormats {
+		checkURL(f.URL)
+	}
+	if earliest == 0 {
+		return false
+	}
+	expiryTime := time.Unix(earliest, 0).Add(-urlExpirySafetyMargin)
+	return now.After(expiryTime)
+}
+
 // New creates a new YouTube client.
 func New(config Config) *Client {
 	return NewClient(config)
@@ -599,7 +670,12 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 	s, ok := c.sessions[videoID]
 	if ok {
 		expired := false
-		if ttl := c.config.SessionCacheTTL; ttl > 0 && !s.CachedAt.IsZero() && time.Since(s.CachedAt) > ttl {
+		if ttl := effectiveSessionCacheTTL(c.config.SessionCacheTTL); ttl > 0 && !s.CachedAt.IsZero() && time.Since(s.CachedAt) > ttl {
+			expired = true
+		}
+		// URL-expire validation runs regardless of TTL so server-side URL
+		// expiry is always honored even when the local TTL is disabled.
+		if !expired && sessionURLsExpired(s.Response, time.Now()) {
 			expired = true
 		}
 		if !expired {
@@ -627,7 +703,8 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 	if !ok {
 		return videoSession{}, false
 	}
-	if ttl := c.config.SessionCacheTTL; ttl > 0 && !cur.CachedAt.IsZero() && time.Since(cur.CachedAt) > ttl {
+	ttlExpired := effectiveSessionCacheTTL(c.config.SessionCacheTTL) > 0 && !cur.CachedAt.IsZero() && time.Since(cur.CachedAt) > effectiveSessionCacheTTL(c.config.SessionCacheTTL)
+	if ttlExpired || sessionURLsExpired(cur.Response, time.Now()) {
 		delete(c.sessions, videoID)
 		return videoSession{}, false
 	}
@@ -664,15 +741,15 @@ func (c *Client) deleteSession(videoID string) {
 }
 
 func (c *Client) evictExpiredLocked(now time.Time) {
-	ttl := c.config.SessionCacheTTL
-	if ttl <= 0 {
-		return
-	}
+	ttl := effectiveSessionCacheTTL(c.config.SessionCacheTTL)
+	// A zero TTL is the documented opt-out: skip TTL-based eviction but
+	// still drop sessions whose URLs have expired server-side.
 	for id, session := range c.sessions {
-		if session.CachedAt.IsZero() {
+		if ttl > 0 && !session.CachedAt.IsZero() && now.Sub(session.CachedAt) > ttl {
+			delete(c.sessions, id)
 			continue
 		}
-		if now.Sub(session.CachedAt) > ttl {
+		if sessionURLsExpired(session.Response, now) {
 			delete(c.sessions, id)
 		}
 	}
