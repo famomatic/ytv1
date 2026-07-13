@@ -3,12 +3,15 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
 type streamingBody struct {
 	chunks [][]byte
 	idx    int
@@ -22,6 +25,7 @@ func (s *streamingBody) Read(p []byte) (int, error) {
 	s.idx++
 	return n, nil
 }
+
 // ctxAwareStreamingBody emits chunks with a delay and mirrors net/http's real
 // behavior of aborting an in-flight body read when the request context is
 // canceled or its deadline expires. Mock transports normally bypass this
@@ -107,6 +111,64 @@ func TestOpenStream_BodyReadableAfterReturn(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("body mismatch: got %q want %q", string(got), want)
+	}
+}
+
+// TestStreamBody_ReadAfterCloseReturnsEOF asserts that a Read after Close
+// returns io.EOF rather than racing into the underlying body. The previous
+// mutex-based implementation unlocked before calling rc.Read, leaving a
+// window where Close could run rc.Close while a Read was in flight.
+func TestStreamBody_ReadAfterCloseReturnsEOF(t *testing.T) {
+	body := &streamingBody{chunks: [][]byte{[]byte("payload")}}
+	sb := &streamBody{rc: io.NopCloser(body), cancel: func() {}}
+
+	buf := make([]byte, 4)
+	n, err := sb.Read(buf)
+	if err != nil || n != 4 {
+		t.Fatalf("first Read: n=%d err=%v", n, err)
+	}
+
+	if err := sb.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	n, err = sb.Read(buf)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("Read after Close: n=%d err=%v, want io.EOF", n, err)
+	}
+	if n != 0 {
+		t.Fatalf("Read after Close returned %d bytes, want 0", n)
+	}
+
+	if err := sb.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestStreamBody_ConcurrentReadClose exercises the Close/Read race without
+// a real network body. The atomic-flag implementation guarantees no Read
+// proceeds after Close sets the flag, and Close is idempotent under sync.Once.
+func TestStreamBody_ConcurrentReadClose(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		body := &streamingBody{chunks: [][]byte{[]byte("x")}}
+		sb := &streamBody{rc: io.NopCloser(body), cancel: func() {}}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = sb.Read(make([]byte, 1))
+		}()
+		go func() {
+			defer wg.Done()
+			_ = sb.Close()
+		}()
+		wg.Wait()
+
+		n, err := sb.Read(make([]byte, 1))
+		if !errors.Is(err, io.EOF) || n != 0 {
+			t.Fatalf("iteration %d: post-close Read n=%d err=%v, want EOF", i, n, err)
+		}
 	}
 }
 

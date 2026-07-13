@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // StreamOptions controls format selection for stream-first APIs.
@@ -117,26 +118,23 @@ type streamBody struct {
 	rc     io.ReadCloser
 	cancel context.CancelFunc
 
-	once   sync.Once
-	closed bool
-	mu     sync.Mutex
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 func (s *streamBody) Read(p []byte) (int, error) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	// Check the closed flag without holding a mutex. Close sets this flag
+	// before closing the underlying body, so a concurrent or post-close Read
+	// returns EOF instead of racing into rc.Read after rc.Close has run.
+	if s.closed.Load() {
 		return 0, io.EOF
 	}
-	s.mu.Unlock()
 	return s.rc.Read(p)
 }
 
 func (s *streamBody) Close() error {
-	s.once.Do(func() {
-		s.mu.Lock()
-		s.closed = true
-		s.mu.Unlock()
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
 		if s.cancel != nil {
 			s.cancel()
 		}
