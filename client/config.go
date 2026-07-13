@@ -139,7 +139,10 @@ type Config struct {
 	KeepIntermediateFiles bool
 
 	// SessionCacheTTL expires in-memory video sessions after this duration.
-	// Zero disables TTL-based expiration.
+	// When unset (zero), the package defaults to 6 hours to match YouTube's
+	// googlevideo URL lifetime. Set to a positive value to override. Set to
+	// a negative value (e.g. -1) to disable local TTL expiration; URL-expire
+	// validation still applies regardless.
 	SessionCacheTTL time.Duration
 
 	// SessionCacheMaxEntries bounds in-memory video session count (LRU eviction).
