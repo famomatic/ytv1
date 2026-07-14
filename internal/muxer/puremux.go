@@ -102,6 +102,9 @@ func (m *PureMuxMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPa
 		}
 		return nil
 	}
+	// No fallback: remove any partial/corrupt output puremux may have written
+	// so a failed merge does not leave a truncated file masquerading as output.
+	_ = os.Remove(outputPath)
 	return fmt.Errorf("puremux merge failed: %w", err)
 }
 

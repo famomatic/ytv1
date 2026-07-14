@@ -222,8 +222,12 @@ func AppendDetail(base string, extra string) string {
 	if base == "" {
 		return extra
 	}
-	if strings.Contains(base, extra) {
-		return base
+	// Match whole space-delimited tokens, not substrings: a substring check
+	// wrongly suppresses e.g. "n=1" when base already contains "reason=1".
+	for _, tok := range strings.Fields(base) {
+		if tok == extra {
+			return base
+		}
 	}
 	return base + " " + extra
 }

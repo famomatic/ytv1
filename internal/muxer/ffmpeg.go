@@ -59,9 +59,15 @@ func (f *FFmpegMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPat
 	args := f.mergeArgs(videoPath, audioPath, outputPath, meta)
 	cmd := exec.CommandContext(ctx, f.Path, args...)
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	// Capture stderr (bounded) so a merge failure carries ffmpeg's actual
+	// diagnostic instead of collapsing to a bare "exit status 1".
+	stderr := &boundedBuffer{limit: 8 << 10}
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
+		if tail := strings.TrimSpace(stderr.String()); tail != "" {
+			return fmt.Errorf("ffmpeg merge failed: %w: %s", err, tail)
+		}
 		return fmt.Errorf("ffmpeg merge failed: %w", err)
 	}
 
@@ -117,13 +123,37 @@ func validateFilePath(path, label string) error {
 			return fmt.Errorf("ffmpeg %s path uses forbidden protocol scheme %q: %s", label, scheme, path)
 		}
 	}
-	// Block path traversal outside the working directory.
-	abs, err := filepath.Abs(path)
-	if err != nil {
+	// Reject paths that cannot be resolved at all (e.g. invalid on this OS).
+	// Note: this intentionally does NOT confine paths to a base directory —
+	// output paths are legitimately caller-chosen absolute locations. The
+	// scheme check above is the SSRF/protocol-handler guard.
+	if _, err := filepath.Abs(path); err != nil {
 		return fmt.Errorf("ffmpeg %s path invalid: %w", label, err)
 	}
-	_ = abs // absolute path is used by ffmpeg via the validated original path
 	return nil
+}
+
+// boundedBuffer is an io.Writer that retains at most `limit` bytes, keeping the
+// tail (most recent output) so a subprocess cannot exhaust memory via stderr
+// while still surfacing the final, most relevant diagnostic lines.
+type boundedBuffer struct {
+	limit int
+	buf   []byte
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		return len(p), nil
+	}
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.limit {
+		b.buf = b.buf[len(b.buf)-b.limit:]
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string {
+	return string(b.buf)
 }
 
 // sanitizeMetadata strips control characters from metadata values to prevent

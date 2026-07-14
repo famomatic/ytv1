@@ -12,6 +12,11 @@ type cachedPoTokenProvider struct {
 	base  innertube.PoTokenProvider
 	mu    sync.RWMutex
 	cache map[string]string
+	// fetchMu serializes concurrent cold fetches per client id so a burst of
+	// cache-miss callers issues a single upstream GetToken instead of a
+	// thundering herd of identical network requests.
+	fetchMu map[string]*sync.Mutex
+	fetchGu sync.Mutex
 }
 
 // NewCachedPoTokenProvider wraps a PoTokenProvider with in-memory client-keyed
@@ -21,8 +26,9 @@ func NewCachedPoTokenProvider(base innertube.PoTokenProvider) innertube.PoTokenP
 		return nil
 	}
 	return &cachedPoTokenProvider{
-		base:  base,
-		cache: make(map[string]string),
+		base:    base,
+		cache:   make(map[string]string),
+		fetchMu: make(map[string]*sync.Mutex),
 	}
 }
 
@@ -32,12 +38,19 @@ func (p *cachedPoTokenProvider) GetToken(ctx context.Context, clientID string) (
 		return p.base.GetToken(ctx, clientID)
 	}
 
-	p.mu.RLock()
-	if token, ok := p.cache[key]; ok && token != "" {
-		p.mu.RUnlock()
+	if token, ok := p.load(key); ok {
 		return token, nil
 	}
-	p.mu.RUnlock()
+
+	// Serialize cold fetches for this key so only one upstream call runs.
+	lock := p.fetchLock(key)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Re-check under the per-key lock: a concurrent fetch may have populated it.
+	if token, ok := p.load(key); ok {
+		return token, nil
+	}
 
 	token, err := p.base.GetToken(ctx, clientID)
 	if err != nil || strings.TrimSpace(token) == "" {
@@ -48,4 +61,22 @@ func (p *cachedPoTokenProvider) GetToken(ctx context.Context, clientID string) (
 	p.cache[key] = token
 	p.mu.Unlock()
 	return token, nil
+}
+
+func (p *cachedPoTokenProvider) load(key string) (string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	token, ok := p.cache[key]
+	return token, ok && token != ""
+}
+
+func (p *cachedPoTokenProvider) fetchLock(key string) *sync.Mutex {
+	p.fetchGu.Lock()
+	defer p.fetchGu.Unlock()
+	lock, ok := p.fetchMu[key]
+	if !ok {
+		lock = &sync.Mutex{}
+		p.fetchMu[key] = lock
+	}
+	return lock
 }

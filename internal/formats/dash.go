@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -139,13 +140,16 @@ func parseFrameRate(raw string) int {
 		if err1 != nil || err2 != nil || den == 0 {
 			return 0
 		}
-		return int(num / den)
+		// Round, not truncate: fractional broadcast rates like 30000/1001
+		// (29.97) and 60000/1001 (59.94) must map to 30 and 60 so `fps=`
+		// selectors match and the reported FPS is correct.
+		return int(math.Round(num / den))
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0
 	}
-	return int(v)
+	return int(math.Round(v))
 }
 
 func resolveManifestRefURL(manifestURL, manifestBase, ref string) string {

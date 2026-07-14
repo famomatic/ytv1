@@ -254,7 +254,15 @@ func (d *Decipherer) extractFunction(name string) (string, error) {
 				brackets--
 			}
 		case '`', '"', '\'':
-			if pos > 1 && d.jsBody[pos-1] == '\\' && d.jsBody[pos-2] != '\\' {
+			// A quote is escaped iff preceded by an ODD number of consecutive
+			// backslashes. The previous two-char lookback mishandled sequences
+			// like `\\\"` (three backslashes → escaped quote) and could
+			// miscount braces, extracting the wrong function body.
+			backslashes := 0
+			for k := pos - 1; k >= 0 && d.jsBody[k] == '\\'; k-- {
+				backslashes++
+			}
+			if backslashes%2 == 1 {
 				continue
 			}
 			if strChar == 0 {

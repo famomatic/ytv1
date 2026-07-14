@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/famomatic/ytv1/internal/iox"
 )
@@ -25,6 +26,14 @@ var playerJSURLCfgPattern = regexp.MustCompile(`(?i)["']PLAYER_JS_URL["']\s*:\s*
 var webPlayerContextJSURLPattern = regexp.MustCompile(`(?i)["']jsUrl["']\s*:\s*["']([^"']+/base\.js)["']`)
 var playerURLPattern = regexp.MustCompile(`(/s/player/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]*/base\.js)`)
 
+// watchDataCacheTTL bounds how long resolved watch-page data (API key,
+// visitor data, signature timestamp, session ids) is served before a
+// re-fetch. YouTube rotates player JS / STS every few hours; without a TTL a
+// stale SignatureTimestamp/VisitorData would be served for the whole process
+// lifetime (the B147 session-cache staleness class). Mirrors the 6h player-JS
+// cache TTL.
+const watchDataCacheTTL = 6 * time.Hour
+
 type resolvedWatchData struct {
 	APIKey             string
 	VisitorData        string
@@ -32,6 +41,7 @@ type resolvedWatchData struct {
 	UserSessionID      string
 	SessionIndex       *int
 	SignatureTimestamp int
+	createdAt          time.Time
 }
 
 type APIKeyResolver struct {
@@ -65,9 +75,12 @@ func (r *APIKeyResolver) Resolve(ctx context.Context, profile ClientProfile, vid
 
 	data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID)
 	if err != nil {
-		// fetch failed; persist the fallback so concurrent callers don't
-		// re-issue the watch-page request within the same failure window.
-		r.set(cacheKey, resolvedWatchData{APIKey: fallback})
+		// Do NOT cache the fallback on error: with a TTL'd cache a permanent
+		// poison entry would (a) never expire fast enough and (b) make every
+		// later ResolveVisitorData/ResolveSignatureTimestamp/Resolve return
+		// ""/0/fallback without retrying. The per-key fetch lock already
+		// prevents a thundering herd, so leaving the entry absent lets the
+		// next caller retry cleanly.
 		return fallback, err
 	}
 	if strings.TrimSpace(data.APIKey) == "" {
@@ -156,7 +169,15 @@ func (r *APIKeyResolver) get(host string) (resolvedWatchData, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	key, ok := r.cache[host]
-	return key, ok
+	if !ok {
+		return resolvedWatchData{}, false
+	}
+	// Expire stale entries so rotated STS/visitor data is re-fetched instead
+	// of being served indefinitely.
+	if !key.createdAt.IsZero() && time.Since(key.createdAt) > watchDataCacheTTL {
+		return resolvedWatchData{}, false
+	}
+	return key, true
 }
 
 func (r *APIKeyResolver) set(host string, key resolvedWatchData) {
@@ -166,7 +187,15 @@ func (r *APIKeyResolver) set(host string, key resolvedWatchData) {
 	// fields (APIKey vs VisitorData vs STS) of the same profile do not
 	// clobber each other. Non-empty values in the incoming entry win.
 	existing, ok := r.cache[host]
+	// Treat an expired entry as absent so a fresh fetch resets the TTL clock
+	// rather than inheriting the old (expired) createdAt via merge.
+	if ok && !existing.createdAt.IsZero() && time.Since(existing.createdAt) > watchDataCacheTTL {
+		ok = false
+	}
 	if !ok {
+		if key.createdAt.IsZero() {
+			key.createdAt = time.Now()
+		}
 		r.cache[host] = key
 		return
 	}

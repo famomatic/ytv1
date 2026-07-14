@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -119,6 +120,13 @@ func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
 			f.Codecs = codecs
 		}
 		f.HasAudio, f.HasVideo = deriveMediaFlags(f, true)
+		if strings.TrimSpace(pendingStreamAttrs["CODECS"]) == "" {
+			// A master-playlist variant with no CODECS attribute is a muxed
+			// audio+video rendition by HLS convention. Without this, the
+			// inferred "video/mp4" mime marks it video-only and it is wrongly
+			// selected as needing a separate audio stream.
+			f.HasAudio, f.HasVideo = true, true
+		}
 		formats = append(formats, f)
 		pendingStreamAttrs = nil
 	}
@@ -193,7 +201,9 @@ func parseFloatToInt(raw string) int {
 	if err != nil {
 		return 0
 	}
-	return int(v)
+	// Round, not truncate: HLS FRAME-RATE is a decimal (e.g. 59.94) and must
+	// map to 60 so `fps=` selectors match.
+	return int(math.Round(v))
 }
 
 func resolveM3U8RefURL(manifestURL, ref string) string {

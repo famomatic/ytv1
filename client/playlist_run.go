@@ -13,6 +13,10 @@ type PlaylistRunSummary struct {
 	Failed    int
 	Aborted   bool
 	Skipped   int
+	// AbortErr carries the error that caused an intentional abort
+	// (context cancellation, break-on-existing, max-downloads reached) so the
+	// caller can propagate it instead of treating the run as a plain success.
+	AbortErr error
 }
 
 // PlaylistItemFailure describes a failed playlist item.
@@ -39,18 +43,29 @@ func RunPlaylistItems(ctx context.Context, items []PlaylistItem, opts PlaylistRu
 	summary := PlaylistRunSummary{Total: len(items)}
 	failures := make([]PlaylistItemFailure, 0)
 	for i, item := range items {
+		// Honor cancellation before starting each item so a Ctrl-C on a large
+		// playlist surfaces the cancellation instead of marking every remaining
+		// item "failed" and spinning the processor once per item.
+		if err := ctx.Err(); err != nil {
+			summary.Aborted = true
+			summary.AbortErr = err
+			summary.Skipped = len(items) - i
+			break
+		}
 		if opts.OnItemStart != nil {
 			opts.OnItemStart(i+1, len(items), item)
 		}
 		if err := processor(ctx, item, i+1); err != nil {
 			if opts.IsBreakOnExisting != nil && opts.IsBreakOnExisting(err) {
 				summary.Aborted = true
+				summary.AbortErr = err
 				summary.Skipped = len(items) - i - 1
 				break
 			}
 			if opts.IsMaxDownloadsReached != nil && opts.IsMaxDownloadsReached(err) {
 				summary.Succeeded++
 				summary.Aborted = true
+				summary.AbortErr = err
 				summary.Skipped = len(items) - i - 1
 				break
 			}

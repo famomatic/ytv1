@@ -23,6 +23,10 @@ func SortByBest(formats []Format) {
 		if bitrateI != bitrateJ {
 			return bitrateI > bitrateJ
 		}
+		// 3. FPS (documented final tie-break)
+		if formats[i].FPS != formats[j].FPS {
+			return formats[i].FPS > formats[j].FPS
+		}
 		return false
 	})
 }

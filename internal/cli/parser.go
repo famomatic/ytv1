@@ -835,6 +835,7 @@ func parseByteRate(raw string) int64 {
 		{"k", 1024},
 		{"m", 1024 * 1024},
 		{"g", 1024 * 1024 * 1024},
+		{"b", 1},
 	}
 	for _, suffix := range suffixes {
 		if strings.HasSuffix(lower, suffix.suffix) {
@@ -1034,7 +1035,10 @@ func normalizeOutputPathDir(raw string) string {
 		case "", "home":
 			return strings.TrimSpace(after)
 		default:
-			return ""
+			// Unknown location-type prefix (temp:, subtitle:, ...): strip the
+			// type and use the path rather than silently discarding the whole
+			// value (which sent output to the cwd).
+			return strings.TrimSpace(after)
 		}
 	}
 	return raw

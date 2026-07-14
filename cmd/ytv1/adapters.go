@@ -40,7 +40,9 @@ func mediaDownloadSleepDuration(opts cli.Options) time.Duration {
 		return 0
 	}
 	if opts.MaxSleepInterval > minSleep {
-		return minSleep
+		// yt-dlp semantics: sleep a uniformly random duration in [min, max]
+		// so downloads are not perfectly periodic.
+		return minSleep + time.Duration(rand.Int63n(int64(opts.MaxSleepInterval-minSleep)+1))
 	}
 	return minSleep
 }
@@ -157,12 +159,18 @@ func processPlaylist(ctx context.Context, c *client.Client, playlistID string, o
 			summary.Aborted,
 		)
 	}
-	if len(failures) > 0 {
-		if shouldPrintPlaylistText(opts) {
-			for _, failure := range failures {
-				log.Printf("Failed to process %s: %v", failure.VideoID, failure.Err)
-			}
+	if len(failures) > 0 && shouldPrintPlaylistText(opts) {
+		for _, failure := range failures {
+			log.Printf("Failed to process %s: %v", failure.VideoID, failure.Err)
 		}
+	}
+	// Propagate an intentional abort (max-downloads reached, break-on-existing,
+	// cancellation) so the top-level input loop stops instead of continuing to
+	// the next URL and downloading past the global cap.
+	if summary.AbortErr != nil {
+		return summary.AbortErr
+	}
+	if len(failures) > 0 {
 		return fmt.Errorf("playlist completed with failures: failed=%d/%d", summary.Failed, summary.Total)
 	}
 	return nil

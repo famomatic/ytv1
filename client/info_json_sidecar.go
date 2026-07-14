@@ -12,15 +12,7 @@ func WriteInfoJSONSidecar(input string, info *VideoInfo, outputPath string) erro
 	if err := mkdirParent(outputPath, "info json"); err != nil {
 		return err
 	}
-	f, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create info json: %w", err)
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(BuildYTDLPDumpSingleJSON(input, info)); err != nil {
+	if err := writeJSONAtomic(outputPath, BuildYTDLPDumpSingleJSON(input, info)); err != nil {
 		return fmt.Errorf("failed to write info json: %w", err)
 	}
 	return nil
@@ -31,17 +23,48 @@ func WritePlaylistInfoJSONSidecar(playlist *PlaylistInfo, outputPath string) err
 	if err := mkdirParent(outputPath, "playlist info json"); err != nil {
 		return err
 	}
-	f, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create playlist info json: %w", err)
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(BuildYTDLPPlaylistInfoJSON(playlist)); err != nil {
+	if err := writeJSONAtomic(outputPath, BuildYTDLPPlaylistInfoJSON(playlist)); err != nil {
 		return fmt.Errorf("failed to write playlist info json: %w", err)
 	}
+	return nil
+}
+
+// writeJSONAtomic encodes v as indented JSON to a temp file in the same
+// directory, fsyncs and closes it (surfacing any flush error), then renames it
+// over outputPath. This avoids truncating a good existing sidecar on a
+// mid-encode failure and avoids silently reporting success when a buffered
+// write never reaches disk (disk-full / network FS).
+func writeJSONAtomic(outputPath string, v any) error {
+	dir := filepath.Dir(outputPath)
+	tmp, err := os.CreateTemp(dir, ".info-*.json.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup if we return before a successful rename.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	enc := json.NewEncoder(tmp)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, outputPath); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 

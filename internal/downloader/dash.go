@@ -128,9 +128,18 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 			return nil
 		}
 
-		// Download new segments
+		// Download new segments.
+		//
+		// Dynamic (live) manifests are re-fetched on a sliding window and the
+		// per-segment Seq is a synthetic position recomputed from StartNumber on
+		// every refresh (see extractSegments), so it is NOT stable across
+		// refreshes: a $Time$-based timeline keeps StartNumber constant while the
+		// window advances, making the newest segment land at roughly the same
+		// Seq as last refresh and the `seg.Seq <= lastSeq` guard silently skip
+		// it. For dynamic manifests we therefore dedup by the stable segment URL
+		// only. Static manifests keep the fast lastSeq short-circuit.
 		for _, seg := range segments {
-			if seg.Seq <= d.lastSeq && d.lastSeq != -1 {
+			if !isDynamic && seg.Seq <= d.lastSeq && d.lastSeq != -1 {
 				continue
 			}
 			if d.seenSegments[seg.URL] {
@@ -193,11 +202,10 @@ func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segment
 
 func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
 	type item struct {
-		index int
-		seq   int64
-		url   string
-		body  []byte
-		err   error
+		seq  int64
+		url  string
+		body []byte
+		err  error
 	}
 	cfg := normalizeTransportConfig(d.Transport)
 	concurrency := cfg.MaxConcurrency
@@ -212,6 +220,11 @@ func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, seg
 	// otherwise be written as an empty body — silently truncating the stream.
 	started := make([]bool, len(segments))
 	var wg sync.WaitGroup
+	// parentCtx is the caller's context; ctx below is an internal derivation we
+	// cancel on the first segment failure to stop sibling downloads. We must
+	// distinguish the two so a real segment error is reported instead of the
+	// internal cancellation it triggers.
+	parentCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -228,11 +241,10 @@ func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, seg
 			defer func() { <-sem }()
 			body, err := doGETBytesWithRetry(ctx, d.Client, seg.URL, d.Headers, d.Transport)
 			out[i] = item{
-				index: i,
-				seq:   seg.Seq,
-				url:   seg.URL,
-				body:  body,
-				err:   err,
+				seq:  seg.Seq,
+				url:  seg.URL,
+				body: body,
+				err:  err,
 			}
 			started[i] = true
 			if err != nil {
@@ -242,27 +254,31 @@ func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, seg
 	}
 	wg.Wait()
 
-	// If the context was cancelled, some goroutines may have returned
-	// without setting out[i]. Surface the context error instead of
-	// writing zero-value (empty) bodies.
-	if ctx.Err() != nil {
-		return ctx.Err()
+	// Prefer a concrete segment failure over the internal cancellation it
+	// triggers: cancel() fires before wg.Done, so ctx.Err() would otherwise
+	// mask the real status/network error as a bare context.Canceled.
+	for i := range out {
+		if started[i] && out[i].err != nil {
+			return fmt.Errorf("failed to download segment seq=%d: %w", segments[i].Seq, out[i].err)
+		}
 	}
-	for _, it := range out {
-		if !started[it.index] {
-			return fmt.Errorf("segment seq=%d was not downloaded (cancelled)", it.seq)
+	// No concrete failure: a genuine parent-context cancellation is the only
+	// remaining reason a goroutine may have skipped its write.
+	if parentCtx.Err() != nil {
+		return parentCtx.Err()
+	}
+	for i := range out {
+		if !started[i] {
+			return fmt.Errorf("segment seq=%d was not downloaded (cancelled)", segments[i].Seq)
 		}
-		if it.err != nil {
-			return fmt.Errorf("failed to download segment seq=%d: %w", it.seq, it.err)
+		if len(out[i].body) == 0 {
+			return fmt.Errorf("segment seq=%d downloaded as empty body", segments[i].Seq)
 		}
-		if len(it.body) == 0 {
-			return fmt.Errorf("segment seq=%d downloaded as empty body", it.seq)
-		}
-		if _, err := w.Write(it.body); err != nil {
+		if _, err := w.Write(out[i].body); err != nil {
 			return err
 		}
-		d.lastSeq = it.seq
-		d.seenSegments[it.url] = true
+		d.lastSeq = out[i].seq
+		d.seenSegments = trackSeen(d.seenSegments, out[i].url)
 	}
 	return nil
 }
