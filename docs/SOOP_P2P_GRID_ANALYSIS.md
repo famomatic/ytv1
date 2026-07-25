@@ -1473,3 +1473,47 @@ without login" is not possible on this path; (b) the **US-VPN path already deliv
 1080p ORIGINAL** with no login, no crypto, no P2P. The KR-native path's remaining
 work (exact crypto port + live validation) is large and can only be validated with a
 live broadcast up.
+
+### 14.22 op2a crypto CRACKED — decrypt byte-exact validated offline
+
+Decrypted the captured op2a blob offline and recovered its plaintext exactly,
+proving the whole construction. **The cipher is AES-128-CTR (not CBC)** — the tell
+in FUN_10036300 is `out[i] = in[i] ^ keystream` plus a big-endian 16-byte counter
+increment. CTR is symmetric, so the same routine encrypts and decrypts.
+
+**Validated blob layout** (128 bytes):
+```
+blob[0:16]   = H(pbVar2)            // custom-hash MAC, also the pass-2 CTR key
+blob[16:128] = CTR(key=blob[0:16], iv=IV8, pbVar2_padded)   // pass 2
+pbVar2 = [salt2_scrambled 18][c1 80][zero-pad to 16]
+c1     = CTR(key=KEY8, iv=IV8, puVar1_padded)               // pass 1
+puVar1 = [header 16][salt1_scrambled 12][input 45]
+```
+Decrypting the capture yields `salt2 → "tpqmsqpscjqoffl1-2"` and
+`salt1 → "tkavudehd625"` exactly, and the input carries the 32-char session GUID
+`25631A3AB79CB882B26207735783A003`. The 16-byte header decodes to
+`inputLen | timestamp | incrementing-counter | checksum(FUN_10037640)` in the
+scrambled order of the puVar1[0..15] assignments.
+
+**Constants (NetControl.dll .rdata):**
+```
+KEY8 (0x100581f8) = e2081129c4d0afbe55379fcde1755413   // mode-8 AES key
+IV8  (0x10058208) = 22655d8796eeca33c7a8221dffcb8271   // mode-8 AES IV/counter
+salt1 "tkavudehd625"        salt2 "tpqmsqpscjqoffl1-2"
+saltTbl (0x10058238, i%6)  = +1,-1,-3,-2,+1,+2  (add to encode, sub to decode)
+```
+
+**The MAC `H` (blob[0:16]) is a custom hash** — MD5 init constants
+(`67452301/EFCDAB89/98BADCFE/10325476`) and MD5-style finalize (0x80 bit + 64-bit
+length, FUN_1003a0d0), but an 80-step transform (FUN_10039050) with SHA-family
+round constants (`5a827999/6ed9eba1/8f1bbcdc/50a28be6/5c4dd124/6d703ef3` + two
+constant-free rounds), permuted boolean functions and custom rotation amounts.
+Standard MD5 over every slice of the recovered plaintext fails to reproduce
+blob[0:16], confirming the custom transform. It ports verbatim from the decompile
+and is validated offline against the recovered (plaintext → blob[0:16]) test vector.
+
+**Consequence:** the op2a session-auth blob is fully reproducible with static
+constants — no per-session server secret is needed for the crypto itself. The
+remaining work is the verbatim hash port (offline-validatable), the encoder, then
+the op46(`_au`)/op14 framing, the stateful handshake, and the op69/6b/6c frame-pull
+loop — the last of which still needs a live broadcast to validate end to end.
