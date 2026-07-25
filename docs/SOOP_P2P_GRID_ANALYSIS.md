@@ -1542,3 +1542,39 @@ browser assembles it and hands it to SOOPStreamer over the localhost WebSocket �
 the token (or its API source) is visible in a browser HAR of a 1080p P2P session
 (the APIs are HTTPS, but a HAR decrypts them). That HAR is the next input needed to
 finish op46 and reach the relay's `op4d {"RESULT":0}` → frame-pull → 1080p.
+
+### 14.24 BREAKTHROUGH — bridge WebSocket does the crypto server-side (no client crypto)
+
+A browser HAR of a P2P session revealed a far simpler path than the SOOPStreamer
+binary relay. The browser drives the whole grid join over a JSON WebSocket:
+
+`wss://bridge.sooplive.com/Websocket/<bjid>` — a server-side proxy to the binary
+gateway/relay protocol. Message flow (all JSON):
+
+1. **INIT_GW** (client→): `{gate_ip, gate_port:3456, broadno, category, fanticket,
+   cookie, cli_type:41, cc_cli_type:19, QUALITY:"ori", guid, BJID, addinfo, JOINLOG}`.
+   JOINLOG is a PLAINTEXT query string `log&uuid=<_au>&geo_cc=..&..&uuid_3rd=<_au>..`.
+   **No op2a blob, no 128-byte path_key token — the bridge builds all binary/crypto
+   server-side.**
+2. **FLASH_LOGIN** (←) then **CERTTICKETEX** (←): `{iPort, iTicketLen:728,
+   iTicketType:1, pcAppendDat:"<base64 20B>", pcTicket:"63D11359…"(728 hex)}`.
+3. **INIT_BROAD** (client→): `{center_ip, center_port:18000, passwd, JOINLOG, guid,
+   QUALITY:"ori", gw_ticket:<the pcTicket>, append_data:<pcAppendDat>}`. The client
+   just echoes the pcTicket + pcAppendDat it received — no signing.
+4. **JOINCH_COMMON** (←): `pAddInfo … preset{"view_preset":"original, hd, sd, hd_4k"}`
+   → ORIGINAL/1080p granted. **GETCHINFOEX**: `siWidth:1920, siHeight:1080,
+   siRate:8000`.
+
+Consequences:
+- The op2a session-auth crypto (§14.21–14.23), though fully cracked and
+  live-validated, is **not needed** on this path — the bridge server performs it.
+- The `guid` is a device constant (`25631A3A…` in two independent captures), not a
+  per-session secret.
+- **US IP**: the actual 1080p media is plain CDN HLS
+  (`live-global-cdn-v02.sooplive.com/.../auth_master_playlist.m3u8?aid=<AID>`); the
+  bridge/colony P2P is upload contribution only. This is the already-implemented
+  US path.
+- **KR IP**: CDN caps at 540p, so 1080p must come from the P2P media transport
+  (`wss://colony.sooplive.com/Colony/Stream?s=<bno>`, grpc-web). The bridge join is
+  now trivial (JSON, no crypto); the remaining work is the colony grpc-web media
+  protocol → 77-byte chunk deframer → 1080p.
