@@ -1112,3 +1112,31 @@ RequestBroadInstance → StartInstance, stream out via SetLiveBaseWnd callbacks)
 The DLL performs all crypto/protocol; ytv1 only orchestrates and consumes the
 decrypted 77-byte chunks. Far less work, reuses the proven engine, but requires
 the DLL present and a cgo/C++ shim. Recommended path to a working KR P2P client.
+
+### 14.9 KEY FINDING — the ISS-leaf path is PLAINTEXT (custom AES not needed)
+
+Decoding captured gateway packets (`soop_outbound.pcap`, port 3456) shows the
+protocol bodies are **plaintext binary**, not aesP3-encrypted. The layered
+custom crypto (§14.7) is only for the optional "recommend/enckey" (peer
+encryption) — NOT on the gateway → cert → broadcast → ISS stream critical path.
+
+Outer frame (verified): `[f0 u32][0 u32][bodyLen u32][f3 u32]` (16 bytes) + body.
+`f0` is a transaction id shared by a request and its reply; `f3` a running
+counter; `bodyLen` = body byte length (e.g. 152-byte packet = 16 + 136).
+
+Captured gateway bodies, all plaintext:
+- login (client→gw): `2a 00 02 00` (cli_type=42) + 32-char ASCII `guid` +
+  `15 00 00 00` + addinfo (`ad_lang\x11ko\x12is_auto\x110\x12`).
+- login reply (gw→client): zeros + mode + `ps_Afreeca` (skin) — matches ws SVC:41.
+- broadcast request: `df46a211` + bjid (`viichan6`) + fanticket
+  (`b9abcd39…_viichan6_<bno>_html5_0`).
+- cert reply: `df46a211 … f8020000` + the 732-hex `pcTicket`
+  (`63D1135983F83210…`) — matches ws CERTTICKETEX.
+- one binary sub-blob: `06 00 00 00  80 00 00 00` + 128 bytes (opcode 6, len
+  0x80) — a signed/hash blob, the only non-plaintext gateway field (TBD; likely
+  `pcAppendData`-related, and skippable for a leaf join).
+
+Consequence: reimplementation needs **no cipher** for the leaf path — just
+plaintext binary packet (de)serialization for gateway → center getnode → ISS
+join → ISS_STREAM_DATA (77-byte chunks → existing deframer). The §14.7 custom
+AES is optional and deferred.
