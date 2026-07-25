@@ -1517,3 +1517,28 @@ constants — no per-session server secret is needed for the crypto itself. The
 remaining work is the verbatim hash port (offline-validatable), the encoder, then
 the op46(`_au`)/op14 framing, the stateful handshake, and the op69/6b/6c frame-pull
 loop — the last of which still needs a live broadcast to validate end to end.
+
+### 14.23 op2a crypto validated LIVE against the relay; op46 path_key is the last gate
+
+Ran a native probe from a KR IP against the live relay (`110.10.76.216:18000`) for a
+live broadcast: gateway login+broadcast (fresh GUID) → cert, then the ISS relay
+handshake with `op2/op3/op3e/op14/op2a`, the op2a body built by
+`p2p.BuildAuthBlob` (the reverse-engineered crypto).
+
+Result:
+- `op2` → relay replies 28B, `op3` → 56B — **byte-identical to the capture**
+  (`…0a0000002c010000`, `…0b000000fb7dd8d9`). Framing + session engage correctly.
+- After `op2a` the relay stays **silent but keeps the connection OPEN** (a follow-up
+  write succeeds) — i.e. the relay did **not reject the op2a blob**. The crypto is
+  accepted live; the relay is waiting for `op46`.
+
+So the op2a session-auth crypto is confirmed correct end to end, not just offline.
+
+**Last gate = op46.** Its `path_key = <_au>_<bno>_<token>` carries a 128-byte token
+(hex, starts `1785…`). It is NOT the pcTicket, NOT any authblob mode (decrypt with
+mode 6/7/8 keys yields no salts), and does not appear in NetControl.dll (`path_key`
+is assembled outside it). Because `path_key` embeds the browser's `_au` cookie, the
+browser assembles it and hands it to SOOPStreamer over the localhost WebSocket — so
+the token (or its API source) is visible in a browser HAR of a 1080p P2P session
+(the APIs are HTTPS, but a HAR decrypts them). That HAR is the next input needed to
+finish op46 and reach the relay's `op4d {"RESULT":0}` → frame-pull → 1080p.
