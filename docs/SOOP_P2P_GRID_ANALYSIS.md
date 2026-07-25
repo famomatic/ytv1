@@ -1067,3 +1067,48 @@ FUN_10038f50 MAC construction (AES-CMAC vs AES-CBC-MAC) to reproduce the session
 key bit-exact; (b) the gateway login/enckey request+reply packet byte layout
 (the 4-byte-LE-field frame seen in `soop_outbound.pcap`: `df03… 88… 357… 06 80 …`
 + AES body). Then Center getnode and ISS_JOIN (§14.5 steps 2–3).
+
+### 14.7 aesP3.DecryptHashP2 — layered crypto (FUN_100386d0) + constants
+
+The protocol payloads use a proprietary multi-layer container, not plain AES:
+
+```
+input = [16-byte IV][custom-AES-CBC ciphertext]
+ 1. keysel = param_5 (6..9): FUN_10038300 (key schedule) + FUN_10038080 (pick key
+    DAT_10058260 for sel 6; DAT_10058280 for 7..9)
+ 2. FUN_100381a0: custom table-based AES-CBC decrypt (FUN_100361a0 init + block
+    loop thunk_FUN_10036300; .rdata InvMixColumns 0x0e/0x09/0x0d/0x0b tables)
+ 3. byte de-obfuscation: data[i] -= subTable[i % 6]   (subTable = int32[6])
+ 4. magic check #1  (18 bytes) then an inner AES layer (step 2 again) + subTable
+    + magic check #2 (12 bytes)
+ 5. checksum FUN_10038270 (custom 32-bit OR/XOR fold) compared to embedded value
+ 6. keysel 7 also enforces a ±300 s timestamp
+ 7. remaining bytes = plaintext payload
+```
+
+All constants extracted from NetControl.dll .rdata:
+
+| Const | VA | Bytes / meaning |
+|-------|----|-----------------|
+| AES key | 0x10058250 | `45cb101d263d47515b64757b858f999f` |
+| AES IV  | 0x10058260 | `b6c3cadde7f1fb040e182228323c464c` (keysel 6) |
+| AES key (sel 7-9) | 0x10058280 | `5733c5a716f5dc133cca6291f2cb4668` |
+| subTable | 0x100582b0 | int32[6] = `[1, -1, -3, -2, 1, 2]` (byte-subtract, i%6) |
+| magic #1 | 0x1005829c | 18B `74 70 71 6d 73 71 70 73 63 6a 71 6f 66 66 6c 31 2d 32` ("tpqmsqpscjqoffl1-2") |
+| magic #2 | 0x10058290 | 12B `74 6b 61 76 75 64 65 68 64 36 32 35` ("tkavudehd625") |
+| derive key | 0x10044f28 | `"teamjsh"` (session-key MAC key, §14.6) |
+
+### 14.8 Scale note & the tractable alternative
+
+Bit-exact reimplementation requires reproducing ~15 interlocking functions (custom
+table-AES block+schedule, the layered wrapper decrypt AND its inverse encrypt for
+JOIN/login, the MAC, the checksum) across THREE protocols (gateway/center/ISS),
+with **no test vectors** — the only validator is the live KR server (binary
+accept/reject). That is a large, error-prone research effort.
+
+Tractable alternative (Windows-only): **load NetControl.dll and drive its exported
+`CNetControlApp` API** (CreateInstance → SetGuid/SetUserInfo/SetOpenBroad →
+RequestBroadInstance → StartInstance, stream out via SetLiveBaseWnd callbacks).
+The DLL performs all crypto/protocol; ytv1 only orchestrates and consumes the
+decrypted 77-byte chunks. Far less work, reuses the proven engine, but requires
+the DLL present and a cgo/C++ shim. Recommended path to a working KR P2P client.
