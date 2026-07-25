@@ -1221,3 +1221,27 @@ So only the P2P peer control/subscribe handshake needs the custom cipher; the
 media itself is plaintext once the peer accepts you. Remaining barrier = reproduce
 the custom AES core + the peer subscribe. Next: read FUN_10036300 / FUN_100361a0
 (the block cipher + CBC state) to reconstruct it (constants already in hand).
+
+### 14.13 Core cipher = standard AES-128 (Te tables, stream mode) — reproducible
+
+FUN_10036300 uses the classic AES T-table round
+(`T0[a&ff]^T1[b>>8&ff]^T2[c>>16&ff]^T3[d>>24]`) with tables at 0x10055100/5500/
+5900/5d00. Their first words are `c66363a5 / a5c66363 / 63a5c663 / 6363a5c6` =
+the standard **AES encryption tables Te0–Te3**. Using Te (encryption) tables for a
+"decrypt" means the mode is a **stream mode (CTR/CFB/OFB)** where decryption uses
+the AES-encrypt primitive — so the block cipher is **stock AES-128** and Go's
+`crypto/aes` reproduces it exactly.
+
+Key material (FUN_10038300 selector → 16-byte AES-128 key):
+- sel 6: `45cb101d263d47515b64757b858f999f` (DAT_10058250)
+- sel 7: `3e7b91850e1deabcb5331756ddfb4531` (DAT_10058270)
+- sel 8/9: derived session key at ctx+0x224 (from the enckey, §14.6)
+
+So the entire cipher is reproducible with stdlib AES-128 + a stream mode; only the
+aesP3 *wrapper* (16-byte IV prefix, subTable byte de-obf, the two magic headers,
+custom checksum, timestamp) is bespoke and already fully documented (§14.7).
+
+Remaining to a working peer client: (1) confirm the stream mode (CTR vs CFB) and
+implement aesP3 in Go, validating against a captured aesP3 blob via the magic
+oracle; (2) derive the session key from a captured gateway enckey; (3) the peer
+subscribe packet; then read the plaintext 0202-framed media (§14.12) → deframer.
