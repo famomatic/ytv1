@@ -1206,3 +1206,18 @@ media chunks is viable. Reimplementation is NOT futile.
 Remaining build: gateway (plaintext) → center getnode (plaintext, proven to
 work) → peer handshake (custom AES, constants in hand) → plaintext media chunks
 → deframer. Optionally the ISS direct-source path as a root fallback.
+
+### 14.12 Peer wire: media plaintext, control encrypted (custom core)
+
+agent↔parent packets (live_p2p.pcap):
+- **media**: `0202 <id> <seq u32> <len u32> 0000` + plaintext chunk
+  (`01 00 45 00 …` = the H.264+AAC container; on the peer wire the 8×0xFF magic is
+  replaced by this `0202…` transport header). Entropy 7.7 = natural H.264.
+- **control/handshake**: separate small packets (len 251/308), high entropy, no
+  chunk marker. Standard AES-128-CBC with any static key does NOT decrypt them →
+  the cipher is the custom aesP3 core (FUN_10036300), not stock AES.
+
+So only the P2P peer control/subscribe handshake needs the custom cipher; the
+media itself is plaintext once the peer accepts you. Remaining barrier = reproduce
+the custom AES core + the peer subscribe. Next: read FUN_10036300 / FUN_100361a0
+(the block cipher + CBC state) to reconstruct it (constants already in hand).
