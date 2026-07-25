@@ -1387,3 +1387,37 @@ So: getnode/`0x63` was a dead end; the working path is the ISS-direct relay
 handshake, and the relay demonstrably engages our native client. Remaining:
 read the OnConnectISS builder to thread the `op2`/`op3` reply fields into
 `op3e`/`op50`, then the relay streams `op69/6b/6c` cache/media → deframer.
+
+### 14.20 ISS-direct handshake — FULLY DECODED (fields + threading)
+
+The relay (18000) ISS-direct handshake, every packet decoded from the fresh
+capture. Header per packet = `[opcode u32][0][bodyLen u32][0][?][body]`.
+
+Client → relay requests:
+- `op2` (21B) init → relay replies 28B: `…08000000 0a000000 2c010000 a66a0000`
+  (assigns a handle `a66a=0x6aa6`).
+- `op3` (21B) init → relay replies 56B: `…a66a0000 … bcc4729a 9f010000`
+  (more handle state).
+- `op3e` (28B) config → relay replies 247B with `buffilled_cnt=3&…&emgy_quality=63&
+  keep_alive_cnt=2…` (buffer/quality config).
+- `op34` (293B): the **CERT** (a suffix of the gateway's shared 732-hex cert,
+  starting at `4F7356AD…`) + `quality=ori&is_auto=false&passwd=(null)`.
+- `op71` (79B): `{"broad_no":0,"relay_port":27943,"reverse_port":13608}` — the
+  client's own P2P serving ports (0/0 for a pure leaf).
+- `op50` (24B): RequestBroad — carries the session handle (`4765a211`).
+- `op69` (94B): `{"list":[{"alloc_type":1,"parent_ip":0,"parent_port":0,"quality":1}]}`
+  — parent-allocation request.
+- relay reply `op4a` (259B): broadcast info incl. session id `4765a211` and
+  `preset {"view_preset":"original, hd, sd, hd_4k, hd_8k"}` (this stream goes to 8k!).
+
+**Key threading requirement:** the relay ASSIGNS state in the `op2`/`op3` replies
+(the `0x6aa6` handle etc). `op50`/`op34`/`op69` must carry the relay-assigned
+handle for THIS connection, not the captured session's values — which is why the
+verbatim replay got replies to `op2`/`op3` but silence afterward. The client must
+be **stateful**: read each reply, extract the handle/params, thread them into the
+next request.
+
+The whole no-crypto handshake is now decoded end to end (gateway op6→login→
+broadcast→cert; relay op2→op3→op3e→op34(cert)→op71→op50→op69→media). Remaining:
+implement the stateful threading (relay handle → op50/op34/op69), then the relay
+streams `op69/6b/6c` cache/media → 77-byte deframer → H.264+AAC.
