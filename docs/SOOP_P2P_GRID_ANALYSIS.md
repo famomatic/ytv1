@@ -1363,3 +1363,27 @@ Two ways to finish:
 
 Everything else is proven: transport, gateway login, cert, plaintext center/peer,
 plaintext media, deframer. The remaining gap is the session-finalize sequence.
+
+### 14.19 MILESTONE — correct path is ISS-direct; the relay engages our native handshake
+
+A fresh full-handshake capture (from packet #1) revealed what our earlier
+reconstruction missed:
+- **Gateway** (118.218.125.115:3456), in order: `06`-blob (152B, sent FIRST,
+  before login) → login (78B) → broadcast (150B) → `cutc` (45B). Verbatim replay
+  works: login-OK, cert (the fixed shared 732-hex `63D11359…`), and a proper
+  `cutc/sutc` reply. Gateway handshake is complete and reproduced natively.
+- **Relay/ISS** (110.10.76.217:18000) is NOT the getnode `0x63` coordinator — it
+  uses a low-opcode **ISS-direct** handshake: `op2 → op3 → op3e(config+quality)
+  → op34 → op71 → op50(RequestBroad) → op69/6b/6c(cache/media)`. Our earlier
+  `0x63` was the wrong protocol for this endpoint, which is why it never replied.
+
+Replaying the ISS handshake natively: **`op2` → relay replies 28B, `op3` → relay
+replies 56B** — the relay accepts and engages our connection. Subsequent packets
+(`op3e`, `op50`, …) then went unanswered because we replayed the *captured*
+session's field values; those packets must instead be built from the values the
+relay returns in the `op2`/`op3` replies (session-consistent), not verbatim.
+
+So: getnode/`0x63` was a dead end; the working path is the ISS-direct relay
+handshake, and the relay demonstrably engages our native client. Remaining:
+read the OnConnectISS builder to thread the `op2`/`op3` reply fields into
+`op3e`/`op50`, then the relay streams `op69/6b/6c` cache/media → deframer.
