@@ -1039,3 +1039,31 @@ Each step = read the dense Ghidra output, reconstruct exact byte layouts, and
 validate against the packet captures + the live server (which rejects malformed
 frames). Feasible end-to-end; no remaining unknowns of principle — only the
 methodical binary-protocol reconstruction.
+
+### 14.6 Gateway session-key derivation (CNetControlObject::_RecommendEncKeyData, FUN_10011070)
+
+The gateway returns an AES-encrypted "enckey" blob; the client derives the
+per-session key from it:
+
+```
+ctx = aesInit(staticKey=45cb…, staticIV=b6c3…)              // FUN_10038010
+dec = aesP3Decrypt(ctx, enckeyBlob, keysel=6, block=0x400)  // FUN_100386d0; require len(dec) >= 0x84
+hctx = hashSetKey("teamjsh")                                // FUN_10038b80(_, 0x10044f28="teamjsh\0", 3)
+sessionKey = hash(hctx, dec[:0x80])  -> 16 bytes            // FUN_10038f50(hctx, dec, 0x80, out, 0x10)
+aesSetKey(ctx, sessionKey)                                  // FUN_10038060  -> session cipher for the rest
+```
+
+Constants extracted from .rdata:
+- static AES key `45cb101d263d47515b64757b858f999f`, IV `b6c3cadde7f1fb040e182228323c464c` (§14.1)
+- **derivation key `"teamjsh"`** (VA 0x10044f28 = `74 65 61 6d 6a 73 68 00`)
+
+`aesP3` (FUN_100386d0) is a table-based AES variant with a key selector (case 6 →
+DAT_10058260; cases 7–9 → DAT_10058280). The derivation hash (FUN_10038f50 +
+FUN_10038be0 ShiftRows-style state ops) is an **AES-based MAC/hash keyed by
+"teamjsh"** over 128 bytes → 16-byte session key.
+
+Remaining for the gateway step: (a) exact `aesP3Decrypt` block/mode and the
+FUN_10038f50 MAC construction (AES-CMAC vs AES-CBC-MAC) to reproduce the session
+key bit-exact; (b) the gateway login/enckey request+reply packet byte layout
+(the 4-byte-LE-field frame seen in `soop_outbound.pcap`: `df03… 88… 357… 06 80 …`
++ AES body). Then Center getnode and ISS_JOIN (§14.5 steps 2–3).
