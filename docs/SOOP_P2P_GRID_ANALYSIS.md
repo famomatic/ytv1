@@ -1271,3 +1271,21 @@ Revised (much simpler) build: everything plaintext.
 
 No cipher needed anywhere on the stream path. The enckey / aesP3 work (§14.6–14.13)
 is retained only for the optional item service and is off the critical path.
+
+### 14.15 MILESTONE — gateway framing + login VALIDATED against the live server
+
+Replayed the captured client→gateway packets to a live gateway
+(118.218.125.116:3456). The server **parsed and replied**:
+- login packet (78B: 16B header `e2030000 00000000 3e000000 dc030000` + body
+  `2a 00 02 00` + 32-char guid + `15 00 00 00` + addinfo) → server replied 127B
+  `e2030000 … ps_Afreeca …` = the login-OK reply (the same `ps_Afreeca` skin seen
+  on the ws as SVC:41).
+- a duplicate/stale login → server replied 272B with a negative code
+  (`19 fc ff ff`) + a Korean error string — i.e. it validates and rejects
+  gracefully.
+
+So the wire framing is correct and the gateway handshake is reproducible: connect
+TCP → send the login packet → get login-OK. The header fields (f0=0x3e2,
+bodyLen=62, f3=0x3dc) were accepted verbatim, so they are not per-session
+secrets. Next: rebuild the broadcast-request packet (bjid + fresh fanticket) to
+get the cert, then center getnode → peer cache. Transport is proven.
