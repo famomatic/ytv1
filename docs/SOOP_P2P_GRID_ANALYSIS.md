@@ -1245,3 +1245,29 @@ Remaining to a working peer client: (1) confirm the stream mode (CTR vs CFB) and
 implement aesP3 in Go, validating against a captured aesP3 blob via the magic
 oracle; (2) derive the session key from a captured gateway enckey; (3) the peer
 subscribe packet; then read the plaintext 0202-framed media (§14.12) → deframer.
+
+### 14.14 MAJOR SIMPLIFICATION — custom AES is item-only; stream path is crypto-free
+
+Caller analysis settles it: `aesP3` decrypt (FUN_100386d0) has exactly ONE caller
+— `_RecommendEncKeyData`, reached only from `ItemSvcProc` sub-opcode 6 (the game
+item / adcon "enckey"). `aesP3` encrypt (FUN_10038350) is likewise used only
+inside `_RecommendEncKeyData`. So the custom cipher is **exclusively for the item
+service**, NOT for the stream: gateway, center getnode, P2P peer connect, cache
+request, and media are all **plaintext binary**. The high-entropy peer-control
+packets are binary tokens/hashes, not ciphertext.
+
+P2P cache request (`CNetControlObjectMb::_DataInitHls`): the client sends
+opcode **0xcb30** (V2S_REQ_CACHE_DATA_VER2) with a 16-byte payload = a quality
+bitmask (SD=1, HD=2, HD4k=8, ORIGINAL=0x10, 1440p=0x20; from the quality
+selector) + the requested frame number. The parent replies `REP_CACHE2_DATA`
+with the `0202`-framed plaintext media chunks (§14.12) → deframer.
+
+Revised (much simpler) build: everything plaintext.
+1. Gateway login → cert (plaintext).
+2. Center `0x63` getnode → `0x4a` parent list (plaintext, proven to accept us).
+3. Connect to a parent, complete the P2P connect handshake, send `0xcb30`
+   cache requests.
+4. Read `REP_CACHE2_DATA` plaintext chunks → existing 77-byte deframer → H.264+AAC.
+
+No cipher needed anywhere on the stream path. The enckey / aesP3 work (§14.6–14.13)
+is retained only for the optional item service and is off the critical path.
