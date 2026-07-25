@@ -1421,3 +1421,55 @@ The whole no-crypto handshake is now decoded end to end (gateway op6→login→
 broadcast→cert; relay op2→op3→op3e→op34(cert)→op71→op50→op69→media). Remaining:
 implement the stateful threading (relay handle → op50/op34/op69), then the relay
 streams `op69/6b/6c` cache/media → 77-byte deframer → H.264+AAC.
+
+### 14.21 op2a session-auth crypto — FULLY SPECIFIED (all constants)
+
+The real ISS handshake (reassembled from the fresh capture, framing
+`[op u64][bodyLen u64][w u32][body]`):
+
+CLIENT → RELAY, in order:
+- `op2` len=1 `00`, `op3` len=1 `d4` — init pings
+- `op3e` len=8 `0400120000000000` — config
+- `op14` len=12 `01000000 b3060000 f4010000` — subscribe [1][0x6b3][0x1f4] (periodic)
+- **`op2a` len=136 = `[8][0x80000000][128-byte SIGNATURE]`** — the session-auth blob
+- **`op46` len=1465** — contains `...uuid=<_au cookie>...&log...` → **login required**
+
+RELAY → CLIENT: `op2/op3/op62` (handle assign), `op3e` config, `op4a` (session id
+`4765a211`), `op46` (broadcast meta), `op50` (`broadno=295855431…`), **`op4d {"RESULT":0}`**
+(ACCEPT), then `op69 {"list":[{child_wait,cur_frame_number,…}]}` (frame availability),
+`op6b {"quality":32}` (0x20=1440p), `op6c` (quality) — the **frame-pull** media protocol.
+
+**op2a blob = FUN_10037760(mode=8, key=sessionKey@obj+0x60[20B], input=GUID):**
+1. 16-byte scrambled header = interleave(timestamp `DAT_1006a948`, incrementing
+   counter `DAT_1006a93c`, CRC `FUN_10037640(input)`, inputLen) — byte order per the
+   puVar1[0..15] assignments.
+2. append salt1 (12B) + the input bytes.
+3. AES-CBC encrypt (FUN_100380d0, mode-8 key schedule via FUN_10037720/10037600).
+4. prepend salt2 (18B); CRC32 (FUN_10036040) → derive IV (FUN_1003a1a0) → AES-CBC
+   encrypt again (double layer). Result = the 128-byte blob.
+
+**All constants (extracted from NetControl.dll .rdata):**
+```
+aesKey   (0x10058250) = 45cb101d263d47515b64757b858f999f
+aesIV    (0x10058260) = b6c3cadde7f1fb040e182228323c464c
+aesAlt   (0x10058280) = 5733c5a716f5dc133cca6291f2cb4668   (mode 7–9)
+salt1    (0x10058218,12B) = "tkavudehd625"
+salt2    (0x10058224,18B) = "tpqmsqpscjqoffl1-2"
+sessionKey (obj+0x60,20B) = decrypt(gateway enckey blob, aesKey/aesIV)  [per-session]
+```
+
+**Status — protocol 100% reverse-engineered.** Every packet, field, and crypto
+constant is known. What remains to make it stream:
+1. Port FUN_10037760 (double-AES-CBC envelope, mode-8 schedule) byte-exact — the
+   op2a blob. No offline test vectors exist; correctness is only verifiable against
+   the live relay.
+2. Obtain the gateway enckey blob → derive the 20-byte per-session key.
+3. Send `_au` (login) in op46, run the op69/6b/6c frame-pull loop → 77-byte chunks
+   → existing deframer → 1080p.
+
+**Two things the user must weigh:** (a) the KR-native path **requires login** (the
+relay authenticates the viewer via the `_au` cookie in op46) — so "zero contribution
+without login" is not possible on this path; (b) the **US-VPN path already delivers
+1080p ORIGINAL** with no login, no crypto, no P2P. The KR-native path's remaining
+work (exact crypto port + live validation) is large and can only be validated with a
+live broadcast up.
