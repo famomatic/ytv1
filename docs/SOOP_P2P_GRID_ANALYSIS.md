@@ -1335,3 +1335,31 @@ Net: transport + gateway login are reproduced natively; the next concrete step i
 reading the broadcast-request builder to construct a P2 that the gateway accepts
 as a fresh session (so the center recognizes the session id), then center getnode
 → peer `0xcb30` cache → plaintext media.
+
+### 14.18 Broadcast session registration lives in SOOPStreamer's orchestration
+
+Ruled out as the center-reject cause:
+- `2a000000 105c0c00 3c000000` block: the middle `105c0c00` (0xc5c10) is a
+  **constant** — identical across two independent captured sessions, so not
+  broadcast-specific.
+- stale fanticket: a freshly-minted fanticket yields the same result.
+- gateway choice / session id: the gateway always returns the same fixed 732-hex
+  cert (a shared public gateway cert); the center still gives no reply.
+
+SetUserInfo (FUN_100058c0) only STORES the user-info blob (bjid/fanticket/fields)
+that the host passes in; NetControl.dll forwards it. So the exact broadcast body
+and the post-cert **session-registration orchestration** (which packets, in which
+order, to finalize the session the center will accept) live in **SOOPStreamer.exe**
+(not decompiled), not in NetControl.dll. Our native login→broadcast→cert works,
+but we are missing the follow-up that registers the session backend-side, so the
+center rejects our session id.
+
+Two ways to finish:
+1. **Full fresh-handshake capture + exact replay.** Capture a brand-new
+   successful session's gateway+center packets from packet #1 (our captures so
+   far join mid-session), then replay the exact sequence substituting
+   guid/bjid/fanticket/session-id.
+2. **Decompile SOOPStreamer.exe** to read the orchestration directly.
+
+Everything else is proven: transport, gateway login, cert, plaintext center/peer,
+plaintext media, deframer. The remaining gap is the session-finalize sequence.
