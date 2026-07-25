@@ -1169,3 +1169,40 @@ gated server-side.
 Working alternatives that are certain today: non-KR egress → CDN 1080p (`--proxy`,
 §13); auth-only egress (mint the AID via a non-KR touch, download the KR CDN
 segments direct — §12.21).
+
+### 14.11 SERVER-WALL CHECK — NEGATIVE. The center accepts us.
+
+Captured a live, SUCCESSFUL browser P2P session (KR-direct, agent engaged,
+playing 1440p) and byte-compared its center exchange to the earlier "failed"
+probe:
+
+```
+C→center 0x63 request (len 100):
+  SUCCESS: 63…80×N…80 bf31509a 9f010000 ffffffffffffffff
+  FAILED:  63…80×N…80 437c5099 9f010000 ffffffffffffffff
+  → byte-IDENTICAL except offsets 84/85/87 (the per-session random id)
+center→C replies: 0x4a (len 72) + 0x06 (len 68) — identical structure in both
+```
+
+**The center responds to our session exactly as it does to the browser's.** So
+the earlier stall was NOT a server-side center wall — the center coordinates our
+join the same way and hands back the same peer/node info. The block is
+downstream of the center.
+
+What the live success capture reveals:
+- Media is delivered **peer-to-peer** from other KR viewers (home IPs, ports
+  10007/10080/10290/…), not from the center. The engaged agent both downloads
+  from parents AND uploads ~21 MB/10 s to child peers (real contribution).
+- Parent→agent media is **plaintext** (H.264 Annex-B NAL `00000001`, ADTS AAC,
+  the `01 00 45 00` chunk marker) — entropy 7.87 is just H.264.
+- agent→parent request is **high-entropy/encrypted** — the P2P peer handshake
+  uses the custom cipher (aesP3 + session key from the gateway enckey, §14.6–7).
+
+Revised blocker: not the center (proven), but the **encrypted peer-connect
+handshake** — which is reimplementable (all AES constants extracted). A leaf that
+connects to a parent, completes the encrypted handshake, then reads the plaintext
+media chunks is viable. Reimplementation is NOT futile.
+
+Remaining build: gateway (plaintext) → center getnode (plaintext, proven to
+work) → peer handshake (custom AES, constants in hand) → plaintext media chunks
+→ deframer. Optionally the ISS direct-source path as a root fallback.
