@@ -1140,3 +1140,32 @@ Consequence: reimplementation needs **no cipher** for the leaf path — just
 plaintext binary packet (de)serialization for gateway → center getnode → ISS
 join → ISS_STREAM_DATA (77-byte chunks → existing deframer). The §14.7 custom
 AES is optional and deferred.
+
+### 14.10 Center getnode protocol (plaintext) + a hard risk
+
+Center (port 18000) is plaintext, 4-byte LE fields, opcode-first:
+- client→center `0x63` (99): request (getnode/stream), followed by `0x80000000`
+  flag words.
+- center→client `0x4a` (74) and `0x06` (6): replies carrying a session id
+  (`0x11a246df`) and frame-number pairs (`(0x1009,0x593)…`) that track stream
+  availability. No encryption.
+
+**Risk to the whole reimplementation.** The ws probe that stalled at the
+center-join was driving the REAL SOOPStreamer + REAL NetControl.dll — i.e. the
+genuine engine executed the center protocol perfectly and the center still
+withheld broadcast-init for our session (fresh fanticket, real guid, KR-direct,
+no dedup). That points to a **server-side session validation**, not a
+client-protocol defect. If so, a byte-perfect Go reimplementation would hit the
+same wall — the center accepts the browser's live session but not a replayed/
+synthetic one.
+
+Uncertainty: the stall might instead be specific to the ws↔NetControl bridge in
+SOOPStreamer (an exact ws choreography we didn't reproduce), in which case a
+full native reimplementation of the getnode→ISS dance could succeed. This is
+unresolved. Net: the reimplementation is now tractable (plaintext, all fields
+identified) but its success is **not guaranteed** — the center-join may be
+gated server-side.
+
+Working alternatives that are certain today: non-KR egress → CDN 1080p (`--proxy`,
+§13); auth-only egress (mint the AID via a non-KR touch, download the KR CDN
+segments direct — §12.21).
