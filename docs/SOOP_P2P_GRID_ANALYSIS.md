@@ -1289,3 +1289,23 @@ TCP → send the login packet → get login-OK. The header fields (f0=0x3e2,
 bodyLen=62, f3=0x3dc) were accepted verbatim, so they are not per-session
 secrets. Next: rebuild the broadcast-request packet (bjid + fresh fanticket) to
 get the cert, then center getnode → peer cache. Transport is proven.
+
+### 14.16 MILESTONE — full gateway handshake reproduced live (login → cert)
+
+A native Go client reproduced the whole gateway handshake against the live
+server (118.218.125.116:3456), reconstructing packets from the captured
+templates:
+- P1 LOGIN (78B): header `e2030000 00000000 3e000000 dc030000` + body
+  `2a 00 02 00` + 32-char guid (freshly generated) + `15 00 00 00` + addinfo
+  (`\x00ad_lang\x11ko\x12is_auto\x110\x12`). → server replied 127B login-OK
+  (`ps_Afreeca`).
+- P2 BROADCAST (147B): header `15040000 00000000 83000000 96040000` + body
+  `df46a211`(session id) `01000000` + zeros + bjid\@49 (`spbabobj`) + zeros +
+  `2a000000 105c0c00 3c000000`(0x3c=fanticket len) + fanticket hash\@87 +
+  suffix\@119. → server replied **792B with the 732-hex cert (pcTicket)**.
+
+So the gateway login→broadcast→cert chain is fully working native Go. The header
+fields are fixed (not per-session secrets); only guid/bjid/fanticket (and the
+session id) vary. Next: feed the cert + session id into the center `0x63`
+getnode to receive the parent list, then connect to a parent and issue `0xcb30`
+cache requests for the plaintext media.
