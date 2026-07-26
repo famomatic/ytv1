@@ -185,6 +185,12 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 		}
 		if op == wsOpBinary {
 			var werr error
+			// es points into the deframer's carry buffer, which is compacted
+			// and reused on the next push. Safe without a defensive copy
+			// because puremux's WriteVideo/WriteADTS copy the payload before
+			// it enters their packet-holding pipeline — an API contract
+			// pinned by puremux's TestLiveWriteCopiesCallerBuffer, so a
+			// zero-copy regression there fails their suite, not our stream.
 			d.push(payload, func(kind chunkKind, header, es []byte) {
 				if werr != nil {
 					return
