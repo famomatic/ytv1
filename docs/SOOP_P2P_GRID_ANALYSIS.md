@@ -1578,3 +1578,40 @@ Consequences:
   (`wss://colony.sooplive.com/Colony/Stream?s=<bno>`, grpc-web). The bridge join is
   now trivial (JSON, no crypto); the remaining work is the colony grpc-web media
   protocol → 77-byte chunk deframer → 1080p.
+
+### 14.25 SOLVED — KR-native 1080p works end to end (drive the local agent)
+
+A standalone Go client drove the local SOOPStreamer agent from a KR IP (no VPN)
+and pulled the full 1080p stream. Verified: `soop_1080p.mp4` = **h264 1920x1080 +
+aac 48000 2ch, 31.25 s** (32 MB, 1877 video + 61 audio frames deframed).
+
+The §12.10 blocker was NOT the fanticket — it was **missing fields in the SVC:4
+center-init**. The client must echo, alongside the pcTicket/pcAppendDat, the relay
+endpoint and player context from CERTTICKETEX:
+`SIP` (= CERTTICKETEX `uiIpAddr`), `SPORT` (= `iPort`, e.g. 18463), `SPROTOCOL:2`,
+`BJID`, `SETBPS:8000`, `SSBUF:2`, `BROWSER`, `BROWSERVERSION`, `PLAYERVERSION`.
+Without SIP/SPORT the agent's center-connect fails with
+`{"ERRCODE":-39999,"ERRLINE":872,"ERRMSG":"System Error."}` (an EncryptHashP2/
+ReConnectCenter failure); with them the center-join completes → `SVC:50 status:1`
+→ binary media.
+
+**Working choreography (all live-verified):**
+```
+ws 127.0.0.1:21201  -> {"SVC":"CAPTION",..} -> HTMLPORT{HTMLPLAYER_PORT}
+ws 127.0.0.1:<port>/Websocket/<bjid>:
+  >> SVC:40 INIT_GW (grid params, guid, cli_type:42, fanticket, JOINLOG)
+  >> SVC:51 initializing
+  << SVC:41 login  << SVC:39 CERTTICKETEX{pcTicket,pcAppendDat,iPort,uiIpAddr}
+  >> SVC:4  (TICKET=pcTicket, APPDATA=pcAppendDat, SIP,SPORT,SPROTOCOL:2, ...)
+  >> SVC:30 {UID:""}   ; heartbeat SVC:52 @200ms throughout
+  << SVC:34/45/23      << SVC:4 (ADDINFO preset)
+  >> SVC:5  START      >> SVC:500 {cutc}
+  << SVC:50 status:1   << binary media frames (77-byte chunks)
+```
+Media = the 77-byte chunk container (§12.7): parse sequentially, classify payload
+(`00000001`→H.264 video, `FFFx`→ADTS audio), remux with ffmpeg `-c copy`.
+
+Fanticket source: `POST api.m.sooplive.co.kr/broad/a/watch` (Cookie `_au`) returns
+`fan_ticket` + `relay_ip`/`relay_port`/`gateway_ip`. Grid params also come from
+`player_live_api.php?type=live`. `guid` is a device constant. Needs the local agent
+running; fully offline-agentless (bridge/relay direct) remains future work.
