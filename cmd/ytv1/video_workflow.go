@@ -47,7 +47,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	info, err := c.GetVideo(ctx, url)
 	if err != nil {
 		if opts.Verbose {
-			fmt.Println(formatExtractionEvent(client.ExtractionEvent{
+			fmt.Fprintln(statusW(), formatExtractionEvent(client.ExtractionEvent{
 				Stage:  "total",
 				Phase:  "failure",
 				Client: "all",
@@ -58,7 +58,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 	extractMs := time.Since(extractStart).Milliseconds()
 	if opts.Verbose {
-		fmt.Println(formatExtractionEvent(client.ExtractionEvent{
+		fmt.Fprintln(statusW(), formatExtractionEvent(client.ExtractionEvent{
 			Stage:  "total",
 			Phase:  "complete",
 			Client: "all",
@@ -143,13 +143,13 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 
 	if opts.SkipDownload {
 		if shouldPrintHumanText(opts) {
-			fmt.Printf("Skipping download for %s\n", info.Title)
+			fmt.Fprintf(statusW(), "Skipping download for %s\n", info.Title)
 		}
 		return recordForcedArchiveIfRequested(info, opts)
 	}
 
 	if shouldPrintProgressText(opts) {
-		fmt.Printf("Downloading: %s [%s]\n", info.Title, info.ID)
+		fmt.Fprintf(statusW(), "Downloading: %s [%s]\n", info.Title, info.ID)
 		activeProgressPrinter.SetTitle(info.Title)
 	}
 	downloadOpts, err := buildDownloadOptionsForVideo(info, opts)
@@ -158,7 +158,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 	if shouldSkipExistingOutput(downloadOpts.OutputPath, opts) {
 		if shouldPrintHumanText(opts) {
-			fmt.Printf("Skipping existing file: %s\n", downloadOpts.OutputPath)
+			fmt.Fprintf(statusW(), "Skipping existing file: %s\n", downloadOpts.OutputPath)
 		}
 		if err := recordCompletedDownload(info.ID); err != nil {
 			return err
@@ -167,7 +167,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 	if shouldSkipExistingPostprocessedOutput(info, downloadOpts.OutputPath, opts) {
 		if shouldPrintHumanText(opts) {
-			fmt.Printf("Skipping existing post-processed file: %s\n", downloadOpts.OutputPath)
+			fmt.Fprintf(statusW(), "Skipping existing post-processed file: %s\n", downloadOpts.OutputPath)
 		}
 		if err := recordCompletedDownload(info.ID); err != nil {
 			return err
@@ -185,7 +185,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		return err
 	}
 	if shouldPrintProgressText(opts) {
-		fmt.Printf("Downloaded to: %s\n", res.OutputPath)
+		fmt.Fprintf(statusW(), "Downloaded to: %s\n", res.OutputPath)
 	}
 	if err := applyDownloadedFileMTime(res.OutputPath, info, opts); err != nil {
 		return err
@@ -204,7 +204,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 			avgSpeed = fmt.Sprintf("%dB/s", bps)
 		}
 		if shouldPrintHumanText(opts) {
-			fmt.Printf(
+			fmt.Fprintf(statusW(),
 				"total_elapsed_ms=%d extract_ms=%d download_ms(video/audio)=%d/%d merge_ms=%d final_size=%d avg_speed=%s\n",
 				time.Since(totalStart).Milliseconds(),
 				extractMs,
