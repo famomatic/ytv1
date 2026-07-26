@@ -46,15 +46,20 @@ func (st *agentServeState) leave() {
 }
 
 // agentHandler builds the loopback HTTP handler that muxes the agent's live media
-// to MPEG-TS on the first plain GET. A Range/HEAD probe gets 200/Accept-Ranges:none
-// so the downloader falls back to a single plain GET. st (may be nil) tracks the
-// connection lifecycle for the daemon's auto-shutdown.
+// to MPEG-TS on the first stream GET. A HEAD, or a *bounded* Range probe
+// (bytes=A-B, as ytv1's own chunked downloader sends) gets 200/Accept-Ranges:none
+// with no body, so the downloader falls back to a single plain GET. An *open*
+// Range (bytes=A-, which MPV/ffmpeg sends to test seekability) or no Range streams
+// — returning an empty 200 to those made the player see a zero-length stream and
+// stall. st (may be nil) tracks the connection lifecycle for auto-shutdown.
 func (s *Source) agentHandler(p agentStreamParams, st *agentServeState) http.HandlerFunc {
 	var once sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("Content-Type", "video/mp2t")
-		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
+		rng := r.Header.Get("Range")
+		boundedProbe := rng != "" && !strings.HasSuffix(rng, "-")
+		if r.Method != http.MethodGet || boundedProbe {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -136,7 +141,15 @@ func spawnDetachedServe(p agentStreamParams) (string, error) {
 		return "", err
 	}
 	cmd := exec.Command(exe, "soopserve", base64.StdEncoding.EncodeToString(pj))
-	cmd.Stderr = os.Stderr
+	// The daemon must NOT inherit this process's stderr: a resolver like MPV's
+	// ytdl_hook captures the child's stdout+stderr and waits for both pipes to
+	// reach EOF. If the detached daemon held a copy of that stderr pipe, it would
+	// never close (the daemon outlives us), so MPV would hang at resolve. Send the
+	// daemon's stderr to its own log file instead.
+	if lf, e := os.CreateTemp("", "ytv1-soopserve-*.log"); e == nil {
+		cmd.Stderr = lf
+		defer lf.Close() // the child keeps its own dup after Start
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err

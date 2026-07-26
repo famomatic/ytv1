@@ -112,10 +112,15 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	mux := newTSMuxer(out)
 
 	// Watcher: on ctx cancellation, nudge the read deadline so a blocked read
-	// unblocks and the loop returns promptly.
+	// unblocks and the loop returns promptly. It also exits when the stream ends
+	// on its own (stop closed by the deferred close above), so it never leaks
+	// past the function when ctx is not cancelled.
 	go func() {
-		<-ctx.Done()
-		_ = ws.conn.SetReadDeadline(time.Now())
+		select {
+		case <-ctx.Done():
+			_ = ws.conn.SetReadDeadline(time.Now())
+		case <-stop:
+		}
 	}()
 
 	var d deframer
@@ -132,15 +137,15 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 		}
 		if op == wsOpBinary {
 			var werr error
-			d.push(payload, func(kind chunkKind, es []byte) {
+			d.push(payload, func(kind chunkKind, header, es []byte) {
 				if werr != nil {
 					return
 				}
 				switch kind {
 				case chunkVideo:
-					werr = mux.writeVideo(es)
+					werr = mux.writeVideo(es, chunkTS(header))
 				case chunkAudio:
-					werr = mux.writeAudio(es)
+					werr = mux.writeAudio(es, chunkTS(header))
 				}
 			})
 			if werr != nil {

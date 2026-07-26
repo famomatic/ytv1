@@ -24,7 +24,7 @@ func TestDeframerClassifiesAndSplits(t *testing.T) {
 
 	var gotV, gotA []byte
 	var d deframer
-	d.push(stream, func(kind chunkKind, p []byte) {
+	d.push(stream, func(kind chunkKind, _, p []byte) {
 		switch kind {
 		case chunkVideo:
 			gotV = append(gotV, p...)
@@ -49,7 +49,7 @@ func TestDeframerReassemblesSplitChunks(t *testing.T) {
 	// Push 3-byte slices to stress carry handling across the header and payload.
 	for i := 0; i < len(full); i += 3 {
 		end := min(i+3, len(full))
-		d.push(full[i:end], func(kind chunkKind, p []byte) {
+		d.push(full[i:end], func(kind chunkKind, _, p []byte) {
 			if kind == chunkVideo {
 				got = append(got, p...)
 			}

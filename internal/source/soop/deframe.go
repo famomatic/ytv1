@@ -8,7 +8,10 @@ package soop
 //	 0    8    magic FF*8
 //	 8    4    0x00450001 (0x45 = 69 = header bytes after this field; 8+69=77)
 //	16    4    payloadLen (u32)
-//	...        seq / per-stream counters / timestamps (not needed to demux)
+//	20    4    global seq (++/chunk)
+//	28    4    per-stream counter (video/audio separate)
+//	48    8    timestamp (u64 LE, 2.56 GHz clock) — the presentation timestamp
+//	...        (see chunkTS; other seq/counter fields not needed to demux)
 //
 // Chunks are parsed sequentially (next = pos + 77 + payloadLen); the magic must
 // NOT be scanned for, since 8x0xFF also occurs inside payloads. Each payload is a
@@ -31,6 +34,16 @@ const (
 	chunkAudio
 )
 
+// chunkTS reads the presentation timestamp from a 77-byte chunk header (offset
+// 48, u64 LE). It runs on a 2.56 GHz clock shared by the video and audio streams
+// (§12.7); the muxer rebases it to a 90 kHz MPEG-TS PTS.
+func chunkTS(header []byte) uint64 {
+	if len(header) < 56 {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(header[48:])
+}
+
 // classifyPayload identifies a chunk payload by its leading bytes.
 func classifyPayload(p []byte) chunkKind {
 	if len(p) >= 4 && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1 {
@@ -49,8 +62,9 @@ type deframer struct {
 }
 
 // push appends raw binary-frame bytes and invokes emit for each complete chunk,
-// in order. Incomplete trailing bytes are retained for the next push.
-func (d *deframer) push(b []byte, emit func(kind chunkKind, payload []byte)) {
+// in order, passing the 77-byte header (for its timestamp fields) and the
+// payload. Incomplete trailing bytes are retained for the next push.
+func (d *deframer) push(b []byte, emit func(kind chunkKind, header, payload []byte)) {
 	d.buf = append(d.buf, b...)
 	pos := 0
 	for pos+chunkHeaderLen <= len(d.buf) {
@@ -64,8 +78,9 @@ func (d *deframer) push(b []byte, emit func(kind chunkKind, payload []byte)) {
 		if payloadLen < 0 || pos+chunkHeaderLen+payloadLen > len(d.buf) {
 			break // wait for more bytes
 		}
+		header := d.buf[pos : pos+chunkHeaderLen]
 		payload := d.buf[pos+chunkHeaderLen : pos+chunkHeaderLen+payloadLen]
-		emit(classifyPayload(payload), payload)
+		emit(classifyPayload(payload), header, payload)
 		pos += chunkHeaderLen + payloadLen
 	}
 	// Retain the unconsumed tail.

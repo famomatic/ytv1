@@ -595,16 +595,26 @@ magic (8x0xFF also occurs in payloads). Header = 77 bytes, little-endian:
 | 36 | 4 | seq (+1) |
 | 40 | 4 | 0 |
 | 44 | 4 | const 1 |
-| 48 | 8 | timestamp A (LE) |
-| 56 | 8 | timestamp B (LE) |
+| 48 | 8 | **timestamp A (u64 LE) = presentation timestamp** |
+| 56 | 8 | timestamp B (LE; audio only = tsA + const 54,613,183) |
 | 64 |13 | tail timing |
 
 `next = pos + 77 + payloadLen`. Payload:
 - video: H.264 Annex-B — starts `00 00 00 01`; SPS `67 64 00 2A` = High@L4.2 1080p.
 - audio: ADTS AAC — starts `FF Fx`; 48 kHz stereo.
-Classify per chunk by payload prefix (00000001->video, FFFx->audio). PTS for
-A/V sync lives in header bytes 48-76 (LE, exact layout TBD; -r/genpts works
-meanwhile).
+Classify per chunk by payload prefix (00000001->video, FFFx->audio).
+
+**PTS DECODED (2026-07-26).** Header offset 48 (u64 LE) is the presentation
+timestamp on a **2,560,000,000 ticks/sec** clock shared by both streams. Verified
+two independent ways from a live capture: video +51,200,000/frame @50fps
+(=20 ms), audio +1,310,720,000 per 24-AAC-frame chunk (=0.512 s). Convert to
+90 kHz MPEG-TS PTS with `pts = ts * 90000 / 2_560_000_000` (reduces to
+`ts*9/256000`), rebased to the first tsA seen so video/audio share an origin
+(audio typically leads video ~0.2–0.3 s at start). This replaced the earlier
+synthesized wall-clock PTS, which gave burst-arriving frames near-identical
+timestamps → mpv "Invalid video timestamp" + dropped frames. Now strictly
+monotonic on both streams (ffprobe: 0 non-increasing), clean decode.
+`internal/source/soop/deframe.go chunkTS` + `ts.go ptsFromSrc`.
 
 ### 12.8 Reconstruction (proven)
 

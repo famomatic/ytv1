@@ -22,17 +22,27 @@ const (
 	sidVid  = 0xE0
 	sidAud  = 0xC0
 	tsPTSHz = 90000
+
+	// Source chunk-header timestamp clock (header offset 48, u64 LE; §12.7):
+	// 2,560,000,000 ticks/sec, derived independently from video (+51,200,000 per
+	// frame @50fps) and audio (+1,310,720,000 per 24-frame chunk). Converting to
+	// 90 kHz is 90000/2_560_000_000, which reduces to 9/256000.
+	tsSrcNum  = 9
+	tsSrcDen  = 256000
+	ptsOffset = 900000 // 10s @90kHz headroom so audio leading video stays positive
 )
 
 type tsMuxer struct {
 	w                          io.Writer
 	ccPAT, ccPMT, ccVid, ccAud byte
-	vpts, apts                 uint64
+	haveBase                   bool
+	base                       uint64
+	apts                       uint64
 	pktsSinceSI                int
 	err                        error
 }
 
-func newTSMuxer(w io.Writer) *tsMuxer { return &tsMuxer{w: w, vpts: 10000, apts: 10000} }
+func newTSMuxer(w io.Writer) *tsMuxer { return &tsMuxer{w: w} }
 
 func (m *tsMuxer) write(b []byte) {
 	if m.err != nil {
@@ -41,17 +51,35 @@ func (m *tsMuxer) write(b []byte) {
 	_, m.err = m.w.Write(b)
 }
 
-// writeVideo muxes one H.264 Annex-B access unit.
-func (m *tsMuxer) writeVideo(au []byte) error {
+// writeVideo muxes one H.264 Annex-B access unit stamped with the source chunk
+// timestamp ts (header offset 48).
+func (m *tsMuxer) writeVideo(au []byte, ts uint64) error {
 	m.emitTables()
-	m.writePES(tsVideo, &m.ccVid, sidVid, m.vpts, true, au)
-	m.vpts += tsPTSHz / 60
+	m.writePES(tsVideo, &m.ccVid, sidVid, m.ptsFromSrc(ts), true, au)
 	return m.err
 }
 
+// ptsFromSrc converts a source chunk timestamp (2.56 GHz clock) to a 90 kHz
+// MPEG-TS PTS, rebased to the first timestamp seen so video and audio share one
+// origin. Using the source clock (not wall-clock) keeps the PTS monotonic and
+// independent of network bursts — wall-clock anchoring gave frames that arrived
+// together near-identical timestamps, which players reject ("Invalid video
+// timestamp") and then drop. rel may be negative (audio leads video at start);
+// ptsOffset keeps the result positive.
+func (m *tsMuxer) ptsFromSrc(ts uint64) uint64 {
+	if !m.haveBase {
+		m.haveBase = true
+		m.base = ts
+	}
+	rel := int64(ts) - int64(m.base)
+	return uint64(rel*tsSrcNum/tsSrcDen + ptsOffset)
+}
+
 // writeAudio muxes a chunk of concatenated ADTS AAC frames, one PES per frame so
-// each carries its own PTS.
-func (m *tsMuxer) writeAudio(chunk []byte) error {
+// each carries its own PTS. The chunk timestamp ts stamps the first frame; the
+// rest advance by the AAC frame duration (1024 samples).
+func (m *tsMuxer) writeAudio(chunk []byte, ts uint64) error {
+	m.apts = m.ptsFromSrc(ts)
 	for _, fr := range splitADTS(chunk) {
 		m.writePES(tsAudio, &m.ccAud, sidAud, m.apts, false, fr)
 		m.apts += tsPTSHz * 1024 / 48000

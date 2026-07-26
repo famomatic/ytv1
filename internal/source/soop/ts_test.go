@@ -15,10 +15,10 @@ func TestTSMuxerStructure(t *testing.T) {
 	audioFrame[4] = byte(12 >> 3)
 	audioFrame[5] = byte((12&0x07)<<5) | 0x1F
 
-	if err := m.writeVideo(videoAU); err != nil {
+	if err := m.writeVideo(videoAU, 1000); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.writeAudio(audioFrame); err != nil {
+	if err := m.writeAudio(audioFrame, 2000); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,6 +46,28 @@ func TestTSMuxerStructure(t *testing.T) {
 	}
 	if !sawPAT || !sawPMT || !sawVideo || !sawAudio {
 		t.Fatalf("missing PID: PAT=%v PMT=%v video=%v audio=%v", sawPAT, sawPMT, sawVideo, sawAudio)
+	}
+}
+
+// TestTSMuxerPTSFromSource verifies the PTS is derived from the source chunk
+// timestamp (2.56 GHz clock), rebased to the first timestamp seen and converted
+// to 90 kHz — monotonic and burst-independent, unlike the old wall-clock anchor.
+func TestTSMuxerPTSFromSource(t *testing.T) {
+	m := newTSMuxer(&bytes.Buffer{})
+	const base = uint64(15595607040073)
+
+	// First timestamp anchors at ptsOffset.
+	if got := m.ptsFromSrc(base); got != ptsOffset {
+		t.Fatalf("first pts = %d, want %d", got, ptsOffset)
+	}
+	// One 50fps frame later (+51,200,000 src ticks = 20ms) → +1800 90kHz ticks.
+	if got, want := m.ptsFromSrc(base+51_200_000), uint64(ptsOffset+1800); got != want {
+		t.Fatalf("pts after one frame = %d, want %d", got, want)
+	}
+	// A timestamp BEFORE the base (audio leading video at start) stays positive
+	// and below the anchor.
+	if got := m.ptsFromSrc(base - 500_000_000); got == 0 || got >= ptsOffset {
+		t.Fatalf("pre-base pts = %d, want positive and < %d", got, ptsOffset)
 	}
 }
 
