@@ -186,11 +186,16 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	var url string
 	var err error
 	if detachServe {
+		// Resolve-only run: a player opens the URL, so serve the seekable HLS DVR
+		// (when timeshift is on). The detached daemon does this itself; the
+		// in-process fallback mirrors it.
 		if url, err = spawnDetachedServe(p); err != nil {
-			url, err = s.serveInProcess(p) // detach unavailable (e.g. no os.Executable)
+			url, err = s.serveInProcess(p, timeshiftEnabled())
 		}
 	} else {
-		url, err = s.serveInProcess(p)
+		// Direct download (`-o …`): serve the raw linear stream this process
+		// consumes itself — not HLS.
+		url, err = s.serveInProcess(p, false)
 	}
 	if err != nil {
 		return "", err
@@ -199,17 +204,17 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	return url, nil
 }
 
-// serveInProcess runs the loopback server in this process (download path, and
-// the fallback when detaching is unavailable). In timeshift mode it serves the
-// seekable HLS DVR; otherwise the single linear MPEG-TS.
-func (s *Source) serveInProcess(p agentStreamParams) (string, error) {
+// serveInProcess runs the loopback server in this process (the download path,
+// and the fallback when detaching is unavailable). useTimeshift selects the
+// seekable HLS DVR over the single linear MPEG-TS.
+func (s *Source) serveInProcess(p agentStreamParams, useTimeshift bool) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
 	handler := http.Handler(s.agentHandler(p, nil))
 	streamPath := "live.ts"
-	if timeshiftEnabled() {
+	if useTimeshift {
 		handler = s.newDVRServer(context.Background(), p, nil)
 		streamPath = "index.m3u8"
 	}

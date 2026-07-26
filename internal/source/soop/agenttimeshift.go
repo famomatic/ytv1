@@ -11,19 +11,55 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/famomatic/ytv1/internal/timeshift"
 )
 
-// timeshiftEnabled reports whether the agent stream is served as a seekable HLS
-// DVR rather than a single linear MPEG-TS stream.
+// timeshiftEnabled reports whether the agent stream, when served for playback
+// (the detached/resolve path a player opens by URL), is a seekable HLS DVR
+// rather than a single linear MPEG-TS stream. Default on; opt out with
+// YTV1_SOOP_NO_TIMESHIFT=1. A direct download (`-o …`) always uses the linear
+// path regardless, since it wants the raw continuous stream, not HLS.
 func timeshiftEnabled() bool {
-	switch os.Getenv("YTV1_SOOP_TIMESHIFT") {
+	switch os.Getenv("YTV1_SOOP_NO_TIMESHIFT") {
 	case "1", "true", "TRUE", "yes":
-		return true
+		return false
 	}
-	return false
+	return true
+}
+
+// dvrConfigFromEnv builds the DVR window/storage config, applying env overrides.
+// Segments spill to disk by default (so a long window does not pin the whole
+// stream in RAM); YTV1_TIMESHIFT_MEM=1 keeps them in memory.
+func dvrConfigFromEnv() timeshift.Config {
+	cfg := timeshift.Config{}
+	if v := envSeconds("YTV1_TIMESHIFT_WINDOW_SECS"); v > 0 {
+		cfg.Window = v
+	}
+	if v := envSeconds("YTV1_TIMESHIFT_SEG_SECS"); v > 0 {
+		cfg.TargetSegmentDuration = v
+	}
+	switch os.Getenv("YTV1_TIMESHIFT_MEM") {
+	case "1", "true", "TRUE", "yes":
+		cfg.Dir = "" // in-memory
+	default:
+		cfg.Dir = os.TempDir()
+		if d := os.Getenv("YTV1_TIMESHIFT_DIR"); d != "" {
+			cfg.Dir = d
+		}
+	}
+	return cfg
+}
+
+func envSeconds(name string) time.Duration {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 0
 }
 
 // dvrServer records the agent stream into a timeshift DVR and serves its HLS
@@ -38,7 +74,7 @@ type dvrServer struct {
 // newDVRServer starts recording p into a fresh DVR and returns an HTTP handler
 // for it. Cancel ctx to stop recording and release the agent session.
 func (s *Source) newDVRServer(ctx context.Context, p agentStreamParams, st *agentServeState) *dvrServer {
-	dvr := timeshift.NewDVR(timeshift.Config{}) // defaults: 3s segments, 2-min window
+	dvr := timeshift.NewDVR(dvrConfigFromEnv())
 	go func() {
 		if err := s.streamAgentMedia(ctx, p, dvr); err != nil {
 			fmt.Fprintf(os.Stderr, "soop: agent DVR recording ended: %v\n", err)

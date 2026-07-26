@@ -60,20 +60,18 @@ func (st *agentServeState) touch() {
 }
 
 // agentHandler builds the loopback HTTP handler that muxes the agent's live media
-// to MPEG-TS on the first stream GET. A HEAD, or a *bounded* Range probe
-// (bytes=A-B, as ytv1's own chunked downloader sends) gets 200/Accept-Ranges:none
-// with no body, so the downloader falls back to a single plain GET. An *open*
-// Range (bytes=A-, which MPV/ffmpeg sends to test seekability) or no Range streams
-// — returning an empty 200 to those made the player see a zero-length stream and
-// stall. st (may be nil) tracks the connection lifecycle for auto-shutdown.
+// to MPEG-TS on the first plain GET. This linear endpoint is consumed by ytv1's
+// own downloader (`-o file`/`-o -`), which probes with Range/HEAD before the real
+// GET; those get 200/Accept-Ranges:none with no body so the downloader falls back
+// to one plain GET (the single agent session is not consumed by a probe). Players
+// that want to seek use the HLS DVR (agenttimeshift.go), not this endpoint. st
+// (may be nil) tracks the connection lifecycle for auto-shutdown.
 func (s *Source) agentHandler(p agentStreamParams, st *agentServeState) http.HandlerFunc {
 	var once sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("Content-Type", "video/mp2t")
-		rng := r.Header.Get("Range")
-		boundedProbe := rng != "" && !strings.HasSuffix(rng, "-")
-		if r.Method != http.MethodGet || boundedProbe {
+		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}

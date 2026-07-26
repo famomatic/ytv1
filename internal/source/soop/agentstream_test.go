@@ -229,31 +229,30 @@ func TestAgentHandlerRangeFallbackAndStream(t *testing.T) {
 	srv := httptest.NewServer(New(nil).agentHandler(agentStreamParams{BNO: "1", BjID: "bj"}, nil))
 	defer srv.Close()
 
-	// A *bounded* Range probe (bytes=A-B, as ytv1's chunked downloader sends) must
-	// get 200 / Accept-Ranges:none with no media, so the downloader falls back to a
-	// single plain GET without consuming the one-shot stream.
-	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-	req.Header.Set("Range", "bytes=0-0")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("range probe: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("Accept-Ranges") != "none" {
-		t.Fatalf("range probe status=%d accept-ranges=%q", resp.StatusCode, resp.Header.Get("Accept-Ranges"))
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if len(body) != 0 {
-		t.Fatalf("bounded range probe should not stream media, got %d bytes", len(body))
+	// A Range probe (bounded or open) and HEAD must get 200 / Accept-Ranges:none
+	// with no media, so ytv1's downloader falls back to a single plain GET without
+	// a probe consuming the one-shot agent session.
+	for _, rng := range []string{"bytes=0-0", "bytes=0-"} {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+		req.Header.Set("Range", rng)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("range probe %q: %v", rng, err)
+		}
+		if resp.StatusCode != http.StatusOK || resp.Header.Get("Accept-Ranges") != "none" {
+			t.Fatalf("range %q status=%d accept-ranges=%q", rng, resp.StatusCode, resp.Header.Get("Accept-Ranges"))
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if len(body) != 0 {
+			t.Fatalf("range probe %q should not stream media, got %d bytes", rng, len(body))
+		}
 	}
 
-	// An *open* Range (bytes=A-, as MPV/ffmpeg sends to test seekability) streams
-	// the muxed MPEG-TS — returning an empty 200 here made the player stall.
-	req2, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
-	req2.Header.Set("Range", "bytes=0-")
-	resp2, err := http.DefaultClient.Do(req2)
+	// A plain GET streams the muxed MPEG-TS.
+	resp2, err := http.Get(srv.URL)
 	if err != nil {
-		t.Fatalf("open range GET: %v", err)
+		t.Fatalf("plain GET: %v", err)
 	}
 	body2, _ := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
