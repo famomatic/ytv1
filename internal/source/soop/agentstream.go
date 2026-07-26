@@ -125,17 +125,13 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	// audio preceding the first IDR.
 	//
 	// The chunk-header timestamp (§12.7 offset 48) is a MONOTONIC decode-order
-	// clock, so it is fed as both PTS and DTS via WriteVideo. On streams whose
+	// clock, so it is fed to WriteVideo as the decode time. On streams whose
 	// H.264 carries B-frames (some SOOP encoders, e.g. 1440p60) the display
-	// reordering lives only in the bitstream POC, not the timestamps.
-	//
-	// KNOWN puremux BUG (tracking a follow-up release): for such B-frame H.264
-	// the muxer reassigns a non-monotonic DTS from this monotonic input
-	// (observed PES DTS: 0,33,50,50,83,100,100 for input 0,17,33,50,67,83,100),
-	// producing "non monotonically increasing dts" + mpv dropped frames.
-	// Non-B-frame streams (e.g. 1080p50) are unaffected. WriteVideoReordered
-	// (v0.0.7/0.0.8) does not help — it targets non-monotonic PTS input, which
-	// this is not.
+	// reordering lives only in the bitstream POC, not the timestamps; puremux
+	// v0.0.9's WriteVideo parses each AU's POC and derives the presentation PTS
+	// from it while keeping DTS = this decode clock (so the PES DTS stays
+	// strictly monotonic and B-frames present correctly). B-frame-free streams
+	// (e.g. 1080p50) collapse to DTS == PTS. Verified on real captures of both.
 	cfg := puremux.DefaultConfig()
 	cfg.OutputContainer = puremux.ContainerMPEGTS
 	cfg.Preprocessor.MinMonotonicStep = uint64(time.Millisecond)

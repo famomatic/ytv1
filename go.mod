@@ -4,8 +4,11 @@ go 1.23.5
 
 require (
 	github.com/dop251/goja v0.0.0-20260106131823-651366fbe6e3
-	github.com/famomatic/puremux v0.0.8
+	github.com/famomatic/puremux v0.0.10
 )
+
+// Develop against the local puremux working tree (directory-based dependency).
+replace github.com/famomatic/puremux => ../puremux
 
 require (
 	github.com/dlclark/regexp2 v1.11.4 // indirect
