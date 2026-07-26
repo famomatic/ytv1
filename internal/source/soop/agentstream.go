@@ -124,13 +124,18 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	// after 90 kHz quantization. The Aligner drops pre-keyframe video and
 	// audio preceding the first IDR.
 	//
-	// Video is written via WriteVideoReordered (puremux v0.0.7): the source
-	// gives only a presentation timestamp per access unit, which is
-	// non-monotonic in decode order on B-frame streams (some SOOP encoders,
-	// e.g. 1440p60). That method synthesizes a valid monotonic DTS (DTS<=PTS)
-	// and collapses to the DTS==PTS fast path on B-frame-free streams. Only
-	// WriteVideoReordered feeds the video track — mixing it with WriteVideo /
-	// WritePacket would fork the decode timeline.
+	// The chunk-header timestamp (§12.7 offset 48) is a MONOTONIC decode-order
+	// clock, so it is fed as both PTS and DTS via WriteVideo. On streams whose
+	// H.264 carries B-frames (some SOOP encoders, e.g. 1440p60) the display
+	// reordering lives only in the bitstream POC, not the timestamps.
+	//
+	// KNOWN puremux BUG (tracking a follow-up release): for such B-frame H.264
+	// the muxer reassigns a non-monotonic DTS from this monotonic input
+	// (observed PES DTS: 0,33,50,50,83,100,100 for input 0,17,33,50,67,83,100),
+	// producing "non monotonically increasing dts" + mpv dropped frames.
+	// Non-B-frame streams (e.g. 1080p50) are unaffected. WriteVideoReordered
+	// (v0.0.7/0.0.8) does not help — it targets non-monotonic PTS input, which
+	// this is not.
 	cfg := puremux.DefaultConfig()
 	cfg.OutputContainer = puremux.ContainerMPEGTS
 	cfg.Preprocessor.MinMonotonicStep = uint64(time.Millisecond)
@@ -226,7 +231,7 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 						au = append(vidPrefix, es...)
 						vidPrefix = nil
 					}
-					werr = mux.WriteVideoReordered(vidTrack, au, srcDur(chunkTS(header)))
+					werr = mux.WriteVideo(vidTrack, au, srcDur(chunkTS(header)))
 				case chunkAudio:
 					werr = mux.WriteADTS(audTrack, es, srcDur(chunkTS(header)))
 				}
