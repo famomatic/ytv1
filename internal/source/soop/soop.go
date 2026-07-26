@@ -249,7 +249,7 @@ func (s *Source) extractLive(ctx context.Context, input, bjID, bno string, media
 }
 
 // extractLiveViaAgent drives the local P2P agent for the ORIGINAL/1080p stream and
-// exposes it as a single loopback fragmented-MP4 format the pipeline downloads.
+// exposes it as a single loopback MPEG-TS format the pipeline downloads.
 func (s *Source) extractLiveViaAgent(ctx context.Context, input, bjID, bno string) (*source.Media, error) {
 	info, err := s.fetchLiveInfo(ctx, orString(bno, bjID), bno == "")
 	if err != nil {
