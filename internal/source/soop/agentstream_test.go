@@ -165,6 +165,16 @@ func mockADTS(n int) []byte {
 	return f
 }
 
+// MPEG-TS layout constants as emitted by the puremux TS backend (PMT PID
+// 0x1000, elementary PIDs from 0x100 in AddTrack order: video then audio).
+const (
+	tsLen   = 188
+	tsSync  = 0x47
+	tsPMT   = 0x1000
+	tsVideo = 0x0100
+	tsAudio = 0x0101
+)
+
 // assertTSHasVideoAudio checks the bytes are whole 188-byte TS packets carrying
 // PAT, PMT, video and audio PIDs.
 func assertTSHasVideoAudio(t *testing.T, out []byte) {

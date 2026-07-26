@@ -24,6 +24,8 @@ import (
 	"io"
 	"strconv"
 	"time"
+
+	puremux "github.com/famomatic/puremux/pkg/puremux"
 )
 
 // SVC codes used by the agent-streaming choreography.
@@ -109,7 +111,53 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 		}
 	}()
 
-	mux := newTSMuxer(out)
+	// puremux live MPEG-TS session. The preprocessor absorbs the source's
+	// startup pathologies — the agent's backfill burst arrives with
+	// out-of-order and duplicated chunk timestamps, which raw pass-through
+	// muxing turned into "mpegts: DTS out of order" / mpv "Invalid video
+	// timestamp" at play start. The Enforcer's jitter buffer (400ms default)
+	// reorders, and MinMonotonicStep=1ms keeps duplicate stamps distinct
+	// after 90 kHz quantization. The Aligner drops pre-keyframe video and
+	// audio preceding the first IDR.
+	cfg := puremux.DefaultConfig()
+	cfg.OutputContainer = puremux.ContainerMPEGTS
+	cfg.Preprocessor.MinMonotonicStep = uint64(time.Millisecond)
+	mux, err := puremux.NewSession(out, cfg)
+	if err != nil {
+		return fmt.Errorf("soop: puremux session: %w", err)
+	}
+	vidTrack, err := mux.AddTrack(puremux.Track{Codec: puremux.CodecH264, IsVideo: true})
+	if err != nil {
+		return fmt.Errorf("soop: puremux video track: %w", err)
+	}
+	audTrack, err := mux.AddTrack(puremux.Track{Codec: puremux.CodecAAC})
+	if err != nil {
+		return fmt.Errorf("soop: puremux audio track: %w", err)
+	}
+	// Flush the preprocessor tail (reorder window holds the newest packets)
+	// when the stream ends for any reason. Close is idempotent.
+	defer func() { _ = mux.Close() }()
+
+	// Source chunk timestamps run on a 2.56 GHz clock (§12.7). Convert to
+	// time.Duration relative to the first chunk seen: 1 tick = 1e9/2.56e9 ns
+	// = 25/64 ns exactly. Rebasing locally keeps the multiply overflow-free
+	// for arbitrary absolute tick values.
+	var srcBase uint64
+	haveSrcBase := false
+	srcDur := func(ts uint64) time.Duration {
+		if !haveSrcBase {
+			haveSrcBase = true
+			srcBase = ts
+		}
+		return time.Duration((int64(ts) - int64(srcBase)) * 25 / 64)
+	}
+
+	// The agent may deliver non-VCL NALs (SPS/PPS/SEI) as their own video
+	// chunks. puremux's keyframe aligner drops video packets before the first
+	// IDR, which would silently discard those parameter sets and leave the
+	// stream undecodable. Hold slice-less chunks and prepend them to the next
+	// slice-bearing access unit so SPS+PPS+IDR travel as one keyframe AU.
+	var vidPrefix []byte
 
 	// Watcher: on ctx cancellation, nudge the read deadline so a blocked read
 	// unblocks and the loop returns promptly. It also exits when the stream ends
@@ -143,9 +191,18 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 				}
 				switch kind {
 				case chunkVideo:
-					werr = mux.writeVideo(es, chunkTS(header))
+					if !hasVCLNAL(es) {
+						vidPrefix = append(vidPrefix, es...)
+						return
+					}
+					au := es
+					if len(vidPrefix) > 0 {
+						au = append(vidPrefix, es...)
+						vidPrefix = nil
+					}
+					werr = mux.WriteVideo(vidTrack, au, srcDur(chunkTS(header)))
 				case chunkAudio:
-					werr = mux.writeAudio(es, chunkTS(header))
+					werr = mux.WriteADTS(audTrack, es, srcDur(chunkTS(header)))
 				}
 			})
 			if werr != nil {
@@ -179,6 +236,22 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 			}
 		}
 	}
+}
+
+// hasVCLNAL reports whether an H.264 Annex-B access unit contains a VCL NAL
+// (slice types 1-5). Chunks without one (bare SPS/PPS/SEI) are held and
+// prepended to the next slice-bearing AU. The 3-byte start-code scan also
+// covers 4-byte start codes (00 00 00 01 contains 00 00 01).
+func hasVCLNAL(b []byte) bool {
+	for i := 0; i+3 < len(b); i++ {
+		if b[i] == 0x00 && b[i+1] == 0x00 && b[i+2] == 0x01 {
+			if t := b[i+3] & 0x1F; t >= 1 && t <= 5 {
+				return true
+			}
+			i += 3
+		}
+	}
+	return false
 }
 
 func (s *Source) sendSVC(ws *wsConn, svc int, data map[string]any) error {
