@@ -120,6 +120,32 @@ func (c *wsConn) readText() ([]byte, error) {
 	}
 }
 
+const wsOpBinary = 0x2
+
+// readAny reads the next data message, returning its opcode (text or binary) and
+// payload. It answers pings and surfaces close as EOF. Used by the agent-stream
+// path, which interleaves JSON control frames (text) with binary media frames.
+func (c *wsConn) readAny() (byte, []byte, error) {
+	for {
+		opcode, payload, err := readServerFrame(c.br)
+		if err != nil {
+			return 0, nil, err
+		}
+		switch opcode {
+		case wsOpText, wsOpBinary:
+			return opcode, payload, nil
+		case wsOpPing:
+			if err := c.writeFrame(wsOpPong, payload); err != nil {
+				return 0, nil, err
+			}
+		case wsOpClose:
+			return 0, nil, io.EOF
+		default:
+			// Ignore pong / unexpected opcodes and keep reading.
+		}
+	}
+}
+
 func (c *wsConn) close() error {
 	_ = c.writeFrame(wsOpClose, nil)
 	return c.conn.Close()
