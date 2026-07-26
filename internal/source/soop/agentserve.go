@@ -12,6 +12,7 @@ package soop
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,17 @@ func (st *agentServeState) enter() {
 func (st *agentServeState) leave() {
 	st.mu.Lock()
 	st.active--
+	st.lastActive = time.Now()
+	st.mu.Unlock()
+}
+
+// touch records client activity without holding a persistent connection — used
+// by the HLS DVR path, whose requests are short and frequent rather than one
+// long stream. The auto-shutdown loop then treats a gap in requests as the
+// player having gone away.
+func (st *agentServeState) touch() {
+	st.mu.Lock()
+	st.everConnected = true
 	st.lastActive = time.Now()
 	st.mu.Unlock()
 }
@@ -104,12 +116,26 @@ func RunAgentServe(encodedParams string) error {
 	}
 	s := New(nil)
 	st := &agentServeState{lastActive: time.Now()}
-	srv := &http.Server{Handler: s.agentHandler(p, st)}
+
+	// In timeshift mode, serve a seekable HLS DVR; otherwise the single linear
+	// MPEG-TS. Cancelling recordCtx on shutdown stops recording and releases the
+	// agent session.
+	recordCtx, cancelRecord := context.WithCancel(context.Background())
+	defer cancelRecord()
+	var handler http.Handler
+	streamPath := "live.ts"
+	if timeshiftEnabled() {
+		handler = s.newDVRServer(recordCtx, p, st)
+		streamPath = "index.m3u8"
+	} else {
+		handler = s.agentHandler(p, st)
+	}
+	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(ln) }()
 
 	// The URL line on stdout is the daemon's only stdout output; the parent reads
 	// exactly this line.
-	fmt.Printf("http://%s/live.ts\n", ln.Addr().String())
+	fmt.Printf("http://%s/%s\n", ln.Addr().String(), streamPath)
 
 	start := time.Now()
 	for {

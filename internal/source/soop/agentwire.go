@@ -199,22 +199,34 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	return url, nil
 }
 
-// serveInProcess runs the loopback server in this process (fallback path).
+// serveInProcess runs the loopback server in this process (download path, and
+// the fallback when detaching is unavailable). In timeshift mode it serves the
+// seekable HLS DVR; otherwise the single linear MPEG-TS.
 func (s *Source) serveInProcess(p agentStreamParams) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
-	srv := &http.Server{Handler: s.agentHandler(p, nil)}
+	handler := http.Handler(s.agentHandler(p, nil))
+	streamPath := "live.ts"
+	if timeshiftEnabled() {
+		handler = s.newDVRServer(context.Background(), p, nil)
+		streamPath = "index.m3u8"
+	}
+	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(ln) }()
-	return fmt.Sprintf("http://%s/live.ts", ln.Addr().String()), nil
+	return fmt.Sprintf("http://%s/%s", ln.Addr().String(), streamPath), nil
 }
 
 // buildAgentMedia assembles the Media whose single format is the loopback agent
-// stream (a direct MPEG-TS download).
+// stream: a direct MPEG-TS download, or (timeshift mode) a seekable HLS playlist.
 func buildAgentMedia(input, streamURL string, info *liveInfo) *source.Media {
 	headers := http.Header{}
 	headers.Set("User-Agent", desktopUserAgent)
+	mimeType, protocol := "video/mp2t", ""
+	if strings.HasSuffix(streamURL, ".m3u8") {
+		mimeType, protocol = "application/vnd.apple.mpegurl", "hls"
+	}
 	return &source.Media{
 		ID:           info.BNO,
 		Title:        info.Title,
@@ -226,7 +238,8 @@ func buildAgentMedia(input, streamURL string, info *liveInfo) *source.Media {
 		Formats: []types.FormatInfo{{
 			Itag:         1080,
 			URL:          streamURL,
-			MimeType:     "video/mp2t",
+			MimeType:     mimeType,
+			Protocol:     protocol,
 			HasAudio:     true,
 			HasVideo:     true,
 			Width:        1920,
