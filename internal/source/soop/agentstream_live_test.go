@@ -19,7 +19,7 @@ func TestAgentStreamLive(t *testing.T) {
 	}
 	outPath := os.Getenv("YTV1_SOOP_TS_OUT")
 	if outPath == "" {
-		outPath = "soop_agent.ts"
+		outPath = "soop_agent.mp4"
 	}
 	f, err := os.Create(outPath)
 	if err != nil {
@@ -49,9 +49,9 @@ func TestAgentStreamLive(t *testing.T) {
 		t.Logf("stream ended: %v", err)
 	}
 	fi, _ := f.Stat()
-	t.Logf("wrote %d bytes of MPEG-TS to %s", fi.Size(), outPath)
+	t.Logf("wrote %d bytes to %s", fi.Size(), outPath)
 	if fi.Size() < 100000 {
-		t.Fatalf("too little media captured (%d bytes)", fi.Size())
+		t.Fatalf("too little media (%d bytes)", fi.Size())
 	}
 }
 

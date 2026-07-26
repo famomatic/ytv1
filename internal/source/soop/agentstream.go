@@ -50,8 +50,8 @@ type agentStreamParams struct {
 	Category    string
 }
 
-// streamAgentMedia runs the agent handshake and writes a remuxed fragmented MP4 to out
-// until the stream ends or ctx is cancelled. It blocks for the stream's lifetime.
+// streamAgentMedia runs the agent handshake and writes a remuxed fragmented MP4
+// to out until the stream ends or ctx is cancelled. It blocks for the stream's lifetime.
 func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out io.Writer) error {
 	// 1. Bootstrap the control port to obtain a dynamic session port.
 	host := agentHost + ":" + strconv.Itoa(agentServicePort)
@@ -115,11 +115,13 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	}
 	defer mux.close()
 
-	// Watcher: on ctx cancellation, nudge the read deadline so a blocked read
-	// unblocks and the loop returns promptly (the mux is finalized by the defer).
+	// Watcher: on ctx cancellation, nudge the read deadline and close the mux so a
+	// blocked read or media write unblocks and the loop returns promptly (close is
+	// sync.Once-guarded, so the deferred close is a no-op).
 	go func() {
 		<-ctx.Done()
 		_ = ws.conn.SetReadDeadline(time.Now())
+		mux.close()
 	}()
 
 	var d deframer

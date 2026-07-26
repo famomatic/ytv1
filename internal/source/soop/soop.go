@@ -248,8 +248,8 @@ func (s *Source) extractLive(ctx context.Context, input, bjID, bno string, media
 	return s.extractLiveViaCDN(ctx, input, bjID, bno, mediaHeaders)
 }
 
-// extractLiveViaAgent resolves the stream through the local P2P agent, which
-// re-serves the highest quality as a loopback HLS playlist.
+// extractLiveViaAgent drives the local P2P agent for the ORIGINAL/1080p stream and
+// exposes it as a single loopback fragmented-MP4 format the pipeline downloads.
 func (s *Source) extractLiveViaAgent(ctx context.Context, input, bjID, bno string) (*source.Media, error) {
 	info, err := s.fetchLiveInfo(ctx, orString(bno, bjID), bno == "")
 	if err != nil {
@@ -259,31 +259,32 @@ func (s *Source) extractLiveViaAgent(ctx context.Context, input, bjID, bno strin
 		info.BjID = bjID
 	}
 
-	playlistURL, err := s.resolveViaAgent(ctx, info)
+	// The agent gateway validates a fan_ticket from /broad/a/watch; it also
+	// returns authoritative gateway/relay coordinates (preferred over the
+	// player_live_api grid params when present).
+	au := s.auCookie()
+	watch, err := s.fetchWatchInfo(ctx, info.BjID, info.BNO, au)
 	if err != nil {
 		return nil, err
 	}
+	params := agentStreamParams{
+		BNO:         info.BNO,
+		BjID:        info.BjID,
+		GUID:        newAgentGUID(),
+		FanTicket:   watch.FanTicket,
+		AU:          au,
+		GateWayIP:   orString(watch.GateWayIP, info.GateWayIP),
+		GateWayPort: orString(watch.GateWayPort, info.GateWayPort),
+		CenterIP:    orString(watch.RelayIP, info.CenterIP),
+		CenterPort:  orString(watch.RelayPort, info.CenterPort),
+		Category:    info.Category,
+	}
 
-	// Loopback stream: the agent serves plain HLS with CORS *, so no SOOP CDN
-	// auth headers are needed.
-	loopbackHeaders := http.Header{}
-	loopbackHeaders.Set("User-Agent", desktopUserAgent)
-
-	formats, err := s.hlsFormats(ctx, playlistURL, loopbackHeaders)
+	streamURL, err := s.serveAgentStream(params)
 	if err != nil {
 		return nil, err
 	}
-
-	return &source.Media{
-		ID:           info.BNO,
-		Title:        info.Title,
-		Author:       info.Author,
-		IsLive:       true,
-		WebpageURL:   input,
-		ThumbnailURL: liveArtworkBase + info.BNO,
-		Formats:      formats,
-		MediaHeaders: loopbackHeaders,
-	}, nil
+	return buildAgentMedia(input, streamURL, info), nil
 }
 
 // extractLiveViaCDN resolves the stream through the public CDN. With login
