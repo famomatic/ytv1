@@ -29,6 +29,14 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		return nil
 	}
 
+	// Bound extraction and metadata work with a wall-clock deadline, but run the
+	// media download itself on the parent context. A long VOD's segmented
+	// download legitimately runs longer than any fixed budget; wrapping the whole
+	// download in this deadline aborted in-flight segment fetches with
+	// "context deadline exceeded" once it elapsed (e.g. a multi-hour SOOP VOD
+	// failing mid-stream). Per-connection transport timeouts guard a stalled
+	// segment instead.
+	downloadCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
@@ -142,6 +150,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 
 	if shouldPrintProgressText(opts) {
 		fmt.Printf("Downloading: %s [%s]\n", info.Title, info.ID)
+		activeProgressPrinter.SetTitle(info.Title)
 	}
 	downloadOpts, err := buildDownloadOptionsForVideo(info, opts)
 	if err != nil {
@@ -165,10 +174,10 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		}
 		return nil
 	}
-	if err := sleepBeforeMediaDownload(ctx, opts); err != nil {
+	if err := sleepBeforeMediaDownload(downloadCtx, opts); err != nil {
 		return err
 	}
-	res, err := c.Download(ctx, url, downloadOpts)
+	res, err := c.Download(downloadCtx, url, downloadOpts)
 	if activeProgressPrinter != nil {
 		activeProgressPrinter.Finish()
 	}
@@ -214,7 +223,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 }
 
 func shouldSkipExistingOutput(path string, opts cli.Options) bool {
-	if !opts.NoOverwrites || strings.TrimSpace(path) == "" {
+	if !opts.NoOverwrites || strings.TrimSpace(path) == "" || path == "-" {
 		return false
 	}
 	if _, err := os.Stat(path); err == nil {
@@ -252,7 +261,7 @@ func isPostprocessedOutput(info *client.VideoInfo, opts cli.Options) bool {
 }
 
 func applyDownloadedFileMTime(path string, info *client.VideoInfo, opts cli.Options) error {
-	if !opts.UpdateMTime || strings.TrimSpace(path) == "" {
+	if !opts.UpdateMTime || strings.TrimSpace(path) == "" || path == "-" {
 		return nil
 	}
 	mt, ok := client.MediaFileMTime(info)
