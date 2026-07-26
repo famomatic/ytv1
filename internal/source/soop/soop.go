@@ -262,7 +262,7 @@ func (s *Source) extractLiveViaAgent(ctx context.Context, input, bjID, bno strin
 	// The agent gateway validates a fan_ticket from /broad/a/watch; it also
 	// returns authoritative gateway/relay coordinates (preferred over the
 	// player_live_api grid params when present).
-	au := s.auCookie()
+	au := s.fetchAU(ctx, info.BjID)
 	watch, err := s.fetchWatchInfo(ctx, info.BjID, info.BNO, au)
 	if err != nil {
 		return nil, err

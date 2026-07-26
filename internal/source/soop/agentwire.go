@@ -46,9 +46,11 @@ func newAgentGUID() string {
 	return strings.ToUpper(hex.EncodeToString(b[:]))
 }
 
-// auCookie resolves the viewer's _au cookie (the JOINLOG uuid): YTV1_SOOP_AU
-// override first, else the shared HTTP client's cookie jar.
-func (s *Source) auCookie() string {
+// fetchAU resolves the anonymous viewer's _au cookie (the P2P JOINLOG uuid).
+// SOOP issues it via Set-Cookie to any visitor — no login — so ytv1 fetches it
+// itself: YTV1_SOOP_AU override, then a logged-in cookie jar (if --cookies gave
+// one), else a GET of the play page whose response sets a fresh _au.
+func (s *Source) fetchAU(ctx context.Context, bjID string) string {
 	if v := os.Getenv("YTV1_SOOP_AU"); v != "" {
 		return v
 	}
@@ -56,11 +58,26 @@ func (s *Source) auCookie() string {
 		for _, host := range []string{"https://api.m.sooplive.co.kr", "https://sooplive.co.kr"} {
 			if u, err := url.Parse(host); err == nil {
 				for _, c := range s.http.Jar.Cookies(u) {
-					if c.Name == "_au" {
+					if c.Name == "_au" && c.Value != "" {
 						return c.Value
 					}
 				}
 			}
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://play.sooplive.com/"+bjID, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", desktopUserAgent)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	for _, c := range resp.Cookies() {
+		if c.Name == "_au" && c.Value != "" {
+			return c.Value
 		}
 	}
 	return ""
