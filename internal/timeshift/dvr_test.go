@@ -3,6 +3,7 @@ package timeshift
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -182,7 +183,7 @@ func TestDVREvictsOldSegments(t *testing.T) {
 	d.Close()
 
 	d.mu.RLock()
-	first := d.segs[0].Seq
+	first := d.segs[0].seq
 	total := d.total
 	d.mu.RUnlock()
 	if first == 0 {
@@ -190,6 +191,49 @@ func TestDVREvictsOldSegments(t *testing.T) {
 	}
 	if total > 3*time.Second {
 		t.Fatalf("window not bounded: %v retained", total)
+	}
+}
+
+// TestDVRDiskBackend verifies segments spill to disk when Config.Dir is set,
+// serve correctly, and the spill directory is removed on Close.
+func TestDVRDiskBackend(t *testing.T) {
+	root := t.TempDir()
+	d := NewDVR(Config{TargetSegmentDuration: 1 * time.Second, Window: time.Minute, Dir: root})
+	if d.dir == "" {
+		t.Fatal("expected a spill directory to be created")
+	}
+	d.Write(buildTSStream(7))
+
+	// Segments are on disk (in the spill dir), not held as bytes.
+	d.mu.RLock()
+	for _, s := range d.segs {
+		if s.path == "" || s.data != nil {
+			t.Fatalf("seg %d not disk-backed: path=%q data=%d", s.seq, s.path, len(s.data))
+		}
+	}
+	spillDir := d.dir
+	d.mu.RUnlock()
+
+	// Served content matches the on-disk file.
+	srv := httptest.NewServer(d.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/seg0.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readAll(t, resp)
+	resp.Body.Close()
+	if len(body) == 0 || len(body)%tsPacketLen != 0 {
+		t.Fatalf("served seg0 bad length %d", len(body))
+	}
+	if resp.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("disk segment must support ranges, got %q", resp.Header.Get("Accept-Ranges"))
+	}
+
+	// Close removes the spill directory.
+	d.Close()
+	if _, err := os.Stat(spillDir); !os.IsNotExist(err) {
+		t.Fatalf("spill dir not removed on Close: %v", err)
 	}
 }
 
