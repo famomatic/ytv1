@@ -12,14 +12,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/famomatic/ytv1/internal/source"
 	"github.com/famomatic/ytv1/internal/types"
@@ -122,10 +120,28 @@ func (s *Source) fetchWatchInfo(ctx context.Context, bjID, bno, au string) (*wat
 	}, nil
 }
 
-// serveAgentStream drives the agent in the background, remuxing to a temp file
-// (ffmpeg → file never suffers output backpressure), and serves that file to the
-// download client by tailing it. It returns the URL the pipeline downloads. The
-// stream and server live for the process (the CLI exits after the download).
+// flushWriter flushes an http.ResponseWriter after each write so the muxed
+// MPEG-TS reaches the download client as it is produced (the stream is live and
+// has no end).
+type flushWriter struct {
+	w http.ResponseWriter
+	f http.Flusher
+}
+
+func (fw flushWriter) Write(b []byte) (int, error) {
+	n, err := fw.w.Write(b)
+	if fw.f != nil {
+		fw.f.Flush()
+	}
+	return n, err
+}
+
+// serveAgentStream starts a loopback HTTP server that muxes the agent's live
+// media to MPEG-TS and streams it (incrementally) to the pipeline. It returns the
+// URL the pipeline downloads. The stream is driven once, on the plain GET; a
+// Range/HEAD probe gets 200/Accept-Ranges:none so the downloader falls back to
+// that single plain GET. A per-BNO cache keeps Extract's metadata and download
+// passes on the same URL (and one agent session).
 func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	agentStreamMu.Lock()
 	defer agentStreamMu.Unlock()
@@ -133,100 +149,40 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 		return u, nil
 	}
 
-	f, err := os.CreateTemp("", "ytv1-soop-*.mp4")
-	if err != nil {
-		return "", err
-	}
-	name := f.Name()
-	go func() {
-		defer f.Close()
-		if err := s.streamAgentMedia(context.Background(), p, f); err != nil {
-			fmt.Fprintf(os.Stderr, "soop: agent stream ended: %v\n", err)
-		}
-	}()
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
+	var once sync.Once
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Accept-Ranges", "none")
-		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Type", "video/mp2t")
 		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		tailFile(r.Context(), name, w, flusher)
+		streamed := false
+		once.Do(func() {
+			streamed = true
+			w.WriteHeader(http.StatusOK)
+			fw := flushWriter{w: w}
+			fw.f, _ = w.(http.Flusher)
+			if err := s.streamAgentMedia(r.Context(), p, fw); err != nil {
+				fmt.Fprintf(os.Stderr, "soop: agent stream ended: %v\n", err)
+			}
+		})
+		if !streamed {
+			http.Error(w, "stream already in progress", http.StatusConflict)
+		}
 	})}
 	go func() { _ = srv.Serve(ln) }()
-	streamURL := fmt.Sprintf("http://%s/live.mp4", ln.Addr().String())
+	streamURL := fmt.Sprintf("http://%s/live.ts", ln.Addr().String())
 	agentStreamByBNO[p.BNO] = streamURL
 	return streamURL, nil
 }
 
-// tailFile streams a growing file to w until ctx is done, waiting for new bytes.
-// Fragmented MP4 has no moov-at-end dependency, so tailing produces a playable
-// stream as it is written.
-func tailFile(ctx context.Context, name string, w io.Writer, flusher http.Flusher) {
-	rf, err := openWhenReady(ctx, name)
-	if err != nil {
-		return
-	}
-	defer rf.Close()
-	buf := make([]byte, 64<<10)
-	idle := 0
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		n, err := rf.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-			idle = 0
-			continue
-		}
-		if err == io.EOF {
-			idle++
-			if idle > 6000 { // ~10 min with no growth → give up
-				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(100 * time.Millisecond):
-			}
-			continue
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-func openWhenReady(ctx context.Context, name string) (*os.File, error) {
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if fi, err := os.Stat(name); err == nil && fi.Size() > 0 {
-			return os.Open(name)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(150 * time.Millisecond):
-		}
-	}
-	return nil, fmt.Errorf("soop: agent produced no media")
-}
-
 // buildAgentMedia assembles the Media whose single format is the loopback agent
-// stream (a direct fragmented-MP4 download).
+// stream (a direct MPEG-TS download).
 func buildAgentMedia(input, streamURL string, info *liveInfo) *source.Media {
 	headers := http.Header{}
 	headers.Set("User-Agent", desktopUserAgent)
@@ -241,7 +197,7 @@ func buildAgentMedia(input, streamURL string, info *liveInfo) *source.Media {
 		Formats: []types.FormatInfo{{
 			Itag:         1080,
 			URL:          streamURL,
-			MimeType:     "video/mp4",
+			MimeType:     "video/mp2t",
 			HasAudio:     true,
 			HasVideo:     true,
 			Width:        1920,

@@ -71,16 +71,15 @@ type agentFrame struct {
 }
 
 func agentEnabled() bool {
-	// Opt-IN: the agent 1080p path is enabled with YTV1_SOOP_AGENT=1. It resolves
-	// the ORIGINAL/1080p P2P stream via the local SOOP agent, but the remuxed
-	// output currently only finalizes when the capture ends (ffmpeg buffers the
-	// fragmented MP4), so it is not yet the default. Without the flag, extraction
-	// uses the CDN path (≤540p anonymously; higher with login cookies).
-	switch os.Getenv("YTV1_SOOP_AGENT") {
+	// Opt-out: when the local SOOP agent is running (agentProbe), the agent path
+	// pulls the ORIGINAL/1080p P2P stream and remuxes it live to MPEG-TS. Set
+	// YTV1_SOOP_NO_AGENT=1 to force the CDN path (≤540p anonymously; higher with
+	// login cookies) instead.
+	switch os.Getenv("YTV1_SOOP_NO_AGENT") {
 	case "1", "true", "TRUE", "yes":
-		return true
+		return false
 	}
-	return false
+	return true
 }
 
 // agentProbe reports whether the local agent looks available. Indirection so

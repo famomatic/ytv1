@@ -2,7 +2,7 @@ package soop
 
 // Agent-streaming path: drive the local SOOP P2P agent (SOOPStreamer) over its
 // loopback WebSocket to pull the ORIGINAL/1080p live stream, deframe the binary
-// media, and remux it to a fragmented MP4. This is the no-VPN, KR-native ≥1080p route;
+// media, and remux it to MPEG-TS. This is the no-VPN, KR-native ≥1080p route;
 // the agent joins the P2P grid and the crypto/relay work happens inside it.
 //
 // The full handshake + message choreography was reverse-engineered and verified
@@ -50,7 +50,7 @@ type agentStreamParams struct {
 	Category    string
 }
 
-// streamAgentMedia runs the agent handshake and writes a remuxed fragmented MP4
+// streamAgentMedia runs the agent handshake and writes a remuxed MPEG-TS stream
 // to out until the stream ends or ctx is cancelled. It blocks for the stream's lifetime.
 func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out io.Writer) error {
 	// 1. Bootstrap the control port to obtain a dynamic session port.
@@ -109,19 +109,13 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 		}
 	}()
 
-	mux, err := startESMux(out)
-	if err != nil {
-		return err
-	}
-	defer mux.close()
+	mux := newTSMuxer(out)
 
-	// Watcher: on ctx cancellation, nudge the read deadline and close the mux so a
-	// blocked read or media write unblocks and the loop returns promptly (close is
-	// sync.Once-guarded, so the deferred close is a no-op).
+	// Watcher: on ctx cancellation, nudge the read deadline so a blocked read
+	// unblocks and the loop returns promptly.
 	go func() {
 		<-ctx.Done()
 		_ = ws.conn.SetReadDeadline(time.Now())
-		mux.close()
 	}()
 
 	var d deframer

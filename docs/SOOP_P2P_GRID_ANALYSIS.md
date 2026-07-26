@@ -1615,3 +1615,27 @@ Fanticket source: `POST api.m.sooplive.co.kr/broad/a/watch` (Cookie `_au`) retur
 `fan_ticket` + `relay_ip`/`relay_port`/`gateway_ip`. Grid params also come from
 `player_live_api.php?type=live`. `guid` is a device constant. Needs the local agent
 running; fully offline-agentless (bridge/relay direct) remains future work.
+
+### 14.26 SOLVED — `ytv1 <soop-live-url>` streams 1080p live (in-Go MPEG-TS mux)
+
+The agent path is wired end to end and streams live. The last blocker was the
+remux: every ffmpeg option (fragmented MP4 to pipe or file, MPEG-TS, HLS with
+fmp4/ts segments, with flush_packets/frag_duration/nobuffer/analyzeduration/
+wallclock-ts) buffered the output and only flushed on close, so a live download
+saw nothing until the capture ended. Replaced ffmpeg with a small in-process
+MPEG-TS muxer (`ts.go`): it packetizes each H.264 access unit and ADTS AAC frame
+into 188-byte TS packets and writes them immediately, so the stream flows in real
+time. Verified: `ytv1 https://play.sooplive.com/<bjid>` writes a growing .part at
+~9 Mbps that ffprobe reports as h264 1920x1080 + aac 48000 and decodes/plays.
+
+Pipeline wiring (agentwire.go): `POST /broad/a/watch` (Cookie `_au`) → fan_ticket
++ gateway/relay; a loopback HTTP server muxes to MPEG-TS on the plain GET (a
+Range/HEAD probe gets 200/Accept-Ranges:none so the downloader falls back to a
+single plain GET); a per-BNO cache keeps Extract's metadata + download passes on
+one URL and one agent session. Enabled by default when the agent is running
+(`YTV1_SOOP_NO_AGENT=1` forces the CDN path). PTS are synthesized (video at 60fps,
+audio from the AAC sample count); players re-time off PTS/PCR.
+
+Usage: `ytv1 https://play.sooplive.com/<bjid> -o out.ts` (needs SOOPStreamer
+running and the `_au` cookie via `--cookies` or `YTV1_SOOP_AU`). Ctrl-C stops; the
+.part holds the captured 1080p. MPV can also play the loopback URL directly.
