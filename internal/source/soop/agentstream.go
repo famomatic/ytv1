@@ -36,6 +36,10 @@ const (
 	svcHeartbeat    = 52
 	svcInitializing = 51
 	svcAddInfoRecv  = 4 // agent->client with ADDINFO (preset) triggers START
+
+	// maxVidPrefixBytes caps the held SPS/PPS/SEI awaiting a slice-bearing AU.
+	// Real parameter sets are well under 1 KiB; 256 KiB is a generous ceiling.
+	maxVidPrefixBytes = 1 << 18
 )
 
 // agentStreamParams holds everything the choreography needs.
@@ -198,6 +202,14 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 				switch kind {
 				case chunkVideo:
 					if !hasVCLNAL(es) {
+						// Parameter-set NALs (SPS/PPS/SEI) preceding the next slice
+						// are tiny; a cap guards against a (pathological) stream that
+						// never sends a VCL slice growing this without bound. Drop the
+						// held bytes on overflow — parameter sets with no slice to
+						// attach to are useless anyway.
+						if len(vidPrefix)+len(es) > maxVidPrefixBytes {
+							vidPrefix = vidPrefix[:0]
+						}
 						vidPrefix = append(vidPrefix, es...)
 						return
 					}
