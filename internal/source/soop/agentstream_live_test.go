@@ -21,11 +21,11 @@ func TestAgentStreamLive(t *testing.T) {
 	if outPath == "" {
 		outPath = "soop_agent.mp4"
 	}
-	f, err := os.Create(outPath)
+	wf, err := os.Create(outPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer wf.Close()
 
 	p := agentStreamParams{
 		BNO:         envOr("YTV1_SOOP_BNO", "295847533"),
@@ -44,15 +44,15 @@ func TestAgentStreamLive(t *testing.T) {
 	defer cancel()
 
 	src := New(nil)
-	err = src.streamAgentMedia(ctx, p, f)
+	err = src.streamAgentMedia(ctx, p, wf)
 	if err != nil && err != context.DeadlineExceeded {
 		t.Logf("stream ended: %v", err)
 	}
-	fi, _ := f.Stat()
-	t.Logf("wrote %d bytes to %s", fi.Size(), outPath)
-	if fi.Size() < 100000 {
-		t.Fatalf("too little media (%d bytes)", fi.Size())
+	fi, _ := os.Stat(outPath)
+	if fi == nil || fi.Size() < 100000 {
+		t.Fatalf("too little media")
 	}
+	t.Logf("wrote %d bytes to %s", fi.Size(), outPath)
 }
 
 func envOr(k, def string) string {
