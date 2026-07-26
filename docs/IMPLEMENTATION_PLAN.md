@@ -38,6 +38,8 @@
 - `2026-07-12` (B145 concurrency/resource-safety/edge-case hardening)
 - `2026-07-13` (B146 OpenStream context deadline leak fix)
 - `2026-07-14` (B147 session cache expiration fix)
+- `2026-07-18` (B150 multi-source architecture + SOOP support)
+- `2026-07-26` (SOOP live muxer migrated to puremux MPEG-TS backend)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -204,6 +206,8 @@
 - B140 completion increment landed: progress output now collapses to one final progress line when stdout is not an interactive terminal, uses ANSI clear-line refresh plus a compact bar for interactive terminals, and avoids captured/piped output that appears as many refresh lines.
 - B141 completion increment landed: interactive progress finish now clears the active progress line instead of leaving a final duplicated-looking 100% line before subsequent status output, while captured/non-TTY output still retains a single final progress line.
 - B144 completion increment landed: silent download truncation prevention across the full download pipeline. `copyWithDownloadConfig` now verifies the copied byte count against the server-advertised Content-Length (and range size for partial requests), mapping short reads to a typed `ErrTruncatedDownload`; `downloadURLChunked` now tracks per-chunk completion and refuses to return success when context cancellation leaves zero-filled gaps; `downloadSegmentBatchConcurrent` (DASH) now rejects empty segment bodies and surfaces context errors instead of silently writing gaps; DASH `r=-1` in static manifests is now expanded from `mediaPresentationDuration` (ported from yt-dlp) instead of generating a single segment; `downloadStream` performs a post-download file-size integrity check against the format's `ContentLength`; and `downloadAndMerge` guards against empty intermediate files before merging. New `TruncatedDownloadError` type and `ErrorCategoryTruncatedDownload` classification added. Covered by reproduction tests for premature EOF, chunked cancellation, chunked-transfer short reads, DASH r=-1 static/dynamic expansion, and empty DASH segment rejection.
+
+- SOOP live muxer migration landed (2026-07-26): the hand-rolled MPEG-TS muxer (`internal/source/soop/ts.go`) is replaced by puremux's live TS backend (`puremux.NewSession` + `ContainerMPEGTS` + `WriteVideo`/`WriteADTS`). puremux's preprocessor now absorbs the agent's startup pathologies — the backfill burst's out-of-order and duplicated chunk timestamps that produced `mpegts: DTS out of order` / mpv `Invalid video timestamp` — via a 400ms reorder jitter buffer plus `MinMonotonicStep=1ms` duplicate separation, and enforces keyframe-first start with A/V sync alignment. Slice-less video chunks (bare SPS/PPS/SEI) are held and prepended to the next slice-bearing AU so the aligner cannot drop parameter sets. Source 2.56 GHz chunk ticks convert exactly to `time.Duration` (× 25/64). Requires puremux ≥ v0.0.5 (local `go.work` until tagged); `go build`/`vet`/`test ./...` green.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -2560,6 +2564,60 @@ expired; explicit `SessionCacheTTL=0` still disables the local TTL but URL
 expiry still applies; regression tests cover both default TTL and
 URL-expire invalidation; `go test ./...` green.
 
+### B150. Multi-Source Architecture and SOOP Support `[x]`
+
+**Goal.** Add extraction/download support for a second site — SOOP
+(`sooplive.co.kr`, formerly AfreecaTV) — while keeping the YouTube path
+untouched, and establish a reusable seam so further sites are additive.
+
+**Design (additive dispatch).** A new `internal/source` package defines the
+multi-source seam:
+
+- `source.Source` interface: `Name()`, `Matches(input) bool` (no I/O), and
+  `Extract(ctx, input) (*source.Media, error)`.
+- `source.Media` is the site-neutral result: metadata + `[]types.FormatInfo`
+  + `MediaHeaders` (extra headers required on manifest/segment requests).
+- A package-level registry (`Register`/`Build`/`Match`); sources self-register
+  from their `init()` and are blank-imported in `client/sources.go`.
+
+`client.NewClient` builds the active source set (`source.Build`). `GetVideo`
+and `Download` first consult `source.Match`; a matching non-YouTube source is
+handled by `getVideoViaSource`/`downloadViaSource`, otherwise the existing
+YouTube pipeline runs unchanged. Source sessions are cached under
+`"<source>:<id>"`; `resolveSelectedFormatURL` short-circuits for them (their
+URLs are already final — no signature/n-sig/PO-token rewriting), and
+`applySourceMediaHeaders` overrides the default (YouTube) media headers with
+the source's `Referer`/`Origin`/`User-Agent` on HLS/DASH/progressive requests.
+
+**SOOP source (`internal/source/soop`).** Ported from `lavalink-go`:
+
+- VOD `vod.sooplive.co.kr/player/<id>` → `POST api.m.sooplive.co.kr/station/
+  video/a/view` (mobile UA) → `data.files[0].file` HLS master.
+- Live `play.sooplive.co.kr/<bjid>[/<bno>]` → `POST live.afreecatv.com/afreeca/
+  player_live_api.php` (`type=aid`, desktop UA) for the auth key, then
+  `GET livestream-manager.sooplive.co.kr/broad_stream_assign.html`
+  (`broad_key=<bno>-common-original-hls`), rewrite `auth_playlist.m3u8` →
+  `auth_master_playlist.m3u8`, append `?aid=<key>`. A bare `/<bjid>` resolves
+  the current `BNO` first.
+- The master playlist is parsed with `formats.ParseHLSManifest`; every variant
+  becomes a selectable `types.FormatInfo` (protocol `hls`, tagged
+  `SourceClient=soop`), so the standard selector picks 최고화질 (highest
+  quality). A media-playlist-only response falls back to a single passthrough
+  format.
+
+**Parallel download.** `internal/downloader/hls.go` gained a concurrent
+segment path for completed (VOD) playlists — bounded-batch parallel fetch +
+decrypt, written in strict playlist order (mirrors the DASH concurrent path;
+live stays sequential). SOOP VOD therefore downloads in parallel like YouTube
+DASH, honoring `DownloadTransport.MaxConcurrency`.
+
+**Acceptance.** `Matches`/VOD/live extraction covered by `httptest` tests;
+client dispatch test proves best-variant selection and `Referer` propagation to
+segment requests end-to-end; parallel-HLS test proves concurrency + ordering;
+YouTube path and the full suite remain green (`go build ./...`,
+`go vet ./...`, `go test ./...`). Live SOOP endpoints are not reachable from
+CI, so real-site verification is a manual follow-up.
+
 ---
 
 ## 4. Public API Contract
@@ -2846,7 +2904,12 @@ Cycle B is complete only when all are true:
 
 1. `Medium` - Upstream YouTube behavior drift may break live extraction/download without code changes.
    owner: `internal/orchestrator`, `internal/playerjs`, `internal/challenge` maintainers.
-2. `Low` - CLI substitute claim is YouTube-scoped; multi-site parity is intentionally out of scope.
+2. `Low` - CLI substitute claim is YouTube-scoped. A multi-source seam
+   (`internal/source`) now exists with SOOP as the first additional site
+   (`B150`); broader multi-site parity remains out of scope.
    owner: product scope maintainers (`docs/IMPLEMENTATION_PLAN.md`, `README.md`).
+4. `Medium` - SOOP live/VOD endpoints and CDN auth (`aid` token, Referer/Origin)
+   are unverified against the live site from CI and may drift.
+   owner: `internal/source/soop` maintainers.
 3. `Low` - Live-gated confidence depends on periodic reruns; fixture matrix alone cannot detect all upstream runtime shifts.
    owner: release/checklist maintainers (`client/e2e_integration_test.go` + CI operators).
