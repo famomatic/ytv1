@@ -2,11 +2,13 @@ package soop
 
 // Detached serve daemon for the agent stream. MPV's ytdl_hook (and any resolver
 // that reads `-J` JSON) plays the returned URL AFTER the resolving process exits,
-// so the loopback server that produces the live MPEG-TS must outlive it. Instead
-// of serving in-process, serveAgentStream spawns a separate `ytv1 soopserve`
-// process (RunAgentServe) that prints the URL, serves it, and exits when the
-// player disconnects or never connects. A `ytv1 <url> -o file` download uses the
-// same detached server; it just consumes the stream itself.
+// so on a resolve-only run the loopback server that produces the live MPEG-TS
+// must outlive it: serveAgentStream spawns a separate `ytv1 soopserve` process
+// (RunAgentServe) that prints the URL, serves it, and exits when the player
+// disconnects or never connects. A `ytv1 <url> -o …` download instead serves
+// in-process (see serveAgentStream / detachServe) so the server dies with the
+// process — a detached daemon there could outlive a wedged consumer pipe and keep
+// pulling from the local agent forever.
 
 import (
 	"bufio"

@@ -249,3 +249,38 @@ func TestAgentHandlerRangeFallbackAndStream(t *testing.T) {
 	resp2.Body.Close()
 	assertTSHasVideoAudio(t, body2)
 }
+
+// TestServeAgentStreamInProcessByDefault verifies a download run (detachServe
+// false) serves the stream in-process — no detached `ytv1 soopserve` child that
+// could outlive a wedged consumer — and that the returned URL actually streams
+// the muxed MPEG-TS.
+func TestServeAgentStreamInProcessByDefault(t *testing.T) {
+	port, stop := mockLiveAgent(t)
+	defer stop()
+	defer func(p int) { agentServicePort = p }(agentServicePort)
+	agentServicePort = port
+
+	defer func(v bool) { detachServe = v }(detachServe)
+	detachServe = false // a download run
+	defer func() { agentStreamByBNO = map[string]string{} }()
+	agentStreamByBNO = map[string]string{}
+
+	u, err := New(nil).serveAgentStream(agentStreamParams{BNO: "42", BjID: "bj"})
+	if err != nil {
+		t.Fatalf("serveAgentStream: %v", err)
+	}
+	if !strings.HasPrefix(u, "http://127.0.0.1:") {
+		t.Fatalf("expected loopback url, got %q", u)
+	}
+	// The cache returns the same URL on a second call (no second agent session).
+	if u2, _ := New(nil).serveAgentStream(agentStreamParams{BNO: "42", BjID: "bj"}); u2 != u {
+		t.Fatalf("cache miss: %q != %q", u2, u)
+	}
+	resp, err := http.Get(u)
+	if err != nil {
+		t.Fatalf("GET %s: %v", u, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assertTSHasVideoAudio(t, body)
+}

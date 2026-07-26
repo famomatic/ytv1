@@ -1,9 +1,9 @@
 package soop
 
 // Wiring that exposes the agent stream (agentstream.go) to the generic pipeline:
-// a loopback HTTP server serves the remuxed fragmented MP4, and Extract returns a
-// single format pointing at it. The pipeline direct-downloads that URL (Protocol
-// is empty, so it takes the plain-HTTP path, not HLS), which drives the agent for
+// a loopback HTTP server serves the remuxed MPEG-TS, and Extract returns a single
+// format pointing at it. The pipeline direct-downloads that URL (Protocol is
+// empty, so it takes the plain-HTTP path, not HLS), which drives the agent for
 // the download's lifetime.
 
 import (
@@ -153,24 +153,47 @@ func (fw flushWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// detachServe selects the detached-daemon server over the in-process one. It is
+// only correct when this process resolves a URL and then EXITS before the media
+// is consumed (metadata/`-J`/`-g`/simulate runs, where MPV's ytdl_hook plays the
+// URL after ytv1 exits). For an actual download (`-o`) this process lives for the
+// whole stream, so the in-process server — which dies with it — is used instead;
+// a detached daemon there could outlive a wedged pipe (e.g. MPV closing behind a
+// shell pipe that hides the broken-pipe) and keep pulling from the agent forever.
+// main sets this from the CLI options before extraction.
+var detachServe bool
+
+// SetDetachServe records whether the current run only resolves a URL and exits
+// (true) versus downloads the media itself (false). See detachServe.
+func SetDetachServe(v bool) { detachServe = v }
+
 // serveAgentStream returns a loopback URL that streams the agent's live media as
-// MPEG-TS. It runs the server in a detached `ytv1 soopserve` process so the URL
-// stays playable after this (resolving) process exits — required for MPV's
-// ytdl_hook, which plays the URL after `-J` returns. If detaching is not possible
-// (e.g. os.Executable unavailable), it falls back to an in-process server, which
-// still works for a same-process `-o` download. A per-BNO cache keeps Extract's
-// metadata and download passes on one URL and one agent session.
+// MPEG-TS. In resolve-only runs it uses a detached `ytv1 soopserve` process so
+// the URL stays playable after this process exits; otherwise (a download) it
+// serves in-process so the server dies when this process does. A per-BNO cache
+// keeps Extract's metadata and download passes on one URL and one agent session.
 func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	agentStreamMu.Lock()
 	defer agentStreamMu.Unlock()
 	if u, ok := agentStreamByBNO[p.BNO]; ok {
 		return u, nil
 	}
-	url, err := spawnDetachedServe(p)
-	if err != nil {
-		if url, err = s.serveInProcess(p); err != nil {
-			return "", err
+	// NOTE: no pre-flight media probe here. SOOPStreamer serves a single session
+	// per broadcast, so probing would consume that session and the daemon's
+	// (second) join then gets no media — breaking the working path. The trade-off
+	// is that a stream-time agent failure (e.g. the browser tab is open) is not
+	// auto-fallen-back to the CDN; force the CDN with YTV1_SOOP_NO_AGENT=1.
+	var url string
+	var err error
+	if detachServe {
+		if url, err = spawnDetachedServe(p); err != nil {
+			url, err = s.serveInProcess(p) // detach unavailable (e.g. no os.Executable)
 		}
+	} else {
+		url, err = s.serveInProcess(p)
+	}
+	if err != nil {
+		return "", err
 	}
 	agentStreamByBNO[p.BNO] = url
 	return url, nil
