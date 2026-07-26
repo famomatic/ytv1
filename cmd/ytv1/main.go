@@ -16,6 +16,7 @@ import (
 
 	"github.com/famomatic/ytv1/client"
 	"github.com/famomatic/ytv1/internal/cli"
+	"github.com/famomatic/ytv1/internal/source/soop"
 )
 
 var verboseLifecyclePrinter *lifecyclePrinter
@@ -47,6 +48,15 @@ const (
 )
 
 func main() {
+	// Hidden subcommand: run the detached SOOP agent stream server (spawned by the
+	// soop source so the loopback URL outlives a `-J` resolve; see agentserve.go).
+	if len(os.Args) >= 3 && os.Args[1] == "soopserve" {
+		if err := soop.RunAgentServe(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	opts := cli.ParseFlags()
 	os.Exit(run(opts))
 }
@@ -144,6 +154,9 @@ func processInputsWithExitCode(
 				break
 			}
 		}
+	}
+	if activeProgressPrinter != nil {
+		resetConsoleTitle()
 	}
 	return exitCode
 }

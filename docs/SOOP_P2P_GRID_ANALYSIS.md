@@ -1639,3 +1639,19 @@ audio from the AAC sample count); players re-time off PTS/PCR.
 Usage: `ytv1 https://play.sooplive.com/<bjid> -o out.ts` (needs SOOPStreamer
 running and the `_au` cookie via `--cookies` or `YTV1_SOOP_AU`). Ctrl-C stops; the
 .part holds the captured 1080p. MPV can also play the loopback URL directly.
+
+### 14.27 MPV auto-detect (rename to yt-dlp) — detached serve daemon
+
+MPV's `ytdl_hook` resolves a URL by running `yt-dlp -J <url>` and plays the JSON's
+`url` AFTER that process exits. The SOOP agent stream is a loopback server that
+must therefore outlive the resolve. serveAgentStream now spawns a detached
+`ytv1 soopserve <base64-params>` process (agentserve.go / `RunAgentServe`) that
+prints the loopback URL, serves the live MPEG-TS, and self-terminates when the
+player disconnects (15s grace) or never connects (90s). Verified: `ytv1 -J` returns
+`http://127.0.0.1:PORT/live.ts` and exits; the URL keeps serving h264 1920x1080 +
+aac; the daemon exits ~15s after the client disconnects (no zombie).
+
+So renaming `ytv1.exe` → `yt-dlp.exe` on PATH makes `mpv https://play.sooplive.com/<bjid>`
+play the 1080p P2P stream in live mode via MPV's auto-detection. (`ytv1 -q <url> -o -
+| mpv -` also works as an explicit pipe.) Needs SOOPStreamer running + the browser
+tab closed; `_au` is fetched automatically.

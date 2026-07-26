@@ -153,49 +153,38 @@ func (fw flushWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// serveAgentStream starts a loopback HTTP server that muxes the agent's live
-// media to MPEG-TS and streams it (incrementally) to the pipeline. It returns the
-// URL the pipeline downloads. The stream is driven once, on the plain GET; a
-// Range/HEAD probe gets 200/Accept-Ranges:none so the downloader falls back to
-// that single plain GET. A per-BNO cache keeps Extract's metadata and download
-// passes on the same URL (and one agent session).
+// serveAgentStream returns a loopback URL that streams the agent's live media as
+// MPEG-TS. It runs the server in a detached `ytv1 soopserve` process so the URL
+// stays playable after this (resolving) process exits — required for MPV's
+// ytdl_hook, which plays the URL after `-J` returns. If detaching is not possible
+// (e.g. os.Executable unavailable), it falls back to an in-process server, which
+// still works for a same-process `-o` download. A per-BNO cache keeps Extract's
+// metadata and download passes on one URL and one agent session.
 func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	agentStreamMu.Lock()
 	defer agentStreamMu.Unlock()
 	if u, ok := agentStreamByBNO[p.BNO]; ok {
 		return u, nil
 	}
+	url, err := spawnDetachedServe(p)
+	if err != nil {
+		if url, err = s.serveInProcess(p); err != nil {
+			return "", err
+		}
+	}
+	agentStreamByBNO[p.BNO] = url
+	return url, nil
+}
 
+// serveInProcess runs the loopback server in this process (fallback path).
+func (s *Source) serveInProcess(p agentStreamParams) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
-	var once sync.Once
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Accept-Ranges", "none")
-		w.Header().Set("Content-Type", "video/mp2t")
-		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		streamed := false
-		once.Do(func() {
-			streamed = true
-			w.WriteHeader(http.StatusOK)
-			fw := flushWriter{w: w}
-			fw.f, _ = w.(http.Flusher)
-			if err := s.streamAgentMedia(r.Context(), p, fw); err != nil {
-				fmt.Fprintf(os.Stderr, "soop: agent stream ended: %v\n", err)
-			}
-		})
-		if !streamed {
-			http.Error(w, "stream already in progress", http.StatusConflict)
-		}
-	})}
+	srv := &http.Server{Handler: s.agentHandler(p, nil)}
 	go func() { _ = srv.Serve(ln) }()
-	streamURL := fmt.Sprintf("http://%s/live.ts", ln.Addr().String())
-	agentStreamByBNO[p.BNO] = streamURL
-	return streamURL, nil
+	return fmt.Sprintf("http://%s/live.ts", ln.Addr().String()), nil
 }
 
 // buildAgentMedia assembles the Media whose single format is the loopback agent
