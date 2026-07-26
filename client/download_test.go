@@ -683,7 +683,7 @@ func TestDownloadHLS_PartFileRenameRetriesTransientFailure(t *testing.T) {
 			FileAccessBackoff: time.Millisecond,
 		},
 	})
-	result, err := c.downloadHLS(context.Background(), "video-id", srv.URL+"/playlist.m3u8", out, FormatInfo{Itag: 96}, true)
+	result, err := c.downloadHLS(context.Background(), "video-id", []string{srv.URL + "/playlist.m3u8"}, out, FormatInfo{Itag: 96}, true)
 	if err != nil {
 		t.Fatalf("downloadHLS() error = %v", err)
 	}

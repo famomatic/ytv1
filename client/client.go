@@ -18,6 +18,7 @@ import (
 	"github.com/famomatic/ytv1/internal/orchestrator"
 	"github.com/famomatic/ytv1/internal/playerjs"
 	"github.com/famomatic/ytv1/internal/policy"
+	"github.com/famomatic/ytv1/internal/source"
 	"github.com/famomatic/ytv1/internal/types"
 )
 
@@ -27,10 +28,14 @@ type Client struct {
 	engine           *orchestrator.Engine
 	playerJSResolver playerjs.Resolver
 	logger           Logger
-	sessionsMu       sync.RWMutex
-	sessions         map[string]videoSession
-	challengesMu     sync.RWMutex
-	challenges       map[string]challengeSolutions
+	// sources are non-YouTube extractors (e.g. SOOP) consulted before the
+	// built-in YouTube path. The first whose Matches(input) returns true handles
+	// the request.
+	sources      []source.Source
+	sessionsMu   sync.RWMutex
+	sessions     map[string]videoSession
+	challengesMu sync.RWMutex
+	challenges   map[string]challengeSolutions
 	// fetchLocks serializes per-video-id fetch paths (session build,
 	// player URL resolution, challenge solve) to avoid thundering-herd
 	// duplicate network requests and lost cache updates.
@@ -55,6 +60,11 @@ type videoSession struct {
 	PlayerURL string
 	Info      *VideoInfo
 	CachedAt  time.Time
+	// MediaHeaders are extra HTTP headers a non-YouTube source requires on
+	// manifest/segment requests (e.g. SOOP's Referer/Origin). Nil for YouTube.
+	MediaHeaders http.Header
+	// SourceName tags the extractor that produced this session ("" = YouTube).
+	SourceName string
 	// lastAccess tracks the most recent read/write time for LRU eviction.
 	// Stored as a *atomic.Int64 (UnixNano) so reads under the RLock can
 	// update access time without upgrading to a write lock, avoiding
@@ -189,6 +199,7 @@ func NewClient(config Config) *Client {
 		engine:           engine,
 		playerJSResolver: jsResolver,
 		logger:           logger,
+		sources:          source.Build(source.Deps{HTTPClient: config.HTTPClient}),
 		sessions:         make(map[string]videoSession),
 		challenges:       make(map[string]challengeSolutions),
 		fetchLocks:       newKeyLock(),
@@ -207,6 +218,11 @@ func (c *Client) HTTPClient() *http.Client {
 func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
 	defer cancel()
+
+	// Non-YouTube sources (e.g. SOOP) are dispatched before the YouTube path.
+	if src := source.Match(c.sources, input); src != nil {
+		return c.getVideoViaSource(ctx, src, input)
+	}
 
 	videoID, err := normalizeVideoID(input)
 	if err != nil {
@@ -285,6 +301,77 @@ func (c *Client) fetchVideoOnce(ctx context.Context, videoID string) (*VideoInfo
 	return info, nil
 }
 
+// matchSource returns the non-YouTube source that recognizes input, or nil.
+func (c *Client) matchSource(input string) source.Source {
+	return source.Match(c.sources, input)
+}
+
+// getVideoViaSource extracts metadata/formats through a non-YouTube source and
+// caches the result as a session keyed by "<source>:<id>", so a subsequent
+// download reuses it and can attach the source's required media headers.
+func (c *Client) getVideoViaSource(ctx context.Context, src source.Source, input string) (*VideoInfo, error) {
+	media, err := src.Extract(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if media == nil || len(media.Formats) == 0 {
+		return nil, ErrNoPlayableFormats
+	}
+	info := mediaToVideoInfo(media)
+	c.cacheSourceSession(src.Name(), input, info, media.MediaHeaders)
+	return info, nil
+}
+
+// cacheSourceSession stores an extracted source result under two keys: the
+// media-id key (used by the download pipeline to resolve URLs and attach the
+// source's media headers) and the input key (so a following download reuses the
+// extraction instead of re-running it — see downloadViaSource).
+func (c *Client) cacheSourceSession(name, input string, info *VideoInfo, headers http.Header) {
+	sess := videoSession{
+		Info:         cloneVideoInfo(info),
+		MediaHeaders: headers,
+		SourceName:   name,
+	}
+	c.putSession(sourceSessionKey(name, info.ID), sess)
+	c.putSession(sourceInputKey(name, input), sess)
+}
+
+// sourceSessionKey namespaces a source-scoped id so it cannot collide with an
+// 11-char YouTube video id.
+func sourceSessionKey(name, id string) string {
+	return name + ":" + id
+}
+
+// sourceInputKey namespaces a source-scoped input URL. The NUL byte cannot
+// appear in a URL or in a sourceSessionKey, so the two key spaces never collide.
+func sourceInputKey(name, input string) string {
+	return name + "\x00" + input
+}
+
+// mediaToVideoInfo maps a site-neutral source.Media to the public VideoInfo.
+func mediaToVideoInfo(m *source.Media) *VideoInfo {
+	return &VideoInfo{
+		ID:           m.ID,
+		Title:        m.Title,
+		Author:       m.Author,
+		Description:  m.Description,
+		DurationSec:  m.DurationSec,
+		IsLive:       m.IsLive,
+		UploadDate:   m.UploadDate,
+		ThumbnailURL: m.ThumbnailURL,
+		Formats:      append([]FormatInfo(nil), m.Formats...),
+	}
+}
+
+// sessionMediaHeaders returns any extra media request headers cached for the
+// given session id (nil for YouTube or unknown ids).
+func (c *Client) sessionMediaHeaders(videoID string) http.Header {
+	if s, ok := c.getSession(videoID); ok {
+		return s.MediaHeaders
+	}
+	return nil
+}
+
 // GetFormats returns normalized formats only.
 func (c *Client) GetFormats(ctx context.Context, input string) ([]FormatInfo, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
@@ -352,10 +439,40 @@ func (c *Client) FetchHLSManifest(ctx context.Context, input string) (string, er
 	return manifest.RawContent, nil
 }
 
+// findSourceSession returns a cached non-YouTube source session whose media id
+// is videoID, if any, by probing each registered source's namespaced key.
+func (c *Client) findSourceSession(videoID string) (videoSession, bool) {
+	for _, src := range c.sources {
+		if src == nil {
+			continue
+		}
+		if s, ok := c.getSession(sourceSessionKey(src.Name(), videoID)); ok && s.SourceName != "" {
+			return s, true
+		}
+	}
+	return videoSession{}, false
+}
+
 // ResolveStreamURL resolves a direct playable URL for a specific itag.
 func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int) (string, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
 	defer cancel()
+
+	// Non-YouTube source formats already carry a direct URL (resolved during
+	// extraction); return it without the YouTube id-normalization / player
+	// pipeline, which would reject a source id. This is what backs `-g` /
+	// `--print url` for SOOP.
+	if s, ok := c.findSourceSession(videoID); ok {
+		for _, f := range s.Info.Formats {
+			if f.Itag == itag {
+				if strings.TrimSpace(f.URL) == "" {
+					return "", fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, itag)
+				}
+				return f.URL, nil
+			}
+		}
+		return "", fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, itag)
+	}
 
 	videoID, err := normalizeVideoID(videoID)
 	if err != nil {
@@ -471,6 +588,13 @@ func (c *Client) resolveStreamURLLocked(ctx context.Context, videoID string, ita
 }
 
 func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f FormatInfo) (string, error) {
+	// Source-backed sessions (e.g. SOOP) carry final, already-resolved media
+	// URLs — the YouTube signature/n-sig/PO-token rewriting below does not apply
+	// and normalizeVideoID would reject the "<source>:<id>" key.
+	if s, ok := c.getSession(videoID); ok && s.SourceName != "" {
+		return f.URL, nil
+	}
+
 	videoID, err := normalizeVideoID(videoID)
 	if err != nil {
 		return "", err
