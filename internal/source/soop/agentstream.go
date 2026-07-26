@@ -123,6 +123,14 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	// reorders, and MinMonotonicStep=1ms keeps duplicate stamps distinct
 	// after 90 kHz quantization. The Aligner drops pre-keyframe video and
 	// audio preceding the first IDR.
+	//
+	// Video is written via WriteVideoReordered (puremux v0.0.7): the source
+	// gives only a presentation timestamp per access unit, which is
+	// non-monotonic in decode order on B-frame streams (some SOOP encoders,
+	// e.g. 1440p60). That method synthesizes a valid monotonic DTS (DTS<=PTS)
+	// and collapses to the DTS==PTS fast path on B-frame-free streams. Only
+	// WriteVideoReordered feeds the video track — mixing it with WriteVideo /
+	// WritePacket would fork the decode timeline.
 	cfg := puremux.DefaultConfig()
 	cfg.OutputContainer = puremux.ContainerMPEGTS
 	cfg.Preprocessor.MinMonotonicStep = uint64(time.Millisecond)
@@ -218,7 +226,7 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 						au = append(vidPrefix, es...)
 						vidPrefix = nil
 					}
-					werr = mux.WriteVideo(vidTrack, au, srcDur(chunkTS(header)))
+					werr = mux.WriteVideoReordered(vidTrack, au, srcDur(chunkTS(header)))
 				case chunkAudio:
 					werr = mux.WriteADTS(audTrack, es, srcDur(chunkTS(header)))
 				}
