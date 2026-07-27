@@ -105,6 +105,28 @@ func TestFormatDownloadProgress(t *testing.T) {
 	}
 }
 
+func TestFormatDownloadProgress_DurationMode(t *testing.T) {
+	// Segmented HLS: no byte total, but duration drives percent/bar/ETA while
+	// the size column shows bytes-so-far over an unknown total.
+	got := formatDownloadProgress(client.DownloadProgressEvent{
+		Part:              "media",
+		Downloaded:        331 * 1024 * 1024,
+		Total:             0,
+		BytesPerSecond:    17 * 1000 * 1000,
+		DownloadedSeconds: 300,
+		TotalSeconds:      1200,
+		ETASeconds:        225,
+	})
+	for _, want := range []string{"[download] media", "[#####-------------]", "25.0%", "331.0MiB/?", "eta 03:45"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("duration progress missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "MiB/?.") || strings.Contains(got, "/0B") {
+		t.Fatalf("duration progress should not show a byte total: %q", got)
+	}
+}
+
 func TestRenderProgressBarAndETA(t *testing.T) {
 	if got := renderProgressBar(0.25, true, 8); got != "[##------]" {
 		t.Fatalf("renderProgressBar()=%q, want [##------]", got)

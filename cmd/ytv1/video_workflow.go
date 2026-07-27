@@ -29,6 +29,14 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		return nil
 	}
 
+	// Bound extraction and metadata work with a wall-clock deadline, but run the
+	// media download itself on the parent context. A long VOD's segmented
+	// download legitimately runs longer than any fixed budget; wrapping the whole
+	// download in this deadline aborted in-flight segment fetches with
+	// "context deadline exceeded" once it elapsed (e.g. a multi-hour SOOP VOD
+	// failing mid-stream). Per-connection transport timeouts guard a stalled
+	// segment instead.
+	downloadCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
@@ -39,7 +47,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	info, err := c.GetVideo(ctx, url)
 	if err != nil {
 		if opts.Verbose {
-			fmt.Println(formatExtractionEvent(client.ExtractionEvent{
+			fmt.Fprintln(statusW(), formatExtractionEvent(client.ExtractionEvent{
 				Stage:  "total",
 				Phase:  "failure",
 				Client: "all",
@@ -50,7 +58,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 	extractMs := time.Since(extractStart).Milliseconds()
 	if opts.Verbose {
-		fmt.Println(formatExtractionEvent(client.ExtractionEvent{
+		fmt.Fprintln(statusW(), formatExtractionEvent(client.ExtractionEvent{
 			Stage:  "total",
 			Phase:  "complete",
 			Client: "all",
@@ -135,13 +143,14 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 
 	if opts.SkipDownload {
 		if shouldPrintHumanText(opts) {
-			fmt.Printf("Skipping download for %s\n", info.Title)
+			fmt.Fprintf(statusW(), "Skipping download for %s\n", info.Title)
 		}
 		return recordForcedArchiveIfRequested(info, opts)
 	}
 
 	if shouldPrintProgressText(opts) {
-		fmt.Printf("Downloading: %s [%s]\n", info.Title, info.ID)
+		fmt.Fprintf(statusW(), "Downloading: %s [%s]\n", info.Title, info.ID)
+		activeProgressPrinter.SetTitle(info.Title)
 	}
 	downloadOpts, err := buildDownloadOptionsForVideo(info, opts)
 	if err != nil {
@@ -149,7 +158,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 	if shouldSkipExistingOutput(downloadOpts.OutputPath, opts) {
 		if shouldPrintHumanText(opts) {
-			fmt.Printf("Skipping existing file: %s\n", downloadOpts.OutputPath)
+			fmt.Fprintf(statusW(), "Skipping existing file: %s\n", downloadOpts.OutputPath)
 		}
 		if err := recordCompletedDownload(info.ID); err != nil {
 			return err
@@ -158,17 +167,17 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 	if shouldSkipExistingPostprocessedOutput(info, downloadOpts.OutputPath, opts) {
 		if shouldPrintHumanText(opts) {
-			fmt.Printf("Skipping existing post-processed file: %s\n", downloadOpts.OutputPath)
+			fmt.Fprintf(statusW(), "Skipping existing post-processed file: %s\n", downloadOpts.OutputPath)
 		}
 		if err := recordCompletedDownload(info.ID); err != nil {
 			return err
 		}
 		return nil
 	}
-	if err := sleepBeforeMediaDownload(ctx, opts); err != nil {
+	if err := sleepBeforeMediaDownload(downloadCtx, opts); err != nil {
 		return err
 	}
-	res, err := c.Download(ctx, url, downloadOpts)
+	res, err := c.Download(downloadCtx, url, downloadOpts)
 	if activeProgressPrinter != nil {
 		activeProgressPrinter.Finish()
 	}
@@ -176,7 +185,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		return err
 	}
 	if shouldPrintProgressText(opts) {
-		fmt.Printf("Downloaded to: %s\n", res.OutputPath)
+		fmt.Fprintf(statusW(), "Downloaded to: %s\n", res.OutputPath)
 	}
 	if err := applyDownloadedFileMTime(res.OutputPath, info, opts); err != nil {
 		return err
@@ -195,7 +204,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 			avgSpeed = fmt.Sprintf("%dB/s", bps)
 		}
 		if shouldPrintHumanText(opts) {
-			fmt.Printf(
+			fmt.Fprintf(statusW(),
 				"total_elapsed_ms=%d extract_ms=%d download_ms(video/audio)=%d/%d merge_ms=%d final_size=%d avg_speed=%s\n",
 				time.Since(totalStart).Milliseconds(),
 				extractMs,
@@ -214,7 +223,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 }
 
 func shouldSkipExistingOutput(path string, opts cli.Options) bool {
-	if !opts.NoOverwrites || strings.TrimSpace(path) == "" {
+	if !opts.NoOverwrites || strings.TrimSpace(path) == "" || path == "-" {
 		return false
 	}
 	if _, err := os.Stat(path); err == nil {
@@ -252,7 +261,7 @@ func isPostprocessedOutput(info *client.VideoInfo, opts cli.Options) bool {
 }
 
 func applyDownloadedFileMTime(path string, info *client.VideoInfo, opts cli.Options) error {
-	if !opts.UpdateMTime || strings.TrimSpace(path) == "" {
+	if !opts.UpdateMTime || strings.TrimSpace(path) == "" || path == "-" {
 		return nil
 	}
 	mt, ok := client.MediaFileMTime(info)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/famomatic/ytv1/client"
 	"github.com/famomatic/ytv1/internal/cli"
+	"github.com/famomatic/ytv1/internal/source/soop"
 )
 
 var verboseLifecyclePrinter *lifecyclePrinter
@@ -28,6 +29,22 @@ var sleepBeforeSubtitleFunc = time.Sleep
 var latestReleaseURL = "https://api.github.com/repos/famomatic/ytv1/releases/latest"
 var currentVersion = "dev"
 var httpGetLatestRelease = defaultHTTPGetLatestRelease
+
+// statusOverride, when non-nil, redirects all human-readable
+// status/progress/log output away from os.Stdout. It is set to os.Stderr when
+// media is streamed to stdout (`-o -`) so the piped media is never interleaved
+// with status text (mirrors yt-dlp, which routes logs to stderr for `-o -`).
+var statusOverride io.Writer
+
+// statusW returns the sink for human-readable status/progress/log output: the
+// override when set, else the current os.Stdout (read live so tests that swap
+// os.Stdout still capture it).
+func statusW() io.Writer {
+	if statusOverride != nil {
+		return statusOverride
+	}
+	return os.Stdout
+}
 
 var errBreakOnExisting = errors.New("break on existing archive entry")
 var errMaxDownloadsReached = errors.New("maximum number of downloads reached")
@@ -47,11 +64,31 @@ const (
 )
 
 func main() {
+	// Hidden subcommand: run the detached SOOP agent stream server (spawned by the
+	// soop source so the loopback URL outlives a `-J` resolve; see agentserve.go).
+	if len(os.Args) >= 3 && os.Args[1] == "soopserve" {
+		if err := soop.RunAgentServe(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	opts := cli.ParseFlags()
 	os.Exit(run(opts))
 }
 
 func run(opts cli.Options) int {
+	// When media is streamed to stdout (`-o -`), all status/progress/log text
+	// must go to stderr so it does not corrupt the piped media.
+	if opts.OutputTemplate == "-" {
+		statusOverride = os.Stderr
+	}
+	// The SOOP agent's loopback server must outlive this process only when the run
+	// resolves a URL and exits (so MPV's ytdl_hook / an external player can play it
+	// afterwards). An actual download serves it in-process so it dies with us — a
+	// detached daemon there could survive a wedged consumer and keep pulling from
+	// the local agent indefinitely.
+	soop.SetDetachServe(opts.PrintJSON || opts.DumpSingleJSON || opts.SkipDownload || opts.GetURL || len(opts.PrintTemplates) > 0)
 	if opts.Version {
 		fmt.Println(versionString())
 		return exitCodeSuccess
@@ -145,6 +182,9 @@ func processInputsWithExitCode(
 			}
 		}
 	}
+	if activeProgressPrinter != nil {
+		resetConsoleTitle()
+	}
 	return exitCode
 }
 
@@ -165,18 +205,18 @@ func attachLifecycleHandlers(cfg *client.Config, opts cli.Options) {
 	cfg.OnExtractionEvent = func(evt client.ExtractionEvent) {
 		if opts.Verbose {
 			finishActiveProgressLine()
-			fmt.Println(lp.formatExtractionEvent(evt))
+			fmt.Fprintln(statusW(), lp.formatExtractionEvent(evt))
 			return
 		}
 		if isBasicExtractionEvent(evt) {
 			finishActiveProgressLine()
-			fmt.Println(formatExtractionEvent(evt))
+			fmt.Fprintln(statusW(), formatExtractionEvent(evt))
 		}
 	}
 	cfg.OnDownloadEvent = func(evt client.DownloadEvent) {
 		if opts.Verbose || isBasicDownloadEvent(evt) {
 			finishActiveProgressLine()
-			fmt.Println(lp.formatDownloadEvent(evt))
+			fmt.Fprintln(statusW(), lp.formatDownloadEvent(evt))
 		}
 	}
 }
@@ -185,7 +225,7 @@ type cliLogger struct{}
 
 func (cliLogger) Warnf(format string, args ...any) {
 	finishActiveProgressLine()
-	fmt.Printf("[warn] "+format+"\n", args...)
+	fmt.Fprintf(statusW(), "[warn] "+format+"\n", args...)
 }
 
 func finishActiveProgressLine() {
@@ -221,7 +261,7 @@ func checkAndPrintOutdated(opts cli.Options) {
 		return
 	}
 	if compareReleaseTags(currentVersion, latest) < 0 {
-		fmt.Printf("[warn] ytv1 is outdated: current=%s latest=%s\n", currentVersion, latest)
+		fmt.Fprintf(statusW(), "[warn] ytv1 is outdated: current=%s latest=%s\n", currentVersion, latest)
 	}
 }
 

@@ -380,6 +380,14 @@ func ParseFlags() Options {
 		flag.PrintDefaults()
 	}
 
+	// Move option flags ahead of positional arguments before parsing. Go's
+	// flag package stops at the first non-flag token, so `ytv1 URL --proxy ...`
+	// would otherwise silently drop every flag after the URL. For --proxy that
+	// is a dangerous footgun: the user believes traffic is tunneled while it
+	// actually goes direct, leaking their real IP. Permuting (as yt-dlp does)
+	// lets flags appear anywhere on the command line.
+	parseArgs = reorderArgs(flag.CommandLine, parseArgs)
+
 	_ = flag.CommandLine.Parse(parseArgs)
 
 	// Consolidate aliases
@@ -981,6 +989,59 @@ func parsePrintToFileSpecs(values []string) []PrintToFileSpec {
 	return specs
 }
 
+// boolFlag matches flag values that take no argument (e.g. bool flags), so
+// reorderArgs knows not to pull the following token along as a value.
+type boolFlag interface {
+	IsBoolFlag() bool
+}
+
+// reorderArgs permutes args so all option flags (and their values) precede
+// positional arguments, mirroring GNU getopt / yt-dlp behavior. This is
+// required because flag.FlagSet.Parse stops at the first positional argument;
+// without it, `ytv1 URL --proxy p` would parse zero flags and silently ignore
+// --proxy. A "--" token terminates flag scanning: everything after it is
+// treated as positional.
+func reorderArgs(fs *flag.FlagSet, args []string) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			// Explicit end-of-flags marker: keep it in place and treat the rest
+			// as positional so downstream Parse also stops here.
+			flags = append(flags, arg)
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		// Not a flag token ("-" alone, "" , or anything not starting with '-').
+		if len(arg) < 2 || arg[0] != '-' {
+			positionals = append(positionals, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		// "--name=value" / "-name=value" carry their value inline.
+		if strings.ContainsRune(arg, '=') {
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		f := fs.Lookup(name)
+		if f == nil {
+			// Unknown flag: let Parse report it. Don't consume the next token.
+			continue
+		}
+		if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+			// Boolean flag: takes no value.
+			continue
+		}
+		// Value-taking flag in "-name value" form: pull the value along.
+		if i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
+		}
+	}
+	return append(flags, positionals...)
+}
+
 func normalizePrintToFileArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -1435,6 +1496,12 @@ func hasBoolFlagAfterLastPrint(args []string, flagName string) bool {
 // ToClientConfig converts Options to client.Config.
 // ToClientConfig converts Options to client.Config.
 func ToClientConfig(opts Options) (client.Config, error) {
+	// Fail loud on an unusable --proxy value. A proxy that cannot be honored
+	// must abort here, before any request: silently connecting directly would
+	// leak the user's real IP after they explicitly asked to tunnel.
+	if err := client.ValidateProxyURL(opts.ProxyURL); err != nil {
+		return client.Config{}, err
+	}
 	cfg := client.Config{
 		ProxyURL:           opts.ProxyURL,
 		SourceAddress:      opts.SourceAddress,

@@ -1,9 +1,11 @@
 /legacy/
+.agents
 ytv1*.exe
 *.test
 *.mp4
 *.m4a
 *.mkv
+*.part
 /scripts/
 #/internal/playerjs/testdata/
 /*.json

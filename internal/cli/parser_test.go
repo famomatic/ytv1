@@ -2681,3 +2681,52 @@ func TestParseFlags_LastBooleanAliasWins(t *testing.T) {
 		t.Fatalf("BreakOnExisting=%v, want false because later --no-break-on-existing should win", opts.BreakOnExisting)
 	}
 }
+
+func TestReorderArgs_FlagsAfterPositionalsAreParsed(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	var proxy, format string
+	var verbose bool
+	fs.StringVar(&proxy, "proxy", "", "")
+	fs.StringVar(&format, "f", "", "")
+	fs.BoolVar(&verbose, "verbose", false, "")
+
+	// Flags placed after the positional URL (the exact mistake in the bug report).
+	args := []string{"https://example.com/v", "--proxy", "socks5://h:1080", "--verbose", "-f", "best"}
+	reordered := reorderArgs(fs, args)
+	if err := fs.Parse(reordered); err != nil {
+		t.Fatalf("Parse(%v) error = %v", reordered, err)
+	}
+	if proxy != "socks5://h:1080" {
+		t.Errorf("proxy = %q, want socks5://h:1080", proxy)
+	}
+	if format != "best" {
+		t.Errorf("f = %q, want best", format)
+	}
+	if !verbose {
+		t.Errorf("verbose = false, want true")
+	}
+	if got := fs.Args(); len(got) != 1 || got[0] != "https://example.com/v" {
+		t.Errorf("positionals = %v, want [https://example.com/v]", got)
+	}
+}
+
+func TestReorderArgs_EqualsFormAndDoubleDash(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	var proxy string
+	fs.StringVar(&proxy, "proxy", "", "")
+
+	// "--proxy=..." is self-contained; "--" ends flag scanning so a following
+	// token that looks like a flag stays positional.
+	args := []string{"url1", "--proxy=socks5://h:1", "--", "-not-a-flag"}
+	reordered := reorderArgs(fs, args)
+	if err := fs.Parse(reordered); err != nil {
+		t.Fatalf("Parse(%v) error = %v", reordered, err)
+	}
+	if proxy != "socks5://h:1" {
+		t.Errorf("proxy = %q, want socks5://h:1", proxy)
+	}
+	got := fs.Args()
+	if len(got) != 2 || got[0] != "url1" || got[1] != "-not-a-flag" {
+		t.Errorf("positionals = %v, want [url1 -not-a-flag]", got)
+	}
+}

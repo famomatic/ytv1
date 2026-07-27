@@ -14,9 +14,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/famomatic/ytv1/internal/downloader"
+	"github.com/famomatic/ytv1/internal/source"
 	"github.com/famomatic/ytv1/internal/types"
 )
 
@@ -57,6 +59,11 @@ type DownloadResult struct {
 func (c *Client) Download(ctx context.Context, input string, options DownloadOptions) (*DownloadResult, error) {
 	ctx, cancel := withDefaultTimeout(ctx, c.config.RequestTimeout)
 	defer cancel()
+
+	// Non-YouTube sources (e.g. SOOP) run a dedicated extract+download path.
+	if src := c.matchSource(input); src != nil {
+		return c.downloadViaSource(ctx, src, input, options)
+	}
 
 	videoID, err := normalizeVideoID(input)
 	if err != nil {
@@ -132,6 +139,90 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return c.downloadFallbackSingleWithRefresh(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 	}
 	return res, err
+}
+
+// downloadViaSource extracts through a non-YouTube source and downloads the
+// selected format(s) using the shared download pipeline. The source's media
+// headers (e.g. SOOP Referer/Origin) are cached on the session so the HLS/HTTP
+// downloaders attach them to manifest and segment requests.
+func (c *Client) downloadViaSource(ctx context.Context, src source.Source, input string, options DownloadOptions) (*DownloadResult, error) {
+	// Reuse the session a prior GetVideo cached for this exact input instead of
+	// re-extracting. A second Extract would double the source's API calls and,
+	// for SOOP live, re-run token resolution and a second agent media probe.
+	if s, ok := c.getSession(sourceInputKey(src.Name(), input)); ok && s.Info != nil {
+		return c.downloadSourceSession(ctx, src.Name(), cloneVideoInfo(s.Info), s.MediaHeaders, options)
+	}
+
+	media, err := src.Extract(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if media == nil || len(media.Formats) == 0 {
+		return nil, ErrNoPlayableFormats
+	}
+	info := mediaToVideoInfo(media)
+	c.cacheSourceSession(src.Name(), input, info, media.MediaHeaders)
+	return c.downloadSourceSession(ctx, src.Name(), info, media.MediaHeaders, options)
+}
+
+// downloadSourceSession selects and downloads from an already-extracted source
+// result. It is shared by the fresh-extract and cached-session paths of
+// downloadViaSource. The media-id session must exist so downloadSingle /
+// downloadAndMerge can resolve URLs and attach source media headers.
+func (c *Client) downloadSourceSession(ctx context.Context, name string, info *VideoInfo, headers http.Header, options DownloadOptions) (*DownloadResult, error) {
+	id := sourceSessionKey(name, info.ID)
+	if _, ok := c.getSession(id); !ok {
+		c.putSession(id, videoSession{
+			Info:         cloneVideoInfo(info),
+			MediaHeaders: headers,
+			SourceName:   name,
+		})
+	}
+
+	meta := types.Metadata{
+		Title:       info.Title,
+		Artist:      info.Author,
+		Description: info.Description,
+		Date:        info.UploadDate,
+		Duration:    int(info.DurationSec),
+	}
+
+	selected, err := SelectFormatsForDownloadOptions(info.Formats, options)
+	if err != nil {
+		return nil, err
+	}
+	if len(selected) == 0 {
+		return nil, ErrNoPlayableFormats
+	}
+	if len(selected) > 1 && (c.config.Muxer == nil || !c.config.Muxer.Available()) {
+		return nil, fmt.Errorf("%w: selected formats require merge; configure ffmpeg or choose a single format", ErrMuxerUnavailable)
+	}
+
+	if len(selected) == 1 {
+		return c.downloadSingle(ctx, id, info.Title, info.Author, selected[0], options.OutputPath, options)
+	}
+	return c.downloadAndMerge(ctx, id, selected, options, meta)
+}
+
+// applySourceMediaHeaders overrides base media request headers with any
+// source-specific headers cached for videoID (e.g. SOOP Referer/Origin/UA).
+// Source headers replace matching keys so exactly one value is sent. For
+// YouTube (no cached source headers) base is returned unchanged.
+func (c *Client) applySourceMediaHeaders(videoID string, base http.Header) http.Header {
+	extra := c.sessionMediaHeaders(videoID)
+	if len(extra) == 0 {
+		return base
+	}
+	if base == nil {
+		base = make(http.Header)
+	}
+	for k, vals := range extra {
+		base.Del(k)
+		for _, v := range vals {
+			base.Add(k, v)
+		}
+	}
+	return base
 }
 
 func shouldRetryDefaultWithFallbackSingle(err error, options DownloadOptions) bool {
@@ -416,8 +507,35 @@ func (c *Client) downloadAndMerge(ctx context.Context, videoID string, formats [
 }
 
 func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputPath string, f types.FormatInfo, resume bool, usePartFiles bool) error {
+	// `-o -` streams the media to stdout (e.g. `ytv1 <url> -o - | mpv -` for a
+	// live player). Dispatch by protocol so the bytes on stdout are always media:
+	// an HLS/DASH format must run through its segment downloader (a plain GET of
+	// a .m3u8/.mpd would pipe the manifest text, not media); only a truly direct
+	// stream (e.g. the SOOP agent's live MPEG-TS) is copied straight through. No
+	// part file / resume / range so a live feed flows uninterrupted.
+	if outputPath == "-" {
+		switch {
+		case f.Protocol == "hls" || strings.HasSuffix(streamURL, ".m3u8"):
+			playlistURLs := f.Parts
+			if len(playlistURLs) == 0 {
+				playlistURLs = []string{streamURL}
+			}
+			return c.hlsStreamTo(ctx, videoID, playlistURLs, os.Stdout, "-", f)
+		case f.Protocol == "dash" || strings.HasSuffix(streamURL, ".mpd"):
+			return c.dashStreamTo(ctx, videoID, streamURL, os.Stdout, "-", f)
+		default:
+			return c.streamToWriter(ctx, videoID, streamURL, f, os.Stdout)
+		}
+	}
 	if f.Protocol == "hls" || strings.HasSuffix(streamURL, ".m3u8") {
-		_, err := c.downloadHLS(ctx, videoID, streamURL, outputPath, f, usePartFiles)
+		// A multi-part format (e.g. a SOOP VOD split across files) carries an
+		// ordered list of per-part playlists; fall back to the single resolved
+		// URL otherwise.
+		playlistURLs := f.Parts
+		if len(playlistURLs) == 0 {
+			playlistURLs = []string{streamURL}
+		}
+		_, err := c.downloadHLS(ctx, videoID, playlistURLs, outputPath, f, usePartFiles)
 		return err
 	}
 	if f.Protocol == "dash" || strings.HasSuffix(streamURL, ".mpd") {
@@ -433,7 +551,7 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 		usePartFiles,
 		c.config.DownloadTransport,
 		videoID,
-		buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient),
+		c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient)),
 		newDownloadProgressReporter(c.config.OnDownloadProgress, videoID, outputPath, f.Itag, inferProgressPart(outputPath)),
 	)
 	if err != nil {
@@ -453,6 +571,95 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 		}
 	}
 	return nil
+}
+
+// streamToWriter does a single plain GET and copies the response body to w. Used
+// for `-o -` (stdout piping) of a non-segmented stream (e.g. the SOOP agent's
+// live MPEG-TS); no ranges/resume so a live stream flows through. Source media
+// headers (e.g. SOOP Referer/Origin) are applied so a non-YouTube CDN does not
+// reject the request as it would with the default YouTube headers.
+func (c *Client) streamToWriter(ctx context.Context, videoID, streamURL string, f types.FormatInfo, w io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return err
+	}
+	applyRequestHeaders(req, c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient)))
+	resp, err := c.config.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed: status=%d", resp.StatusCode)
+	}
+	return copyWithWriteStallGuard(ctx, w, resp.Body, stdoutStallTimeout())
+}
+
+// stdoutStallTimeout is how long a single write to the `-o -` sink may block
+// before the stream is treated as consumer-dead. A player closing behind a shell
+// pipe (notably PowerShell) can leave ytv1's stdout pipe open but undrained, so
+// the blocking write never errors and the process would pull a live stream from
+// the source forever. YTV1_STDOUT_STALL_SECS overrides it; 0 disables the guard
+// (e.g. when long player pauses are wanted).
+func stdoutStallTimeout() time.Duration {
+	if v := os.Getenv("YTV1_STDOUT_STALL_SECS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 30 * time.Second
+}
+
+// copyWithWriteStallGuard copies src→dst like io.Copy, but fails if a single
+// dst.Write blocks longer than stall (0 disables the guard). It flags only a
+// stuck *write*, never a slow read, so a slow source is unaffected — the guard
+// fires only when the consumer has stopped reading entirely (e.g. a closed
+// player behind an undraining pipe). On stall it returns an error; the blocked
+// write goroutine is abandoned and the process exits, releasing the source.
+func copyWithWriteStallGuard(ctx context.Context, dst io.Writer, src io.Reader, stall time.Duration) error {
+	if stall <= 0 {
+		_, err := io.Copy(dst, src)
+		return err
+	}
+	var writeStartedNanos atomic.Int64 // start of an in-progress write; 0 when idle
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 128*1024)
+		for {
+			n, rerr := src.Read(buf)
+			if n > 0 {
+				writeStartedNanos.Store(time.Now().UnixNano())
+				_, werr := dst.Write(buf[:n])
+				writeStartedNanos.Store(0)
+				if werr != nil {
+					done <- werr
+					return
+				}
+			}
+			if rerr != nil {
+				if rerr == io.EOF {
+					rerr = nil
+				}
+				done <- rerr
+				return
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(stall / 3)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if ns := writeStartedNanos.Load(); ns != 0 && time.Since(time.Unix(0, ns)) > stall {
+				return fmt.Errorf("output stalled: consumer read nothing for %s (player closed?)", stall)
+			}
+		}
+	}
 }
 
 func transcodeURLToMP3(
@@ -833,8 +1040,15 @@ type downloadProgressReporter struct {
 	part       string
 	total      int64
 	downloaded int64
-	started    time.Time
-	lastEmit   time.Time
+	// totalDuration/downloadedDuration track playback seconds for segmented
+	// (HLS/DASH) downloads whose byte total is unknown, enabling a
+	// duration-based percent and ETA.
+	totalDuration      float64
+	downloadedDuration float64
+	started            time.Time
+	lastEmit           time.Time
+	// final is set by finish() so the terminal event carries Final=true.
+	final bool
 }
 
 func newDownloadProgressReporter(fn func(DownloadProgressEvent), videoID string, path string, itag int, part string) *downloadProgressReporter {
@@ -877,6 +1091,7 @@ func (p *downloadProgressReporter) reset() {
 	p.mu.Lock()
 	p.downloaded = 0
 	p.total = 0
+	p.final = false
 	p.started = time.Now()
 	p.lastEmit = p.started.Add(-time.Second)
 	p.mu.Unlock()
@@ -889,6 +1104,38 @@ func (p *downloadProgressReporter) setTotal(total int64) {
 	p.mu.Lock()
 	p.total = total
 	p.mu.Unlock()
+}
+
+// setTotalDuration records the media's total playback duration (seconds) so a
+// segmented download with no known byte total can report a duration-based
+// percent and ETA.
+func (p *downloadProgressReporter) setTotalDuration(seconds float64) {
+	if p == nil || seconds <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.totalDuration = seconds
+	p.mu.Unlock()
+}
+
+// addDuration advances the downloaded playback duration by a segment's length
+// and emits a throttled progress event. The byte counters keep feeding the
+// live throughput number; duration drives percent/ETA.
+func (p *downloadProgressReporter) addDuration(seconds float64) {
+	if p == nil || seconds <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.downloadedDuration += seconds
+	now := time.Now()
+	if now.Sub(p.lastEmit) < 200*time.Millisecond {
+		p.mu.Unlock()
+		return
+	}
+	p.lastEmit = now
+	evt := p.eventLocked(now)
+	p.mu.Unlock()
+	p.fn(evt)
 }
 
 func (p *downloadProgressReporter) add(n int64, force bool) {
@@ -911,6 +1158,12 @@ func (p *downloadProgressReporter) add(n int64, force bool) {
 }
 
 func (p *downloadProgressReporter) finish() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.final = true
+	p.mu.Unlock()
 	p.add(0, true)
 }
 
@@ -920,14 +1173,32 @@ func (p *downloadProgressReporter) eventLocked(now time.Time) DownloadProgressEv
 	if elapsed > 0 {
 		speed = int64(float64(p.downloaded) / elapsed)
 	}
+	// ETA from duration progress: the rate of playback-seconds fetched per
+	// wall-clock second projects the remaining playback duration to a wall-clock
+	// estimate. -1 marks it unknown (byte-only downloads, or before any segment).
+	eta := int64(-1)
+	if p.totalDuration > 0 && p.downloadedDuration > 0 && elapsed > 0 {
+		rate := p.downloadedDuration / elapsed
+		if rate > 0 {
+			remaining := p.totalDuration - p.downloadedDuration
+			if remaining < 0 {
+				remaining = 0
+			}
+			eta = int64(remaining / rate)
+		}
+	}
 	return DownloadProgressEvent{
-		VideoID:        p.videoID,
-		Path:           p.path,
-		Itag:           p.itag,
-		Part:           p.part,
-		Downloaded:     p.downloaded,
-		Total:          p.total,
-		BytesPerSecond: speed,
+		VideoID:           p.videoID,
+		Path:              p.path,
+		Itag:              p.itag,
+		Part:              p.part,
+		Downloaded:        p.downloaded,
+		Total:             p.total,
+		BytesPerSecond:    speed,
+		DownloadedSeconds: p.downloadedDuration,
+		TotalSeconds:      p.totalDuration,
+		ETASeconds:        eta,
+		Final:             p.final,
 	}
 }
 
@@ -1767,8 +2038,13 @@ func isWebMMimeType(mimeType string) bool {
 	return mediaType == "video/webm" || mediaType == "audio/webm"
 }
 
-func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
-	headers := buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient)
+// hlsStreamTo downloads one or more HLS playlists in playlist order and writes
+// the concatenated media to dst, carrying source media headers (e.g. SOOP
+// Referer/Origin) and duration-based progress. It is the shared core of the
+// file-backed downloadHLS and the `-o -` stdout path; progressPath tags the
+// progress reporter ("-" for stdout).
+func (c *Client) hlsStreamTo(ctx context.Context, videoID string, playlistURLs []string, dst io.Writer, progressPath string, format FormatInfo) error {
+	headers := c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient))
 	transport := downloader.TransportConfig{
 		MaxRetries:                  c.config.DownloadTransport.MaxRetries,
 		InitialBackoff:              c.config.DownloadTransport.InitialBackoff,
@@ -1780,10 +2056,46 @@ func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath
 		ThrottledRateBytesPerSecond: c.config.DownloadTransport.ThrottledRateBytesPerSecond,
 		ThrottledRateMinDuration:    c.config.DownloadTransport.ThrottledRateMinDuration,
 	}
-	dl := downloader.NewHLSDownloader(c.config.HTTPClient, streamURL).
-		WithRequestHeaders(headers).
-		WithTransportConfig(transport)
 
+	// HLS has no upfront total size (segment sizes are unknown until fetched),
+	// so report progress as an indeterminate download (bytes + speed, no
+	// percent). Without this the CLI shows no activity for the whole HLS
+	// download and appears frozen.
+	reporter := newDownloadProgressReporter(c.config.OnDownloadProgress, videoID, progressPath, format.Itag, inferProgressPart(progressPath))
+	if reporter != nil {
+		dst = &progressCountingWriter{w: dst, rep: reporter}
+		// HLS has no upfront byte total, but the source knows the media's total
+		// playback duration (summed across parts for a multi-part VOD). Feeding
+		// it in lets the downloader report a real percent and ETA from the
+		// per-segment EXTINF durations instead of an indeterminate bar.
+		if s, ok := c.getSession(videoID); ok && s.Info != nil && s.Info.DurationSec > 0 {
+			reporter.setTotalDuration(float64(s.Info.DurationSec))
+		}
+	}
+	// A multi-part VOD is downloaded part-by-part into the same writer. Each part
+	// is an independent HLS playlist (its own segments and EXT-X-MAP init), so a
+	// fresh downloader is used per part and the bodies are concatenated in order.
+	var downloadErr error
+	for _, url := range playlistURLs {
+		dl := downloader.NewHLSDownloader(c.config.HTTPClient, url).
+			WithRequestHeaders(headers).
+			WithTransportConfig(transport)
+		if reporter != nil {
+			dl = dl.WithProgressCallback(reporter.addDuration)
+		}
+		if err := dl.Download(ctx, dst); err != nil {
+			downloadErr = err
+			break
+		}
+	}
+	reporter.finish()
+	return downloadErr
+}
+
+func (c *Client) downloadHLS(ctx context.Context, videoID string, playlistURLs []string, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
+	if len(playlistURLs) == 0 {
+		return nil, fmt.Errorf("hls download: no playlist URL for itag=%d", format.Itag)
+	}
 	writePath := outputPath
 	if usePartFile {
 		writePath += ".part"
@@ -1797,7 +2109,7 @@ func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath
 		return nil, err
 	}
 
-	downloadErr := dl.Download(ctx, f)
+	downloadErr := c.hlsStreamTo(ctx, videoID, playlistURLs, f, outputPath, format)
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if downloadErr != nil {
@@ -1831,9 +2143,28 @@ func (c *Client) downloadHLS(ctx context.Context, videoID, streamURL, outputPath
 	}, nil
 }
 
-func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
+// progressCountingWriter forwards writes to w and reports the byte count to a
+// download progress reporter. Used by the HLS/DASH segment writers, which have
+// no total size, so the CLI still shows live throughput.
+type progressCountingWriter struct {
+	w   io.Writer
+	rep *downloadProgressReporter
+}
+
+func (pw *progressCountingWriter) Write(b []byte) (int, error) {
+	n, err := pw.w.Write(b)
+	if n > 0 {
+		pw.rep.add(int64(n), false)
+	}
+	return n, err
+}
+
+// dashStreamTo downloads a DASH representation and writes the media to dst with
+// source media headers and progress. It is the shared core of the file-backed
+// downloadDASH and the `-o -` stdout path; progressPath tags the reporter.
+func (c *Client) dashStreamTo(ctx context.Context, videoID, streamURL string, dst io.Writer, progressPath string, format FormatInfo) error {
 	repID := fmt.Sprintf("%d", format.Itag)
-	headers := buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient)
+	headers := c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient))
 	transport := downloader.TransportConfig{
 		MaxRetries:                  c.config.DownloadTransport.MaxRetries,
 		InitialBackoff:              c.config.DownloadTransport.InitialBackoff,
@@ -1849,6 +2180,16 @@ func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPat
 		WithRequestHeaders(headers).
 		WithTransportConfig(transport)
 
+	reporter := newDownloadProgressReporter(c.config.OnDownloadProgress, videoID, progressPath, format.Itag, inferProgressPart(progressPath))
+	if reporter != nil {
+		dst = &progressCountingWriter{w: dst, rep: reporter}
+	}
+	downloadErr := dl.Download(ctx, dst)
+	reporter.finish()
+	return downloadErr
+}
+
+func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
 	writePath := outputPath
 	if usePartFile {
 		writePath += ".part"
@@ -1862,7 +2203,7 @@ func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPat
 		return nil, err
 	}
 
-	downloadErr := dl.Download(ctx, f)
+	downloadErr := c.dashStreamTo(ctx, videoID, streamURL, f, outputPath, format)
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if downloadErr != nil {

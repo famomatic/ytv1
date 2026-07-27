@@ -17,6 +17,9 @@ type cliProgressPrinter struct {
 	active      bool
 	lastLen     int
 	completed   map[string]bool
+	// baseTitle is the media title shown in the terminal window/tab title,
+	// updated with a live percent as download progress events arrive.
+	baseTitle string
 }
 
 func newCLIProgressPrinter(opts cli.Options) *cliProgressPrinter {
@@ -37,8 +40,15 @@ func (p *cliProgressPrinter) Print(evt client.DownloadProgressEvent) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.interactive {
+		setConsoleTitle(consoleTitleText(p.baseTitle, evt))
+	}
 	key := evt.Path + "|" + evt.Part
-	complete := evt.Total > 0 && evt.Downloaded >= evt.Total
+	// Completion is the reporter's Final event or a true byte-total hit — NOT a
+	// duration estimate reaching 100%, which routinely happens before the last
+	// segment arrives (EXTINF sums exceed the rounded metadata duration). Using
+	// the estimate froze the interactive bar and suppressed the real final line.
+	complete := evt.Final || (evt.Total > 0 && evt.Downloaded >= evt.Total)
 	if complete && p.completed[key] {
 		return
 	}
@@ -46,12 +56,12 @@ func (p *cliProgressPrinter) Print(evt client.DownloadProgressEvent) {
 		p.completed[key] = true
 	}
 	if p.newline {
-		fmt.Println(line)
+		fmt.Fprintln(statusW(), line)
 		return
 	}
 	if !p.interactive {
 		if complete {
-			fmt.Println(line)
+			fmt.Fprintln(statusW(), line)
 		}
 		return
 	}
@@ -59,7 +69,7 @@ func (p *cliProgressPrinter) Print(evt client.DownloadProgressEvent) {
 	if p.lastLen > len(line) {
 		padding = strings.Repeat(" ", p.lastLen-len(line))
 	}
-	fmt.Printf("\r\033[2K%s%s", line, padding)
+	fmt.Fprintf(statusW(), "\r\033[2K%s%s", line, padding)
 	p.active = true
 	p.lastLen = len(line)
 }
@@ -72,13 +82,70 @@ func (p *cliProgressPrinter) Finish() {
 	defer p.mu.Unlock()
 	if p.active && !p.newline {
 		if p.interactive {
-			fmt.Print("\r\033[2K")
+			fmt.Fprint(statusW(), "\r\033[2K")
 		} else {
-			fmt.Println()
+			fmt.Fprintln(statusW())
 		}
 	}
 	p.active = false
 	p.lastLen = 0
+}
+
+// SetTitle records the media title for the terminal window/tab title and emits
+// an initial title (no percent yet) so the terminal updates as soon as a
+// download starts.
+func (p *cliProgressPrinter) SetTitle(title string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.baseTitle = title
+	interactive := p.interactive
+	p.mu.Unlock()
+	if interactive {
+		setConsoleTitle(consoleTitleText(title, client.DownloadProgressEvent{}))
+	}
+}
+
+// consoleTitleText builds the terminal title string: "<pct> <media> - ytv1",
+// where the percent is derived from playback-duration progress (segmented
+// HLS/DASH) or byte progress, and omitted when neither total is known.
+func consoleTitleText(base string, evt client.DownloadProgressEvent) string {
+	prefix := ""
+	switch {
+	case evt.TotalSeconds > 0:
+		prefix = fmt.Sprintf("%.0f%% ", clampFraction(evt.DownloadedSeconds/evt.TotalSeconds)*100)
+	case evt.Total > 0:
+		prefix = fmt.Sprintf("%.0f%% ", clampFraction(float64(evt.Downloaded)/float64(evt.Total))*100)
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		title := prefix + "ytv1"
+		return strings.TrimSpace(title)
+	}
+	return strings.TrimSpace(prefix + base + " - ytv1")
+}
+
+// setConsoleTitle sets the terminal window/tab title via the OSC 0 escape
+// (icon + window title). Control characters are stripped so a crafted media
+// title cannot inject further escape sequences.
+func setConsoleTitle(title string) {
+	if !stdoutIsTerminal() {
+		return
+	}
+	title = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, title)
+	fmt.Fprintf(os.Stdout, "\033]0;%s\007", title)
+}
+
+// resetConsoleTitle restores a neutral terminal title after a run so it does
+// not stay stuck at a stale percent or media name.
+func resetConsoleTitle() {
+	setConsoleTitle("ytv1")
 }
 
 func stdoutIsTerminal() bool {
@@ -90,7 +157,11 @@ func stdoutIsTerminal() bool {
 }
 
 func formatDownloadProgress(evt client.DownloadProgressEvent) string {
-	if evt.Downloaded <= 0 && evt.Total <= 0 {
+	// Duration mode: segmented HLS/DASH has no byte total but knows playback
+	// seconds, so percent/bar/ETA come from duration while the size column shows
+	// bytes-so-far over an unknown ("?") total.
+	durationMode := evt.TotalSeconds > 0
+	if evt.Downloaded <= 0 && evt.Total <= 0 && !durationMode {
 		return ""
 	}
 	part := strings.TrimSpace(evt.Part)
@@ -99,30 +170,58 @@ func formatDownloadProgress(evt client.DownloadProgressEvent) string {
 	}
 	percent := "--.-%"
 	fraction := float64(0)
-	if evt.Total > 0 {
-		fraction = float64(evt.Downloaded) / float64(evt.Total)
-		if fraction < 0 {
-			fraction = 0
-		}
-		if fraction > 1 {
-			fraction = 1
-		}
+	knownTotal := false
+	switch {
+	case durationMode:
+		knownTotal = true
+		fraction = clampFraction(evt.DownloadedSeconds / evt.TotalSeconds)
+		percent = fmt.Sprintf("%5.1f%%", fraction*100)
+	case evt.Total > 0:
+		knownTotal = true
+		fraction = clampFraction(float64(evt.Downloaded) / float64(evt.Total))
 		percent = fmt.Sprintf("%5.1f%%", fraction*100)
 	}
 	total := "?"
-	if evt.Total > 0 {
+	if !durationMode && evt.Total > 0 {
 		total = formatBytes(evt.Total)
+	}
+	eta := formatETA(evt.Downloaded, evt.Total, evt.BytesPerSecond)
+	if durationMode {
+		eta = formatETASeconds(evt.ETASeconds)
 	}
 	return fmt.Sprintf(
 		"[download] %-5s %s %s %s/%s %s eta %s",
 		part,
-		renderProgressBar(fraction, evt.Total > 0, 18),
+		renderProgressBar(fraction, knownTotal, 18),
 		percent,
 		formatBytes(evt.Downloaded),
 		total,
 		formatMbps(evt.BytesPerSecond),
-		formatETA(evt.Downloaded, evt.Total, evt.BytesPerSecond),
+		eta,
 	)
+}
+
+func clampFraction(f float64) float64 {
+	if f < 0 {
+		return 0
+	}
+	if f > 1 {
+		return 1
+	}
+	return f
+}
+
+// formatETASeconds renders a precomputed seconds-remaining value; -1 is unknown.
+func formatETASeconds(seconds int64) string {
+	if seconds < 0 {
+		return "--:--"
+	}
+	minutes := seconds / 60
+	seconds = seconds % 60
+	if minutes > 99 {
+		return ">99m"
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, seconds)
 }
 
 func renderProgressBar(fraction float64, knownTotal bool, width int) string {

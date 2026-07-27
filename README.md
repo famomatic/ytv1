@@ -1,8 +1,40 @@
 # ytv1
 
-ytv1 is a Go-native library for extracting and downloading from YouTube. It provides APIs for video metadata, formats/stream URLs, downloads (including adaptive merge), playlists, and transcripts, without requiring a browser, Node.js, or a Python runtime.
+ytv1 is a Go-native library for extracting and downloading from YouTube (and, via a pluggable source seam, additional sites such as SOOP). It provides APIs for video metadata, formats/stream URLs, downloads (including adaptive merge), playlists, and transcripts, without requiring a browser, Node.js, or a Python runtime.
 
-`cmd/ytv1` is a thin CLI adapter on top of the library. The CLI is yt-dlp-inspired and focuses on practical YouTube workflows; it is not a general multi-site yt-dlp replacement.
+`cmd/ytv1` is a thin CLI adapter on top of the library. The CLI is yt-dlp-inspired and focuses on practical workflows; it is not a general multi-site yt-dlp replacement.
+
+## Sources (Multi-site)
+
+YouTube is the primary, fully-featured source. A pluggable seam
+(`internal/source`) lets additional sites be added without touching the
+YouTube path: a source implements `Matches(input)` + `Extract(ctx, input)`,
+self-registers from its package `init()`, and returns normalized formats that
+flow through the shared selection / parallel-download / mux pipeline. The
+input URL is dispatched to the first matching source; anything unmatched falls
+through to YouTube.
+
+**SOOP** (`sooplive.co.kr`, formerly AfreecaTV) is supported for both VOD and
+live:
+
+-   VOD: `https://vod.sooplive.co.kr/player/<id>`
+-   Live: `https://play.sooplive.co.kr/<bjid>/<bno>` (or `.../<bjid>`)
+
+SOOP streams are HLS; the highest-quality master-playlist variant is selected
+by default, and VOD segments are fetched in parallel
+(`--concurrent-fragments` / `DownloadTransport.MaxConcurrency`). Site-specific
+extraction (subtitles, transcripts, PO-token/signature logic) is
+YouTube-only. SOOP CDN auth (the live `aid` token and `Referer`/`Origin`
+headers) is handled automatically; live token expiry is re-resolved per
+extraction. Anonymous CDN live is capped at 540p.
+
+For higher-quality live (ORIGINAL/1080p) without a login, ytv1 can drive a
+locally running SOOP desktop app ("SOOPStreamer") over its loopback P2P grid
+socket and remux the pulled stream to MPEG-TS on the fly. This engages
+automatically when the app is running (set `YTV1_SOOP_NO_AGENT=1` to force the
+CDN path); if the agent delivers no media it falls back to the CDN. Stream it
+straight to a player with `ytv1 <live-url> -o -` (media on stdout, all status on
+stderr).
 
 ## Docs
 

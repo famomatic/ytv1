@@ -30,13 +30,60 @@ func TestDefaultHTTPClient_WithProxyURL(t *testing.T) {
 	}
 }
 
-func TestDefaultHTTPClient_InvalidProxyFallsBack(t *testing.T) {
-	httpClient := defaultHTTPClient("://bad-url", "", false)
-	if httpClient == http.DefaultClient {
-		// An invalid proxy URL must not fall back to the shared global
-		// http.DefaultClient, whose Jar/Transport are shared state. It should
-		// return a dedicated client with an owned (cloned) transport instead.
-		t.Fatalf("expected fallback to a dedicated owned client, not http.DefaultClient")
+func TestDefaultHTTPClient_InvalidProxyFailsLoudNoDirectLeak(t *testing.T) {
+	// A requested proxy that cannot be parsed must NOT fall back to a direct
+	// connection (which would leak the caller's real IP). Every request through
+	// the returned client must fail instead.
+	for _, proxyURL := range []string{
+		"://bad-url",
+		// Opaque form (no "//"): the exact mistake that silently downloaded
+		// direct. url.Parse leaves Host empty here.
+		"socks5:user:pass@host:50017",
+	} {
+		httpClient := defaultHTTPClient(proxyURL, "", false)
+		if httpClient == http.DefaultClient {
+			t.Fatalf("%q: must not return shared http.DefaultClient", proxyURL)
+		}
+		transport, ok := httpClient.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("%q: transport type = %T, want *http.Transport", proxyURL, httpClient.Transport)
+		}
+		req, err := http.NewRequest(http.MethodGet, "https://www.youtube.com/", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		if _, err := transport.Proxy(req); err == nil {
+			t.Fatalf("%q: proxy func returned nil error; expected a loud failure instead of a direct connection", proxyURL)
+		}
+	}
+}
+
+func TestValidateProxyURL(t *testing.T) {
+	valid := []string{
+		"",
+		"http://127.0.0.1:3128",
+		"socks5://host:1080",
+		"socks5://user:pass@host:1080",
+		// Password with reserved chars, correctly percent-encoded (% -> %25).
+		"socks5://user:P5k%25tV@host:50017",
+	}
+	for _, in := range valid {
+		if err := ValidateProxyURL(in); err != nil {
+			t.Errorf("ValidateProxyURL(%q) = %v, want nil", in, err)
+		}
+	}
+	invalid := []string{
+		"://bad-url",
+		// Opaque form: no "//", parses to empty Host.
+		"socks5:host:1080",
+		"socks5:user:pass@host:50017",
+		// Raw "%tV" is an invalid percent-escape.
+		"socks5://user:P5k%tV@host:50017",
+	}
+	for _, in := range invalid {
+		if err := ValidateProxyURL(in); err == nil {
+			t.Errorf("ValidateProxyURL(%q) = nil, want error", in)
+		}
 	}
 }
 
