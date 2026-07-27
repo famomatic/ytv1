@@ -7,9 +7,6 @@ require (
 	github.com/famomatic/puremux v0.0.10
 )
 
-// Develop against the local puremux working tree (directory-based dependency).
-replace github.com/famomatic/puremux => ../puremux
-
 require (
 	github.com/dlclark/regexp2 v1.11.4 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
