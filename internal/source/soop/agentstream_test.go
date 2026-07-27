@@ -226,37 +226,82 @@ func TestAgentHandlerRangeFallbackAndStream(t *testing.T) {
 	defer func(p int) { agentServicePort = p }(agentServicePort)
 	agentServicePort = port
 
-	srv := httptest.NewServer(New(nil).agentHandler(agentStreamParams{BNO: "1", BjID: "bj"}, nil))
+	srv := httptest.NewServer(New(nil).agentHandler(agentStreamParams{BNO: "1", BjID: "bj"}, nil, true)) // player mode
 	defer srv.Close()
 
-	// A Range probe (bounded or open) and HEAD must get 200 / Accept-Ranges:none
-	// with no media, so ytv1's downloader falls back to a single plain GET without
-	// a probe consuming the one-shot agent session.
-	for _, rng := range []string{"bytes=0-0", "bytes=0-"} {
+	// A HEAD and a BOUNDED Range probe (bytes=A-B, ytv1's chunked downloader) must
+	// get 200 / Accept-Ranges:none with no media, so the downloader falls back to a
+	// single plain GET without a probe consuming the one-shot agent session.
+	headReq, _ := http.NewRequest(http.MethodHead, srv.URL, nil)
+	headResp, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatalf("HEAD: %v", err)
+	}
+	hb, _ := io.ReadAll(headResp.Body)
+	headResp.Body.Close()
+	if headResp.StatusCode != http.StatusOK || len(hb) != 0 {
+		t.Fatalf("HEAD status=%d body=%d, want 200/empty", headResp.StatusCode, len(hb))
+	}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("bounded range probe: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || len(body) != 0 {
+		t.Fatalf("bounded range status=%d body=%d, want 200/empty", resp.StatusCode, len(body))
+	}
+
+	// An OPEN Range (bytes=A-, which MPV sends to probe seekability) must stream —
+	// returning an empty 200 made the player fail "Failed to recognize file format".
+	openReq, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	openReq.Header.Set("Range", "bytes=0-")
+	openResp, err := http.DefaultClient.Do(openReq)
+	if err != nil {
+		t.Fatalf("open range GET: %v", err)
+	}
+	body2, _ := io.ReadAll(openResp.Body)
+	openResp.Body.Close()
+	assertTSHasVideoAudio(t, body2)
+}
+
+// TestAgentHandlerDownloaderModeRangeFallback verifies the in-process (downloader)
+// handler returns an empty 200 for ANY Range — including an open one — so ytv1's
+// chunked downloader falls back to a single plain GET instead of a probe
+// consuming the one-shot session and the real GET 409ing.
+func TestAgentHandlerDownloaderModeRangeFallback(t *testing.T) {
+	port, stop := mockLiveAgent(t)
+	defer stop()
+	defer func(p int) { agentServicePort = p }(agentServicePort)
+	agentServicePort = port
+
+	srv := httptest.NewServer(New(nil).agentHandler(agentStreamParams{BNO: "1", BjID: "bj"}, nil, false)) // downloader mode
+	defer srv.Close()
+
+	// Any Range (open or bounded) → empty 200, does NOT stream.
+	for _, rng := range []string{"bytes=0-", "bytes=0-0"} {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
 		req.Header.Set("Range", rng)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatalf("range probe %q: %v", rng, err)
+			t.Fatalf("range %q: %v", rng, err)
 		}
-		if resp.StatusCode != http.StatusOK || resp.Header.Get("Accept-Ranges") != "none" {
-			t.Fatalf("range %q status=%d accept-ranges=%q", rng, resp.StatusCode, resp.Header.Get("Accept-Ranges"))
-		}
-		body, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if len(body) != 0 {
-			t.Fatalf("range probe %q should not stream media, got %d bytes", rng, len(body))
+		if resp.StatusCode != http.StatusOK || len(b) != 0 {
+			t.Fatalf("downloader-mode range %q status=%d body=%d, want 200/empty", rng, resp.StatusCode, len(b))
 		}
 	}
-
-	// A plain GET streams the muxed MPEG-TS.
-	resp2, err := http.Get(srv.URL)
+	// The plain GET streams.
+	resp, err := http.Get(srv.URL)
 	if err != nil {
 		t.Fatalf("plain GET: %v", err)
 	}
-	body2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	assertTSHasVideoAudio(t, body2)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	assertTSHasVideoAudio(t, body)
 }
 
 // TestServeAgentStreamInProcessByDefault verifies a download run (detachServe

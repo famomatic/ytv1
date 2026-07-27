@@ -60,18 +60,33 @@ func (st *agentServeState) touch() {
 }
 
 // agentHandler builds the loopback HTTP handler that muxes the agent's live media
-// to MPEG-TS on the first plain GET. This linear endpoint is consumed by ytv1's
-// own downloader (`-o file`/`-o -`), which probes with Range/HEAD before the real
-// GET; those get 200/Accept-Ranges:none with no body so the downloader falls back
-// to one plain GET (the single agent session is not consumed by a probe). Players
-// that want to seek use the HLS DVR (agenttimeshift.go), not this endpoint. st
-// (may be nil) tracks the connection lifecycle for auto-shutdown.
-func (s *Source) agentHandler(p agentStreamParams, st *agentServeState) http.HandlerFunc {
+// to MPEG-TS on the first stream GET. The two consumers have opposite Range needs
+// and use SEPARATE server instances, so playerMode selects the behavior:
+//   - playerMode (the detached daemon a media player opens): MPV opens with a
+//     plain GET or an OPEN Range (bytes=A-, its seekability probe) and must
+//     receive the stream, else it sees a zero-length body ("Failed to recognize
+//     file format"). Only a HEAD or a BOUNDED Range (bytes=A-B seek probe) gets
+//     an empty 200.
+//   - !playerMode (the in-process server ytv1's own `-o file` downloader hits):
+//     the downloader probes with HEAD or a Range and, on any 200-not-206, falls
+//     back to one plain GET; so ANY Range/HEAD gets an empty 200 and only the
+//     plain GET streams — otherwise a probe would consume the one-shot session
+//     and the real GET would 409.
+//
+// st (may be nil) tracks the connection lifecycle for auto-shutdown.
+func (s *Source) agentHandler(p agentStreamParams, st *agentServeState, playerMode bool) http.HandlerFunc {
 	var once sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("Content-Type", "video/mp2t")
-		if r.Method != http.MethodGet || r.Header.Get("Range") != "" {
+		rng := r.Header.Get("Range")
+		// Serve an empty 200 for: any non-GET (HEAD); for a downloader, any Range;
+		// for a player, only a bounded Range (bytes=A-B) — its open Range streams.
+		probe := r.Method != http.MethodGet
+		if rng != "" {
+			probe = probe || !playerMode || !strings.HasSuffix(rng, "-")
+		}
+		if probe {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -126,7 +141,7 @@ func RunAgentServe(encodedParams string) error {
 		handler = s.newDVRServer(recordCtx, p, st)
 		streamPath = "index.m3u8"
 	} else {
-		handler = s.agentHandler(p, st)
+		handler = s.agentHandler(p, st, true) // the detached daemon serves a player
 	}
 	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(ln) }()

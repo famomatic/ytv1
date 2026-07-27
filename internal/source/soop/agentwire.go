@@ -190,12 +190,12 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 		// (when timeshift is on). The detached daemon does this itself; the
 		// in-process fallback mirrors it.
 		if url, err = spawnDetachedServe(p); err != nil {
-			url, err = s.serveInProcess(p, timeshiftEnabled())
+			url, err = s.serveInProcess(p, timeshiftEnabled(), true) // player fallback
 		}
 	} else {
 		// Direct download (`-o …`): serve the raw linear stream this process
-		// consumes itself — not HLS.
-		url, err = s.serveInProcess(p, false)
+		// consumes itself — not HLS, and with downloader Range semantics.
+		url, err = s.serveInProcess(p, false, false)
 	}
 	if err != nil {
 		return "", err
@@ -206,13 +206,14 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 
 // serveInProcess runs the loopback server in this process (the download path,
 // and the fallback when detaching is unavailable). useTimeshift selects the
-// seekable HLS DVR over the single linear MPEG-TS.
-func (s *Source) serveInProcess(p agentStreamParams, useTimeshift bool) (string, error) {
+// seekable HLS DVR over the single linear MPEG-TS; playerMode selects the linear
+// endpoint's Range semantics (a media player vs ytv1's own downloader).
+func (s *Source) serveInProcess(p agentStreamParams, useTimeshift, playerMode bool) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", err
 	}
-	handler := http.Handler(s.agentHandler(p, nil))
+	handler := http.Handler(s.agentHandler(p, nil, playerMode))
 	streamPath := "live.ts"
 	if useTimeshift {
 		handler = s.newDVRServer(context.Background(), p, nil)
