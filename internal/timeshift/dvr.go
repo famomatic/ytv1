@@ -20,6 +20,11 @@ type Config struct {
 	// Window is how much past media to retain (and expose for seeking). Older
 	// segments are evicted. Default 2 minutes.
 	Window time.Duration
+	// MaxBytes caps the retained window by size, evicting oldest segments once
+	// exceeded — so a high-bitrate stream cannot balloon an in-memory window
+	// (2 min of 1440p60 was ~750 MB). 0 means no byte cap. Whichever of Window
+	// / MaxBytes is hit first bounds the window.
+	MaxBytes int64
 	// Dir, if non-empty, spills segments to files under a fresh subdirectory of
 	// Dir instead of holding them in memory — for long windows without high RAM
 	// use. The subdirectory (and its files) are removed on Close. Empty keeps
@@ -30,10 +35,11 @@ type Config struct {
 // storedSeg is one retained segment: its bytes live in memory (data) or on disk
 // (path), never both.
 type storedSeg struct {
-	seq  int
-	dur  time.Duration
-	data []byte
-	path string
+	seq   int
+	dur   time.Duration
+	bytes int
+	data  []byte
+	path  string
 }
 
 // DVR consumes a continuous MPEG-TS stream (it is an io.Writer) and exposes a
@@ -46,9 +52,10 @@ type DVR struct {
 	seg *TSSegmenter
 	dir string // the created spill subdirectory (empty for in-memory)
 
-	mu    sync.RWMutex
-	segs  []storedSeg  // sliding window, ordered by seq ascending
-	total time.Duration
+	mu         sync.RWMutex
+	segs       []storedSeg // sliding window, ordered by seq ascending
+	total      time.Duration
+	totalBytes int64
 }
 
 // NewDVR returns a DVR ready to be written to. If cfg.Dir is set but a spill
@@ -83,7 +90,7 @@ func (d *DVR) Close() error {
 }
 
 func (d *DVR) addSegment(s Segment) {
-	ss := storedSeg{seq: s.Seq, dur: s.Duration}
+	ss := storedSeg{seq: s.Seq, dur: s.Duration, bytes: len(s.Data)}
 	if d.dir != "" {
 		p := filepath.Join(d.dir, fmt.Sprintf("seg%d.ts", s.Seq))
 		if err := os.WriteFile(p, s.Data, 0o644); err == nil {
@@ -99,9 +106,13 @@ func (d *DVR) addSegment(s Segment) {
 	defer d.mu.Unlock()
 	d.segs = append(d.segs, ss)
 	d.total += ss.dur
-	for len(d.segs) > 1 && d.total > d.cfg.Window {
+	d.totalBytes += int64(ss.bytes)
+	// Evict oldest while over EITHER the duration window or the byte cap (keeping
+	// at least one segment).
+	for len(d.segs) > 1 && (d.total > d.cfg.Window || (d.cfg.MaxBytes > 0 && d.totalBytes > d.cfg.MaxBytes)) {
 		old := d.segs[0]
 		d.total -= old.dur
+		d.totalBytes -= int64(old.bytes)
 		d.segs = d.segs[1:]
 		if old.path != "" {
 			_ = os.Remove(old.path) // best-effort; Close sweeps any that linger

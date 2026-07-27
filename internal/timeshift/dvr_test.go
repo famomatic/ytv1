@@ -237,6 +237,32 @@ func TestDVRDiskBackend(t *testing.T) {
 	}
 }
 
+// TestDVREvictsByBytes verifies the MaxBytes cap bounds the retained window
+// even with a generous duration Window (so a high-bitrate stream can't balloon
+// RAM).
+func TestDVREvictsByBytes(t *testing.T) {
+	// Large time Window, tiny byte cap → eviction is driven by bytes.
+	d := NewDVR(Config{TargetSegmentDuration: 1 * time.Second, Window: time.Hour, MaxBytes: 4096})
+	d.Write(buildTSStream(9))
+	d.Close()
+
+	d.mu.RLock()
+	segs := len(d.segs)
+	bytes := d.totalBytes
+	first := d.segs[0].seq
+	d.mu.RUnlock()
+
+	if bytes > 4096 {
+		t.Fatalf("retained %d bytes, exceeds MaxBytes 4096", bytes)
+	}
+	if first == 0 {
+		t.Fatalf("expected oldest segments evicted by byte cap, still start at seq 0")
+	}
+	if segs == 0 {
+		t.Fatal("evicted everything")
+	}
+}
+
 func readAll(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	var sb strings.Builder

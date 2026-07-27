@@ -19,15 +19,20 @@ import (
 
 // timeshiftEnabled reports whether the agent stream, when served for playback
 // (the detached/resolve path a player opens by URL), is a seekable HLS DVR
-// rather than a single linear MPEG-TS stream. Default on; opt out with
-// YTV1_SOOP_NO_TIMESHIFT=1. A direct download (`-o …`) always uses the linear
-// path regardless, since it wants the raw continuous stream, not HLS.
+// rather than a single linear MPEG-TS stream. OFF by default — opt in with
+// YTV1_SOOP_TIMESHIFT=1. The linear default plays smoothest and lightest: a
+// player buffers one continuous stream (no per-segment cache-refill hitch) and
+// the daemon holds no window in RAM. The DVR adds backward seeking but a live
+// player rides its edge with a small cache (so the retained window is unused
+// for playback), stutters at segment boundaries, and (in memory) the window
+// can grow large on a high-bitrate stream. A direct download (`-o …`) always
+// uses the linear path regardless.
 func timeshiftEnabled() bool {
-	switch os.Getenv("YTV1_SOOP_NO_TIMESHIFT") {
+	switch os.Getenv("YTV1_SOOP_TIMESHIFT") {
 	case "1", "true", "TRUE", "yes":
-		return false
+		return true
 	}
-	return true
+	return false
 }
 
 // dvrConfigFromEnv builds the DVR window/storage config, applying env overrides.
@@ -38,12 +43,18 @@ func timeshiftEnabled() bool {
 // ~6 s response) and stalled playback. Opt into disk spill (for a very long
 // window on a RAM-constrained box) by setting YTV1_TIMESHIFT_DIR to a directory.
 func dvrConfigFromEnv() timeshift.Config {
-	cfg := timeshift.Config{}
+	cfg := timeshift.Config{
+		Window:   90 * time.Second, // shorter default so an in-memory window stays modest
+		MaxBytes: 256 << 20,        // hard RAM cap regardless of bitrate (~256 MB)
+	}
 	if v := envSeconds("YTV1_TIMESHIFT_WINDOW_SECS"); v > 0 {
 		cfg.Window = v
 	}
 	if v := envSeconds("YTV1_TIMESHIFT_SEG_SECS"); v > 0 {
 		cfg.TargetSegmentDuration = v
+	}
+	if mb, err := strconv.Atoi(os.Getenv("YTV1_TIMESHIFT_MAX_MB")); err == nil && mb > 0 {
+		cfg.MaxBytes = int64(mb) << 20
 	}
 	if d := os.Getenv("YTV1_TIMESHIFT_DIR"); d != "" {
 		cfg.Dir = d // explicit opt-in to on-disk segment spill
