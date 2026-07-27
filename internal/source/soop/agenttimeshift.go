@@ -31,8 +31,12 @@ func timeshiftEnabled() bool {
 }
 
 // dvrConfigFromEnv builds the DVR window/storage config, applying env overrides.
-// Segments spill to disk by default (so a long window does not pin the whole
-// stream in RAM); YTV1_TIMESHIFT_MEM=1 keeps them in memory.
+// Segments are kept IN MEMORY by default: a bounded window is only a few hundred
+// MB (2 min of 1440p60 ≈ 300 MB), which is trivial next to the RAM cost of
+// hammering a possibly-slow or busy temp SSD with the per-segment write +
+// read-back + eviction-delete churn — that saturated a budget NVMe (100% active,
+// ~6 s response) and stalled playback. Opt into disk spill (for a very long
+// window on a RAM-constrained box) by setting YTV1_TIMESHIFT_DIR to a directory.
 func dvrConfigFromEnv() timeshift.Config {
 	cfg := timeshift.Config{}
 	if v := envSeconds("YTV1_TIMESHIFT_WINDOW_SECS"); v > 0 {
@@ -41,14 +45,8 @@ func dvrConfigFromEnv() timeshift.Config {
 	if v := envSeconds("YTV1_TIMESHIFT_SEG_SECS"); v > 0 {
 		cfg.TargetSegmentDuration = v
 	}
-	switch os.Getenv("YTV1_TIMESHIFT_MEM") {
-	case "1", "true", "TRUE", "yes":
-		cfg.Dir = "" // in-memory
-	default:
-		cfg.Dir = os.TempDir()
-		if d := os.Getenv("YTV1_TIMESHIFT_DIR"); d != "" {
-			cfg.Dir = d
-		}
+	if d := os.Getenv("YTV1_TIMESHIFT_DIR"); d != "" {
+		cfg.Dir = d // explicit opt-in to on-disk segment spill
 	}
 	return cfg
 }
