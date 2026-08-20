@@ -18,6 +18,16 @@ type FormatInfo struct {
 	Quality      string
 	QualityLabel string
 	SourceClient string
+	// TargetDurationSec > 0 marks a live adaptive format delivered as sq=<n>
+	// fragments. When the video is no longer live, the complete media must be
+	// downloaded fragment-by-fragment (the bare URL serves no data blocks).
+	TargetDurationSec int
+	// Incomplete marks live adaptive HTTPS formats while the stream is live;
+	// their direct URL only contains the stream from the current moment.
+	Incomplete bool
+	// ThisIsLive reports whether the format was extracted from a response in
+	// live playability state.
+	ThisIsLive bool
 	// ContentLength is the expected byte size of the media stream as reported
 	// by YouTube (0 when unknown). Used for post-download integrity checks.
 	ContentLength int64

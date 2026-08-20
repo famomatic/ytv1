@@ -18,6 +18,23 @@ func TestSelectDownloadFormat_ModeBest(t *testing.T) {
 	}
 }
 
+func TestSelectDownloadFormat_PrefersCompleteOverIncompleteLiveAdaptive(t *testing.T) {
+	formats := []FormatInfo{
+		// Same resolution/bitrate, but the live adaptive https format only
+		// exposes the stream from the current moment while live.
+		{Itag: 300, MimeType: "video/mp4", HasVideo: true, HasAudio: true, Height: 720, FPS: 30, Bitrate: 2000000, Protocol: "https", Incomplete: true},
+		{Itag: 96, MimeType: "video/mp4", HasVideo: true, HasAudio: true, Height: 720, FPS: 30, Bitrate: 2000000, Protocol: "https"},
+	}
+
+	got, ok := selectDownloadFormat(formats, DownloadOptions{Mode: SelectionModeBest})
+	if !ok {
+		t.Fatal("selectDownloadFormat() not found")
+	}
+	if got.Itag != 96 {
+		t.Fatalf("best mode selected itag=%d, want complete format 96", got.Itag)
+	}
+}
+
 func TestSelectDownloadFormat_ModeMP4VideoOnly(t *testing.T) {
 	formats := []FormatInfo{
 		{Itag: 137, MimeType: "video/mp4", HasVideo: true, Height: 1080, FPS: 30, Bitrate: 2500000},

@@ -284,6 +284,7 @@ func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innert
 		seenFallback[key] = struct{}{}
 	}
 	appendIfMissing("web_embedded")
+	appendIfMissing("tv_downgraded")
 	appendIfMissing("tv")
 	return out
 }
@@ -291,26 +292,36 @@ func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innert
 func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest, profile innertube.ClientProfile) error {
 	requiredProtocols := make([]innertube.VideoStreamingProtocol, 0, 3)
 	recommendedExists := false
-	for _, protocol := range []innertube.VideoStreamingProtocol{
-		innertube.StreamingProtocolHTTPS,
-		innertube.StreamingProtocolDASH,
-		innertube.StreamingProtocolHLS,
-	} {
-		p := effectivePoTokenFetchPolicy(profile, protocol, e.config.PoTokenFetchPolicy)
-		switch p {
-		case innertube.PoTokenFetchPolicyRequired:
-			requiredProtocols = append(requiredProtocols, protocol)
-		case innertube.PoTokenFetchPolicyRecommended:
-			recommendedExists = true
+	playerRequired := false
+	if profile.PlayerPoTokenPolicy != nil {
+		// Dedicated player-request policy (yt-dlp PLAYER_PO_TOKEN_POLICY):
+		// android/ios/android_vr mark the player request PoT as recommended
+		// only, so GVS requirements must not block the request itself.
+		playerRequired = profile.PlayerPoTokenPolicy.Required
+		recommendedExists = profile.PlayerPoTokenPolicy.Recommended
+	} else {
+		for _, protocol := range []innertube.VideoStreamingProtocol{
+			innertube.StreamingProtocolHTTPS,
+			innertube.StreamingProtocolDASH,
+			innertube.StreamingProtocolHLS,
+		} {
+			p := effectivePoTokenFetchPolicy(profile, protocol, e.config.PoTokenFetchPolicy)
+			switch p {
+			case innertube.PoTokenFetchPolicyRequired:
+				requiredProtocols = append(requiredProtocols, protocol)
+			case innertube.PoTokenFetchPolicyRecommended:
+				recommendedExists = true
+			}
 		}
 	}
 
-	if len(requiredProtocols) == 0 && !recommendedExists {
+	playerRequired = playerRequired || len(requiredProtocols) > 0
+	if !playerRequired && !recommendedExists {
 		return nil
 	}
 
 	if e.config.PoTokenProvider == nil {
-		if len(requiredProtocols) > 0 {
+		if playerRequired {
 			return &PoTokenRequiredError{
 				Client:            profile.Name,
 				Cause:             "provider missing (required by policy)",
@@ -324,7 +335,7 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 
 	token, err := e.config.PoTokenProvider.GetToken(ctx, profile.Name)
 	if err != nil {
-		if len(requiredProtocols) > 0 {
+		if playerRequired {
 			return &PoTokenRequiredError{
 				Client:            profile.Name,
 				Cause:             "provider error: " + err.Error(),
@@ -336,7 +347,7 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 		return nil
 	}
 	if token == "" {
-		if len(requiredProtocols) > 0 {
+		if playerRequired {
 			return &PoTokenRequiredError{
 				Client:            profile.Name,
 				Cause:             "empty token from provider",
@@ -349,7 +360,7 @@ func (e *Engine) applyPoToken(ctx context.Context, req *innertube.PlayerRequest,
 	}
 	cleanToken, err := cleanPoToken(token)
 	if err != nil {
-		if len(requiredProtocols) > 0 {
+		if playerRequired {
 			return &PoTokenRequiredError{
 				Client:            profile.Name,
 				Cause:             "invalid token from provider: " + err.Error(),

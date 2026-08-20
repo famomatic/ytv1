@@ -77,7 +77,14 @@ func pickBest(formats []types.FormatInfo, spec *StreamSpec) (types.FormatInfo, b
 		return types.FormatInfo{}, false
 	}
 
-	sortFormats(candidates)
+	if specPrefersTrackRank(spec) {
+		sortFormats(candidates)
+	} else {
+		// Media-specific specs (bestvideo/bestaudio and their '*' variants)
+		// rank by quality only: a muxed 360p AV must not outrank a 1080p
+		// video-only stream just because it carries audio.
+		sortFormatsByQuality(candidates)
+	}
 
 	// If this spec requests a worst variant (builtin or media-specific),
 	// pick the tail after ranking.
@@ -94,6 +101,15 @@ func wantsWorst(filters []FormatFilter) bool {
 			return true
 		}
 		if flt.Type == "media" && flt.Op == "worst" {
+			return true
+		}
+	}
+	return false
+}
+
+func specPrefersTrackRank(spec *StreamSpec) bool {
+	for _, flt := range spec.Filters {
+		if flt.Type == "builtin" {
 			return true
 		}
 	}
@@ -119,6 +135,12 @@ func matches(f types.FormatInfo, filter *FormatFilter) bool {
 		}
 		if filter.Value == "audio" {
 			return f.HasAudio && !f.HasVideo
+		}
+		if filter.Value == "video_any" {
+			return f.HasVideo
+		}
+		if filter.Value == "audio_any" {
+			return f.HasAudio
 		}
 	case "ext":
 		return formatExt(f) == strings.ToLower(filter.Value)
@@ -164,10 +186,37 @@ func checkOp(a, b int, op string) bool {
 
 func sortFormats(formats []types.FormatInfo) {
 	sort.Slice(formats, func(i, j int) bool {
+		// Complete formats always outrank incomplete ones, mirroring
+		// yt-dlp's preference penalty for live adaptive formats: while a
+		// stream is live, their direct URLs only expose the stream from the
+		// current moment, so complete manifest formats (e.g. HLS) must win.
+		if formats[i].Incomplete != formats[j].Incomplete {
+			return formats[j].Incomplete
+		}
 		if trackRank(formats[i]) != trackRank(formats[j]) {
 			return trackRank(formats[i]) > trackRank(formats[j])
 		}
 		// Descending order
+		resI := formats[i].Height * formats[i].Width
+		resJ := formats[j].Height * formats[j].Width
+		if resI != resJ {
+			return resI > resJ
+		}
+		if formats[i].Bitrate != formats[j].Bitrate {
+			return formats[i].Bitrate > formats[j].Bitrate
+		}
+		if formats[i].FPS != formats[j].FPS {
+			return formats[i].FPS > formats[j].FPS
+		}
+		return formats[i].Itag > formats[j].Itag
+	})
+}
+
+func sortFormatsByQuality(formats []types.FormatInfo) {
+	sort.Slice(formats, func(i, j int) bool {
+		if formats[i].Incomplete != formats[j].Incomplete {
+			return formats[j].Incomplete
+		}
 		resI := formats[i].Height * formats[i].Width
 		resJ := formats[j].Height * formats[j].Width
 		if resI != resJ {

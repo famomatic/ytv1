@@ -180,12 +180,13 @@ func (r *PlayerRequest) SetPoToken(token string) {
 }
 
 func applyClientContextDefaults(client *ClientInfo, profile ClientProfile) {
+	// Mirrors yt-dlp's INNERTUBE_CLIENTS context tables: only clients whose
+	// upstream table defines device/OS context get defaults here. Web-style
+	// clients intentionally send clientName/clientVersion/userAgent only.
 	switch strings.ToUpper(strings.TrimSpace(profile.Name)) {
 	case "ANDROID":
 		client.OsName = "Android"
 		client.OsVersion = "11"
-		client.DeviceMake = "Google"
-		client.DeviceModel = "Pixel 5"
 		client.AndroidSdkVersion = 30
 	case "ANDROID_VR":
 		client.OsName = "Android"
@@ -198,20 +199,10 @@ func applyClientContextDefaults(client *ClientInfo, profile ClientProfile) {
 		client.OsVersion = "18.3.2.22D82"
 		client.DeviceMake = "Apple"
 		client.DeviceModel = "iPhone16,2"
-	case "MWEB":
-		client.OsName = "iOS"
-		client.OsVersion = "16.7.10"
+	case "VISIONOS":
+		client.OsName = "visionOS"
+		client.OsVersion = "26.5.23O471"
 		client.DeviceMake = "Apple"
-		client.DeviceModel = "iPad"
-	case "TVHTML5":
-		client.OsName = "Cobalt"
-		client.OsVersion = "25"
-		client.DeviceMake = "Unknown"
-		client.DeviceModel = "TV"
-	default:
-		client.OsName = "Windows"
-		client.OsVersion = "10.0"
-		client.DeviceMake = "Microsoft"
-		client.DeviceModel = "Desktop"
+		client.DeviceModel = "RealityDevice17,1"
 	}
 }

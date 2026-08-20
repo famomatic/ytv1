@@ -137,11 +137,19 @@ func parseFilter(s string) (*FormatFilter, error) {
 	if s == "bestvideo" || s == "bv" {
 		return &FormatFilter{Type: "media", Value: "video", Op: "best"}, nil
 	}
+	if s == "bestvideo*" || s == "bv*" {
+		// yt-dlp 'bv*' semantics: best format containing video (muxed AV
+		// candidates included), not only strict video-only streams.
+		return &FormatFilter{Type: "media", Value: "video_any", Op: "best"}, nil
+	}
 	if s == "worstvideo" || s == "wv" {
 		return &FormatFilter{Type: "media", Value: "video", Op: "worst"}, nil
 	}
 	if s == "bestaudio" || s == "ba" {
 		return &FormatFilter{Type: "media", Value: "audio", Op: "best"}, nil
+	}
+	if s == "bestaudio*" || s == "ba*" {
+		return &FormatFilter{Type: "media", Value: "audio_any", Op: "best"}, nil
 	}
 	if s == "worstaudio" || s == "wa" {
 		return &FormatFilter{Type: "media", Value: "audio", Op: "worst"}, nil

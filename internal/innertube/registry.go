@@ -16,13 +16,16 @@ func NewRegistry() Registry {
 			"web_creator":         WebCreatorClient,
 			"web_embedded":        WebEmbeddedClient,
 			"web_embedded_player": WebEmbeddedClient,
+			"web_music":           WebMusicClient,
 			"mweb":                MWebClient,
 			"android":             AndroidClient,
 			"android_vr":          AndroidVRClient,
 			"ios":                 iOSClient,
+			"visionos":            VisionOSClient,
 			"tv":                  TVClient,
 			"tvhtml5":             TVClient,
-			"tv_downgraded":       TVClient,
+			"tv_downgraded":       TVDowngradedClient,
+			"tv_simply":           TVSimplyClient,
 		},
 	}
 }

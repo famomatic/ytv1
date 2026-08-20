@@ -118,6 +118,21 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return nil, err
 	}
 
+	// stdout cannot receive a merged pair; stream the best single format
+	// (the default selector's final /best fallback) so `-o -` always emits
+	// media bytes (e.g. live HLS muxed formats for piping into a player).
+	if options.OutputPath == "-" && len(selected) > 1 {
+		single, singleErr := SelectFormatsForDownloadOptions(formats, DownloadOptions{
+			Itag:           options.Itag,
+			Mode:           options.Mode,
+			FormatSelector: "best",
+		})
+		if singleErr == nil && len(single) == 1 {
+			c.warnf("merge selection cannot stream to stdout; streaming best single format")
+			selected = single
+		}
+	}
+
 	// Do not silently downgrade separate best video+audio selections to a
 	// lower progressive stream just because local merge support is unavailable.
 	if len(selected) > 1 && (c.config.Muxer == nil || !c.config.Muxer.Available()) {
@@ -523,6 +538,10 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 			return c.hlsStreamTo(ctx, videoID, playlistURLs, os.Stdout, "-", f)
 		case f.Protocol == "dash" || strings.HasSuffix(streamURL, ".mpd"):
 			return c.dashStreamTo(ctx, videoID, streamURL, os.Stdout, "-", f)
+		case f.TargetDurationSec > 0 && !f.ThisIsLive:
+			// Ended live streams serve no data on the bare URL; enumerate
+			// sq=<n> fragments to pipe the complete media.
+			return c.liveAdaptiveStreamTo(ctx, videoID, streamURL, os.Stdout, "-", f)
 		default:
 			return c.streamToWriter(ctx, videoID, streamURL, f, os.Stdout)
 		}
@@ -540,6 +559,10 @@ func (c *Client) downloadStream(ctx context.Context, videoID, streamURL, outputP
 	}
 	if f.Protocol == "dash" || strings.HasSuffix(streamURL, ".mpd") {
 		_, err := c.downloadDASH(ctx, videoID, streamURL, outputPath, f, usePartFiles)
+		return err
+	}
+	if f.TargetDurationSec > 0 && !f.ThisIsLive {
+		_, err := c.downloadLiveAdaptive(ctx, videoID, streamURL, outputPath, f, usePartFiles)
 		return err
 	}
 	_, err := downloadURLToPathWithHeadersAndPartProgress(
@@ -2204,6 +2227,82 @@ func (c *Client) downloadDASH(ctx context.Context, videoID, streamURL, outputPat
 	}
 
 	downloadErr := c.dashStreamTo(ctx, videoID, streamURL, f, outputPath, format)
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if downloadErr != nil {
+		return nil, downloadErr
+	}
+	if syncErr != nil {
+		return nil, syncErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if usePartFile {
+		if err := retryFileAccess(ctx, c.config.DownloadTransport, func() error {
+			return renameFile(writePath, outputPath)
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	info, err := os.Stat(outputPath)
+	size := int64(0)
+	if err == nil {
+		size = info.Size()
+	}
+
+	return &DownloadResult{
+		VideoID:    videoID,
+		Itag:       format.Itag,
+		OutputPath: outputPath,
+		Bytes:      size,
+	}, nil
+}
+
+// liveAdaptiveStreamTo downloads a completed live adaptive format as ordered
+// sq=<n> fragments and writes the media to dst. It is the shared core of the
+// file-backed downloadLiveAdaptive and the `-o -` stdout path.
+func (c *Client) liveAdaptiveStreamTo(ctx context.Context, videoID, baseURL string, dst io.Writer, progressPath string, format FormatInfo) error {
+	headers := c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, format.SourceClient))
+	transport := downloader.TransportConfig{
+		MaxRetries:                  c.config.DownloadTransport.MaxRetries,
+		InitialBackoff:              c.config.DownloadTransport.InitialBackoff,
+		MaxBackoff:                  c.config.DownloadTransport.MaxBackoff,
+		RetryStatusCodes:            append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+		SkipUnavailableFragments:    c.config.DownloadTransport.SkipUnavailableFragments,
+		MaxSkippedFragments:         c.config.DownloadTransport.MaxSkippedFragments,
+		ThrottledRateBytesPerSecond: c.config.DownloadTransport.ThrottledRateBytesPerSecond,
+		ThrottledRateMinDuration:    c.config.DownloadTransport.ThrottledRateMinDuration,
+	}
+	dl := downloader.NewLiveAdaptiveDownloader(c.config.HTTPClient, baseURL).
+		WithRequestHeaders(headers).
+		WithTransportConfig(transport)
+
+	reporter := newDownloadProgressReporter(c.config.OnDownloadProgress, videoID, progressPath, format.Itag, inferProgressPart(progressPath))
+	if reporter != nil {
+		dst = &progressCountingWriter{w: dst, rep: reporter}
+	}
+	downloadErr := dl.Download(ctx, dst)
+	reporter.finish()
+	return downloadErr
+}
+
+func (c *Client) downloadLiveAdaptive(ctx context.Context, videoID, baseURL, outputPath string, format FormatInfo, usePartFile bool) (*DownloadResult, error) {
+	writePath := outputPath
+	if usePartFile {
+		writePath += ".part"
+	}
+	var f *os.File
+	if err := retryFileAccess(ctx, c.config.DownloadTransport, func() error {
+		var err error
+		f, err = createFile(writePath)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+
+	downloadErr := c.liveAdaptiveStreamTo(ctx, videoID, baseURL, f, outputPath, format)
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if downloadErr != nil {
