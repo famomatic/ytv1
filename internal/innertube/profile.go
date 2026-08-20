@@ -20,6 +20,14 @@ type PoTokenPolicy struct {
 	NotRequiredWithPlayerToken bool
 }
 
+// PlayerPoTokenPolicy mirrors yt-dlp's PLAYER_PO_TOKEN_POLICY: the PoT policy
+// for the /player API request itself, independent of GVS streaming policies.
+// A nil value means the player request policy is derived from the GVS map.
+type PlayerPoTokenPolicy struct {
+	Required    bool
+	Recommended bool
+}
+
 // PoTokenFetchPolicy controls how strictly POT fetching is enforced.
 type PoTokenFetchPolicy string
 
@@ -49,6 +57,10 @@ type ClientProfile struct {
 
 	// PoTokenPolicy map keyed by protocol (https, dash, hls).
 	PoTokenPolicy map[VideoStreamingProtocol]PoTokenPolicy
+
+	// PlayerPoTokenPolicy overrides the GVS-derived policy for player API
+	// requests (e.g. android/ios mark it recommended-only upstream).
+	PlayerPoTokenPolicy *PlayerPoTokenPolicy
 }
 
 type Registry interface {

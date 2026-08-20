@@ -41,6 +41,9 @@ func FormatSummary(format FormatInfo) string {
 		resolution = fmt.Sprintf("%dx%d", format.Width, format.Height)
 	}
 	note := FormatTrackNote(format)
+	if format.Incomplete {
+		note = strings.TrimSpace(note + " incomplete")
+	}
 	if note == "" {
 		return fmt.Sprintf("%d - %s %s", format.Itag, ext, resolution)
 	}

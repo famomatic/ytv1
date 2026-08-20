@@ -18,7 +18,7 @@ func TestDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
 		profiles[1].ID,
 		profiles[2].ID,
 	}
-	want := []string{"android_vr", "web_safari", "ios"}
+	want := []string{"visionos", "web", "ios"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("order[%d] = %q, want %q", i, got[i], want[i])
@@ -68,11 +68,11 @@ func TestSkipClientsAreExcluded(t *testing.T) {
 func TestAuthenticatedDefaultOrderMatchesYTDLPStylePriority(t *testing.T) {
 	s := NewSelector(innertube.NewRegistry(), nil, nil, true)
 	profiles := s.Select("jNQXAC9IVRw")
-	if len(profiles) != 2 {
-		t.Fatalf("expected 2 profiles, got %d", len(profiles))
+	if len(profiles) != 3 {
+		t.Fatalf("expected 3 profiles, got %d", len(profiles))
 	}
-	got := []string{profiles[0].ID, profiles[1].ID}
-	want := []string{"tv_downgraded", "web_safari"}
+	got := []string{profiles[0].ID, profiles[1].ID, profiles[2].ID}
+	want := []string{"web_embedded", "tv_downgraded", "web"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("order[%d] = %q, want %q", i, got[i], want[i])

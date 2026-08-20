@@ -33,15 +33,22 @@ type Format struct {
 	ProjectionType   string
 	AverageBitrate   int
 	ThisIsLive       bool
-	Protocol         string // "https", "dash", "hls", "unknown"
-	HasAudio         bool
-	HasVideo         bool
-	Ciphered         bool
-	IsDRM            bool
-	IsDamaged        bool
-	SignatureCipher  string
-	Cipher           string
-	SourceClient     string
+	// TargetDurationSec mirrors YouTube's targetDurationSec on live adaptive
+	// formats (0 for regular bounded formats).
+	TargetDurationSec int
+	// Incomplete marks live adaptive HTTPS formats observed while the stream
+	// is still live: their direct URL only exposes the stream from now on, so
+	// complete manifest formats (e.g. HLS) are preferred while live.
+	Incomplete      bool
+	Protocol        string // "https", "dash", "hls", "unknown"
+	HasAudio        bool
+	HasVideo        bool
+	Ciphered        bool
+	IsDRM           bool
+	IsDamaged       bool
+	SignatureCipher string
+	Cipher          string
+	SourceClient    string
 }
 
 type Range struct {
@@ -62,37 +69,39 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 		for _, f := range raw {
 			container, codecs := parseMimeDetails(f.MimeType)
 			parsed := Format{
-				Itag:             f.Itag,
-				URL:              f.URL,
-				MimeType:         f.MimeType,
-				Container:        container,
-				Codecs:           codecs,
-				Bitrate:          f.Bitrate,
-				Width:            f.Width,
-				Height:           f.Height,
-				FPS:              f.FPS,
-				Quality:          f.Quality,
-				QualityLabel:     f.QualityLabel,
-				AudioQuality:     f.AudioQuality,
-				AudioChannels:    f.AudioChannels,
-				LastModified:     f.LastModified,
-				ProjectionType:   f.ProjectionType,
-				AverageBitrate:   f.AverageBitrate,
-				ThisIsLive:       isLive,
-				Protocol:         deriveProtocol(f),
-				SignatureCipher:  f.SignatureCipher,
-				Cipher:           f.Cipher,
-				IsDRM:            len(f.DRMFamilies) > 0,
-				SourceClient:     firstNonEmpty(f.SourceClient, resp.SourceClient),
-				AudioSampleRate:  parseInt(f.AudioSampleRate),
-				ApproxDurationMs: parseInt64(f.ApproxDurationMs),
-				ContentLength:    parseInt64(f.ContentLength),
-				InitRange:        parseRange(f.InitRange),
-				IndexRange:       parseRange(f.IndexRange),
+				Itag:              f.Itag,
+				URL:               f.URL,
+				MimeType:          f.MimeType,
+				Container:         container,
+				Codecs:            codecs,
+				Bitrate:           f.Bitrate,
+				Width:             f.Width,
+				Height:            f.Height,
+				FPS:               f.FPS,
+				Quality:           f.Quality,
+				QualityLabel:      f.QualityLabel,
+				AudioQuality:      f.AudioQuality,
+				AudioChannels:     f.AudioChannels,
+				LastModified:      f.LastModified,
+				ProjectionType:    f.ProjectionType,
+				AverageBitrate:    f.AverageBitrate,
+				ThisIsLive:        isLive,
+				TargetDurationSec: f.TargetDurationSec,
+				Protocol:          deriveProtocol(f),
+				SignatureCipher:   f.SignatureCipher,
+				Cipher:            f.Cipher,
+				IsDRM:             len(f.DRMFamilies) > 0,
+				SourceClient:      firstNonEmpty(f.SourceClient, resp.SourceClient),
+				AudioSampleRate:   parseInt(f.AudioSampleRate),
+				ApproxDurationMs:  parseInt64(f.ApproxDurationMs),
+				ContentLength:     parseInt64(f.ContentLength),
+				InitRange:         parseRange(f.InitRange),
+				IndexRange:        parseRange(f.IndexRange),
 			}
 
 			parsed.Ciphered = parsed.URL == "" && (parsed.SignatureCipher != "" || parsed.Cipher != "")
 			parsed.IsDamaged = strings.TrimSpace(parsed.URL) == "" && !hasCipherURL(f)
+			parsed.Incomplete = isLive && f.TargetDurationSec > 0 && parsed.Protocol == "https"
 			parsed.HasAudio, parsed.HasVideo = deriveMediaFlags(parsed, adaptive)
 
 			formats = append(formats, parsed)

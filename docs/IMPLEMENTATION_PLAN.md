@@ -40,6 +40,7 @@
 - `2026-07-14` (B147 session cache expiration fix)
 - `2026-07-18` (B150 multi-source architecture + SOOP support)
 - `2026-07-26` (SOOP live muxer migrated to puremux MPEG-TS backend)
+- `2026-08-20` (B151 yt-dlp 2026.08.19 upstream sync)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -358,6 +359,10 @@
 146. `[x]` B145. Concurrency, resource-safety, and edge-case hardening pass (owned HTTP transport isolation, RLock session cache read path with atomic LRU tracking, HLS EXT-X-MAP per-segment init rewrite on rotation, downloadAndMerge same-itag intermediate path collision guard, challenge cache TTL semantics aligned with session cache, sanitizeOutputToken Windows reserved-name and trailing-dot handling)
 147. `[x]` B146. OpenStream context deadline leak fix (media GET request bound to the metadata-timeout context, so RequestTimeout deadline aborts caller body reads)
 148. `[x]` B147. Session cache expiration fix (default SessionCacheTTL + URL expire-param validation so stale googlevideo URLs are refreshed instead of serving 403)
+149. `[x]` B151. yt-dlp reference refresh to upstream master `2026.08.19` (local `D:\yt-dlp` checkout update)
+150. `[x]` B152. Innertube client table sync from yt-dlp 2026.08.19 (2026.07 client versions, `visionos` client, `web_embedded` profile fix, `tv_downgraded` profile, `android_vr` GVS/player POT policies)
+151. `[x]` B153. Default client chain re-architecture (remove `android_vr` from defaults per upstream 2026-08-18, add `visionos` as lead unauthenticated client)
+152. `[x]` B154. Live adaptive formats parity (yt-dlp live adaptive `incomplete` formats and fragment generation fixes)
 
 ---
 
@@ -2620,6 +2625,79 @@ CI, so real-site verification is a manual follow-up.
 
 ---
 
+### B151. yt-dlp Reference Refresh to 2026.08.19 `[x]`
+
+**Goal.** Bring the local `D:\yt-dlp` reference checkout up to upstream
+master `2026.08.19` (`3a08beaf0`) so subsequent drift ports compare against
+current behavior instead of the stale 2026-07-09 snapshot.
+
+**Result.** Fast-forward merge `59d9ae606..3a08beaf0`; notable YouTube changes
+landed since the previous snapshot: player client maintenance (2026-07-20),
+live adaptive fragments fix (#17262), `web_embedded` client fallbacks (#17462),
+and removal of `android_vr` from default clients (#17461, all formats 403
+since 2026-08-17 with version 1.65.10).
+
+### B152. Innertube Client Table Sync from yt-dlp 2026.08.19 `[x]`
+
+**Goal.** Port the full `INNERTUBE_CLIENTS` table drift into
+`internal/innertube`.
+
+**Changes.** Updated `web`/`web_safari`/`web_embedded`/`web_music`/
+`web_creator`/`mweb`/`android`/`ios`/`tv` versions to the 2026.07 upstream
+values; added `visionos` (client 101, JS-less, no GVS PoT policy), a real
+`tv_downgraded` profile (TVHTML5 5.20260707, Cobalt/Version UA, cookies, no
+forced auth), `web_music` (WEB_REMIX) and `tv_simply` (TVHTML5_SIMPLY);
+added upstream `android_vr` GVS PoT policies plus the dedicated
+`PlayerPoTokenPolicy` concept (`PLAYER_PO_TOKEN_POLICY`) for
+`android`/`ios`/`android_vr` so GVS requirements no longer block their player
+API requests; aligned `applyClientContextDefaults` with the upstream context
+tables (removed fabricated Windows/Pixel/iPad/Cobalt device fields; added
+VISIONOS device context); registered all new clients and aliases.
+
+**Tests.** `internal/innertube/clients_test.go` pins the version table to
+the 2026.08.19 snapshot, visionos profile shape, android_vr policies, and
+registry entries; request tests cover the trimmed device contexts.
+
+### B153. Default Client Chain Re-architecture `[x]`
+
+**Goal.** Match upstream 2026.08.19 default client selection after the
+`android_vr` removal.
+
+**Changes.** Unauthenticated default order is now `visionos, web, ios`
+(upstream: `visionos, web`; iOS retained as the package's high-quality direct
+media fallback); authenticated default order is now `web_embedded,
+tv_downgraded, web` (upstream `_DEFAULT_AUTHED_CLIENTS`). The orchestrator
+fallback phase now appends `tv_downgraded` after `web_embedded`, mirroring the
+upstream made-for-kids fallback pair. `android_vr` remains explicitly
+selectable via `ClientOverrides` but is documented as fully 403'd upstream
+since 2026-08-17.
+
+**Tests.** Selector tests pin both default orders; engine tests remain green.
+
+### B154. Live Adaptive Formats Parity `[x]`
+
+**Goal.** Port yt-dlp's live adaptive format semantics (#15937, #16771,
+#17262): recognition of `targetDurationSec` formats, incomplete-format
+preference handling, and complete post-live downloads via `sq=<n>` fragments.
+
+**Changes.** `innertube.Format` now parses `targetDurationSec`;
+`formats.Parse` marks live adaptive HTTPS formats as `Incomplete` while the
+stream is live; format selection deprioritizes incomplete formats (so complete
+manifest formats like HLS win while live) and `-F`/`--get-format` summaries
+annotate them as `incomplete`. Post-live (ended) live adaptive formats are
+downloaded by the new `internal/downloader.LiveAdaptiveDownloader`: it reads
+`X-Head-Seqnum` from the bare URL (the body serves no data blocks for ended
+streams) and fetches fragments `sq=0..lastSeq-2` sequentially with the shared
+retry/transport config, wired into both file and `-o -` download paths.
+Currently-live streams keep the existing direct-stream behavior (upstream also
+only generates fragments for `--live-from-start`, which ytv1 does not expose).
+
+**Tests.** Downloader tests cover fragment order and the missing-header error;
+parser tests cover incomplete marking; selection tests prove the complete
+format wins over an equal-quality incomplete one.
+
+---
+
 ## 4. Public API Contract
 
 1. Preserve `client.New`, `GetVideo`, `GetFormats`, `ResolveStreamURL` behavior.
@@ -2897,6 +2975,16 @@ Cycle B is complete only when all are true:
 - `2026-07-13`: Completed `B146` by splitting `OpenStream`'s context into a timeout-bounded `metaCtx` (for `GetFormats`/`resolveSelectedFormatURL`) and a deadline-free cancel-only `streamCtx` (for the media GET request), so `RequestTimeout` no longer aborts caller body reads with `context.DeadlineExceeded`; `streamCancel` is invoked explicitly on every error path and ownership transfers to `streamBody.Close()` on success; added `streamCtxForMediaRequest` helper and a context-aware regression test (`ctxAwareStreamingBody`) that reproduces the pre-fix failure (`context canceled`) when the media GET is bound to `metaCtx`; verified with `go build ./...`, `go vet ./...`, and `go test ./...`.
 
 - `2026-07-14`: Completed `B147` by defaulting `SessionCacheTTL` to `6h` (matching YouTube's googlevideo URL lifetime) when unset instead of never expiring, adding `effectiveSessionCacheTTL` so a zero config value applies the default and a negative value opts out of local TTL aging, adding `sessionURLsExpired` to parse each cached format URL's `expire` query param (UNIX timestamp) and invalidate the session when the earliest URL expiry passes (with a 30s safety margin to avoid in-flight races), wiring URL-expire validation into both `getSession` read paths and `evictExpiredLocked` so server-side URL expiry is always honored regardless of TTL config, updating the `Config.SessionCacheTTL` doc comment, and adding regression tests for default TTL expiration, URL-expire invalidation, safety margin, and negative-value opt-out; verified with `go build ./...`, `go vet ./...`, and `go test ./...`.
+
+- `2026-08-20`: Completed `B151` by fast-forwarding the local `D:\yt-dlp` reference checkout from `59d9ae606` (2026-07-09) to upstream master `3a08beaf0` (Release 2026.08.19).
+
+- `2026-08-20`: Completed `B152` by porting the full yt-dlp 2026.08.19 `INNERTUBE_CLIENTS` table into `internal/innertube`: 2026.07 client versions across web/web_safari/web_embedded/web_music/web_creator/mweb/android/ios/tv, new `visionos` (client 101) / `tv_downgraded` (real TVHTML5 5.20260707 profile) / `web_music` / `tv_simply` profiles, upstream `android_vr` GVS PoT policies plus the new `PlayerPoTokenPolicy` field mirroring `PLAYER_PO_TOKEN_POLICY` for android/ios/android_vr (player requests are recommended-only, not GVS-blocked), and upstream-parity `applyClientContextDefaults` (fabricated Windows/Pixel/iPad/Cobalt device contexts removed, VISIONOS added); version-table parity pinned by `internal/innertube/clients_test.go`; verified with `go test ./...`.
+
+- `2026-08-20`: Completed `B153` by moving default unauthenticated extraction to `visionos, web, ios` and authenticated to `web_embedded, tv_downgraded, web` (upstream 2026.08.19 defaults with iOS retained as the package's direct-media fallback), appending `tv_downgraded` to the orchestrator fallback phase after `web_embedded` for the upstream made-for-kids fallback pair, and documenting that `android_vr` was removed upstream from all defaults on 2026-08-18 because all its formats 403 since 2026-08-17 (still selectable via `ClientOverrides`); selector tests pin both orders; verified with `go test ./...`.
+
+- `2026-08-20`: Completed `B154` by parsing `targetDurationSec`, marking live adaptive HTTPS formats `Incomplete` while a stream is live, deprioritizing incomplete formats in selection so complete HLS/manifest formats win, annotating them `incomplete` in format summaries, and adding `internal/downloader.LiveAdaptiveDownloader` for complete post-live downloads (`X-Head-Seqnum` discovery on the bare URL plus sequential `sq=0..lastSeq-2` fragment fetch, wired into file and `-o -` paths); downloader/parser/selection regression tests added; live streams keep direct-stream behavior (upstream generates fragments only for `--live-from-start`, not exposed by ytv1); verified with `go vet ./...` and `go test ./...`.
+
+- `2026-08-21`: Completed the `B154` live verification follow-up against live stream `IuMqEC-vDAM` (오선의 미국 증시 라이브): three defects found and fixed. (1) `ParseHLSManifest` misclassified codecless `EXT-X-MEDIA TYPE=AUDIO` renditions (itag 233/234) as 0x0 video-only because the mime fallback is `video/mp4`; audio renditions without CODECS now default to `audio/mp4` with audio-only flags. (2) The default selector `bestvideo+bestaudio/best` could not pick a muxed live HLS format for the video slot, and `sortFormats` lacked the incomplete penalty, so the default selection chose incomplete live adaptive HTTPS (299+140) instead of yt-dlp's `312+234`; added `bestvideo*`/`bv*` (and `bestaudio*`/`ba*`) selector syntax admitting muxed candidates, media-specific specs now rank by quality only (a 360p AV no longer outranks 1080p video-only), `sortFormats` applies a complete-over-incomplete top-penalty, and the default selector is now `bestvideo*+bestaudio/best` (yt-dlp parity). (3) `Download` with `-o -` entered the file-backed merge path for merged selections (writing `-.mp4.f312.video` intermediates); stdout downloads now fall back to the best single format so media bytes always reach stdout. Verified end-to-end: `--get-format` now matches yt-dlp exactly (`312 + 234`), and a 15-second `-o -` probe captured ~13 MB starting with the MPEG-TS sync byte `0x47`.
 
 ---
 

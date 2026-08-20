@@ -93,6 +93,56 @@ func TestParse_NormalizesFormatsDeterministically(t *testing.T) {
 	}
 }
 
+func TestParse_MarksLiveAdaptiveFormatsIncomplete(t *testing.T) {
+	live := &innertube.PlayerResponse{
+		PlayabilityStatus: innertube.PlayabilityStatus{
+			Status: "OK",
+			LiveStreamability: &innertube.LiveStreamability{
+				LiveStreamabilityRenderer: innertube.LiveStreamabilityRenderer{
+					VideoId: "live-video",
+				},
+			},
+		},
+		StreamingData: innertube.StreamingData{
+			AdaptiveFormats: []innertube.Format{
+				{
+					Itag:              300,
+					URL:               "https://example.com/live.mp4",
+					MimeType:          `video/mp4; codecs="avc1.4d401f"`,
+					TargetDurationSec: 5,
+				},
+				{
+					Itag:     251,
+					URL:      "https://example.com/audio.webm",
+					MimeType: `audio/webm; codecs="opus"`,
+				},
+			},
+		},
+	}
+
+	out := Parse(live)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 formats, got %d", len(out))
+	}
+	var liveAdaptive, regular *Format
+	for i := range out {
+		if out[i].Itag == 300 {
+			liveAdaptive = &out[i]
+		} else {
+			regular = &out[i]
+		}
+	}
+	if liveAdaptive == nil || regular == nil {
+		t.Fatalf("expected formats itag 300 and 251, got %+v", out)
+	}
+	if !liveAdaptive.ThisIsLive || liveAdaptive.TargetDurationSec != 5 || !liveAdaptive.Incomplete {
+		t.Fatalf("live adaptive flags drift: %+v", liveAdaptive)
+	}
+	if !regular.ThisIsLive || regular.Incomplete {
+		t.Fatalf("regular live format must not be incomplete: %+v", regular)
+	}
+}
+
 func TestParse_MissingAndInvalidFields(t *testing.T) {
 	resp := &innertube.PlayerResponse{
 		StreamingData: innertube.StreamingData{

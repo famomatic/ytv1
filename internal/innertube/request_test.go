@@ -5,8 +5,11 @@ import "testing"
 func TestNewPlayerRequestAndroidContext(t *testing.T) {
 	req := NewPlayerRequest(AndroidClient, "jNQXAC9IVRw")
 	c := req.Context.Client
-	if c.OsName != "Android" || c.DeviceModel == "" || c.AndroidSdkVersion == 0 {
+	if c.OsName != "Android" || c.OsVersion != "11" || c.AndroidSdkVersion != 30 {
 		t.Fatalf("unexpected android context: %+v", c)
+	}
+	if c.DeviceMake != "" || c.DeviceModel != "" {
+		t.Fatalf("android context must not claim a device model (upstream parity): %+v", c)
 	}
 }
 
@@ -40,11 +43,24 @@ func TestNewPlayerRequestEmbeddedContext(t *testing.T) {
 	}
 }
 
-func TestNewPlayerRequestTVContext(t *testing.T) {
-	req := NewPlayerRequest(TVClient, "jNQXAC9IVRw")
+func TestNewPlayerRequestVisionOSContext(t *testing.T) {
+	req := NewPlayerRequest(VisionOSClient, "jNQXAC9IVRw")
 	c := req.Context.Client
-	if c.OsName != "Cobalt" {
-		t.Fatalf("expected Cobalt OS for TV client, got %q", c.OsName)
+	if c.OsName != "visionOS" || c.OsVersion != "26.5.23O471" {
+		t.Fatalf("unexpected visionos os context: %+v", c)
+	}
+	if c.DeviceMake != "Apple" || c.DeviceModel != "RealityDevice17,1" {
+		t.Fatalf("unexpected visionos device context: %+v", c)
+	}
+}
+
+func TestNewPlayerRequestWebClientsHaveNoDeviceContext(t *testing.T) {
+	for _, p := range []ClientProfile{WebClient, TVClient, MWebClient} {
+		req := NewPlayerRequest(p, "jNQXAC9IVRw")
+		c := req.Context.Client
+		if c.OsName != "" || c.DeviceMake != "" || c.DeviceModel != "" || c.AndroidSdkVersion != 0 {
+			t.Fatalf("client %q must not send device/os context (upstream parity): %+v", p.ID, c)
+		}
 	}
 }
 

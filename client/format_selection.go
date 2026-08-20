@@ -66,7 +66,9 @@ func defaultFormatSelector(options DownloadOptions) string {
 	case SelectionModeMP4AV:
 		return "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
 	default:
-		return "bestvideo+bestaudio/best"
+		// Mirrors yt-dlp's default: 'bv*' admits muxed AV candidates for the
+		// video slot (e.g. live HLS combined formats).
+		return "bestvideo*+bestaudio/best"
 	}
 }
 

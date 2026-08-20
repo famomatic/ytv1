@@ -84,6 +84,12 @@ func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
 				Bitrate:  parseInt(attrs["BANDWIDTH"]),
 				Protocol: "hls",
 			}
+			// YouTube's demuxed audio renditions often omit CODECS; without
+			// this override the mime fallback ("video/mp4") would classify the
+			// audio track as a 0x0 video-only format.
+			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(f.MimeType)), "audio/") {
+				f.MimeType = "audio/mp4"
+			}
 			if channels := parseInt(attrs["CHANNELS"]); channels > 0 {
 				f.AudioChannels = channels
 			}
