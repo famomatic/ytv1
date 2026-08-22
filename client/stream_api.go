@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+
+	"github.com/famomatic/ytv1/internal/downloader"
+	"github.com/famomatic/ytv1/internal/source"
 )
 
 // StreamOptions controls format selection for stream-first APIs.
@@ -27,6 +30,14 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	defer metaCancel()
 
 	streamCtx, streamCancel := streamCtxForMediaRequest(ctx)
+
+	// Non-YouTube sources (e.g. SOOP) are dispatched before the YouTube path.
+	// Unlike GetVideo/Download which already do this, OpenStream was missing
+	// source dispatch, so calling OpenStream with a SOOP URL would fail at
+	// normalizeVideoID with "unsupported host".
+	if src := c.matchSource(input); src != nil {
+		return c.openStreamViaSource(ctx, src, input, options, streamCancel)
+	}
 
 	videoID, err := normalizeVideoID(input)
 	if err != nil {
@@ -95,6 +106,104 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	// caller's read. Each error path above calls streamCancel() explicitly;
 	// the success path transfers ownership to streamBody.Close().
 	return &streamBody{rc: resp.Body, cancel: streamCancel}, chosen, nil
+}
+
+// openStreamViaSource opens a readable stream from a non-YouTube source.
+// SOOP VODs are HLS multi-part streams; we stream them via the HLS downloader
+// piped through a pipe, so the caller gets a unified io.ReadCloser.
+func (c *Client) openStreamViaSource(ctx context.Context, src source.Source, input string, options StreamOptions, streamCancel func()) (io.ReadCloser, FormatInfo, error) {
+	// Reuse cached extraction if available (GetVideo may have already run).
+	var info *VideoInfo
+	if s, ok := c.getSession(sourceInputKey(src.Name(), input)); ok && s.Info != nil {
+		info = cloneVideoInfo(s.Info)
+	} else {
+		media, err := src.Extract(ctx, input)
+		if err != nil {
+			streamCancel()
+			return nil, FormatInfo{}, err
+		}
+		if media == nil || len(media.Formats) == 0 {
+			streamCancel()
+			return nil, FormatInfo{}, ErrNoPlayableFormats
+		}
+		info = mediaToVideoInfo(media)
+		c.cacheSourceSession(src.Name(), input, info, media.MediaHeaders)
+	}
+
+	// Select audio-only format
+	audioCandidates := make([]FormatInfo, 0, len(info.Formats))
+	for _, f := range info.Formats {
+		if f.HasAudio && !f.HasVideo {
+			audioCandidates = append(audioCandidates, f)
+		}
+	}
+	if len(audioCandidates) == 0 {
+		// Fall back to any format with audio
+		for _, f := range info.Formats {
+			if f.HasAudio {
+				audioCandidates = append(audioCandidates, f)
+			}
+		}
+	}
+	if len(audioCandidates) == 0 {
+		streamCancel()
+		return nil, FormatInfo{}, ErrNoPlayableFormats
+	}
+
+	chosen := audioCandidates[0]
+	// Pick the highest bitrate for audio-only
+	for _, f := range audioCandidates[1:] {
+		if f.Bitrate > chosen.Bitrate {
+			chosen = f
+		}
+	}
+
+	// HLS stream: pipe through the HLS downloader
+	pr, pw := io.Pipe()
+
+	// Build media headers from source session
+	headers := c.applySourceMediaHeaders(sourceSessionKey(src.Name(), info.ID), nil)
+
+	playlistURLs := chosen.Parts
+	if len(playlistURLs) == 0 {
+		playlistURLs = []string{chosen.URL}
+	}
+
+	go func() {
+		// streamCancel is owned by the caller; we close pw on exit which
+		// signals EOF/error to the reader side.
+		defer streamCancel()
+		defer pw.Close()
+
+		transport := downloader.TransportConfig{
+			MaxRetries:               c.config.DownloadTransport.MaxRetries,
+			InitialBackoff:           c.config.DownloadTransport.InitialBackoff,
+			MaxBackoff:               c.config.DownloadTransport.MaxBackoff,
+			RetryStatusCodes:         append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+			SkipUnavailableFragments: c.config.DownloadTransport.SkipUnavailableFragments,
+			MaxSkippedFragments:      c.config.DownloadTransport.MaxSkippedFragments,
+		}
+
+		var lastErr error
+		for _, url := range playlistURLs {
+			dl := downloader.NewHLSDownloader(c.config.HTTPClient, url).
+				WithRequestHeaders(headers).
+				WithTransportConfig(transport)
+			if err := dl.Download(ctx, pw); err != nil {
+				lastErr = err
+				break
+			}
+		}
+		if lastErr != nil {
+			pw.CloseWithError(lastErr)
+		}
+	}()
+
+	streamBody := &streamBody{rc: pr, cancel: func() {
+		pr.Close()
+		streamCancel()
+	}}
+	return streamBody, chosen, nil
 }
 
 // streamCtxForMediaRequest returns a cancel-only context derived from the
