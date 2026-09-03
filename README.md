@@ -44,9 +44,10 @@ stderr).
 ## Requirements
 
 -   Go: `1.23+` (see `go.mod`)
--   External tool: `ffmpeg` is optional. Merging WebM (VP8/VP9/AV1 + Opus) video+audio streams is handled by the pure-Go [`puremux`](https://github.com/famomatic/puremux) muxer with no binary dependency.
-    -   `ffmpeg` is still required for MP4/MKV output with non-WebM codecs, metadata embedding (`--embed-metadata`), and MP3 transcoding.
-    -   If `ffmpeg` is not available on `PATH` and the selected formats require it, those flows fail; direct single-stream and WebM-pair downloads still work.
+-   External tool: `ffmpeg` is optional. [`puremux` v0.1.0](https://github.com/famomatic/puremux) is the primary merge backend: its media API demuxes WebM/Matroska, MP4/fMP4, Ogg, MPEG-TS, MP3, ADTS, and FLAC inputs, and compatible streams are packet-remuxed to WebM/MKV or MPEG-TS without decoding.
+    -   MPEG-TS output uses pure-Go AVCC/HVCC-to-Annex-B and raw-AAC-to-ADTS framing conversion.
+    -   `ffmpeg` remains the automatic fallback for MP4 output, unsupported container/codec combinations, metadata embedding (`--embed-metadata`), puremux parse/write failures, and MP3 transcoding.
+    -   If `ffmpeg` is not available on `PATH` and the selected formats require the fallback, those flows fail; direct single-stream and puremux-compatible merges still work.
 
 ## Why ytv1
 

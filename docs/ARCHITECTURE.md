@@ -16,6 +16,24 @@
 - `internal/challenge/*`: challenge inventory and solver interfaces.
 - `internal/formats/*`: direct + manifest format normalization and expansion.
 - `internal/downloader/*`: segmented and retry-aware media transfer internals.
+- `internal/muxer/*`: puremux v0.1 compressed-packet remuxing and FFmpeg compatibility fallback.
+
+## Merge pipeline
+
+1. Downloaded video and audio intermediates are opened through puremux v0.1's
+   `media.Demuxer`, which probes the container and exposes streams, codec
+   configuration, exact time bases, and compressed packets.
+2. The requested video/audio streams are selected deterministically and their
+   packets are interleaved by decode timestamp into a puremux `Session`.
+3. WebM/MKV-compatible payloads remain opaque. MPEG-TS output applies only
+   framing transforms: AVCC/HVCC to Annex-B and raw AAC plus ASC to ADTS.
+4. MP4 output, metadata embedding, unsupported codec/container pairs, and any
+   puremux parse/write error are delegated to the configured FFmpeg muxer.
+   A failed pure-Go attempt removes its partial output before fallback.
+
+Neither backend owns the downloaded intermediates until it succeeds, so a
+fallback can retry the same files. The pure-Go path never decodes audio or
+video samples.
 
 ## Event pipeline
 

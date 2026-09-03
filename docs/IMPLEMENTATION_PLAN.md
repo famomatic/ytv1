@@ -41,6 +41,7 @@
 - `2026-07-18` (B150 multi-source architecture + SOOP support)
 - `2026-07-26` (SOOP live muxer migrated to puremux MPEG-TS backend)
 - `2026-08-20` (B151 yt-dlp 2026.08.19 upstream sync)
+- `2026-09-04` (B155 puremux v0.1.0 media-demux remux integration)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -209,6 +210,7 @@
 - B144 completion increment landed: silent download truncation prevention across the full download pipeline. `copyWithDownloadConfig` now verifies the copied byte count against the server-advertised Content-Length (and range size for partial requests), mapping short reads to a typed `ErrTruncatedDownload`; `downloadURLChunked` now tracks per-chunk completion and refuses to return success when context cancellation leaves zero-filled gaps; `downloadSegmentBatchConcurrent` (DASH) now rejects empty segment bodies and surfaces context errors instead of silently writing gaps; DASH `r=-1` in static manifests is now expanded from `mediaPresentationDuration` (ported from yt-dlp) instead of generating a single segment; `downloadStream` performs a post-download file-size integrity check against the format's `ContentLength`; and `downloadAndMerge` guards against empty intermediate files before merging. New `TruncatedDownloadError` type and `ErrorCategoryTruncatedDownload` classification added. Covered by reproduction tests for premature EOF, chunked cancellation, chunked-transfer short reads, DASH r=-1 static/dynamic expansion, and empty DASH segment rejection.
 
 - SOOP live muxer migration landed (2026-07-26): the hand-rolled MPEG-TS muxer (`internal/source/soop/ts.go`) is replaced by puremux's live TS backend (`puremux.NewSession` + `ContainerMPEGTS` + `WriteVideo`/`WriteADTS`). puremux's preprocessor now absorbs the agent's startup pathologies — the backfill burst's out-of-order and duplicated chunk timestamps that produced `mpegts: DTS out of order` / mpv `Invalid video timestamp` — via a 400ms reorder jitter buffer plus `MinMonotonicStep=1ms` duplicate separation, and enforces keyframe-first start with A/V sync alignment. Slice-less video chunks (bare SPS/PPS/SEI) are held and prepended to the next slice-bearing AU so the aligner cannot drop parameter sets. Source 2.56 GHz chunk ticks convert exactly to `time.Duration` (× 25/64). Requires puremux ≥ v0.0.5 (local `go.work` until tagged); `go build`/`vet`/`test ./...` green.
+- B155 landed (2026-09-04): ytv1 now consumes tagged puremux v0.1.0 and its public media demux/bitstream APIs for the primary merge path. Local WebM/Matroska, MP4/fMP4, Ogg, MPEG-TS, MP3, ADTS, and FLAC inputs are probed by content; selected compressed video/audio packets retain exact source time bases and are interleaved into WebM/MKV/MPEG-TS sessions. TS output converts AVCC/HVCC to Annex-B and ASC-described raw AAC to ADTS. MP4 output, metadata, incompatible codecs, malformed inputs, and write failures fall back to FFmpeg after partial-output cleanup.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -363,6 +365,7 @@
 150. `[x]` B152. Innertube client table sync from yt-dlp 2026.08.19 (2026.07 client versions, `visionos` client, `web_embedded` profile fix, `tv_downgraded` profile, `android_vr` GVS/player POT policies)
 151. `[x]` B153. Default client chain re-architecture (remove `android_vr` from defaults per upstream 2026-08-18, add `visionos` as lead unauthenticated client)
 152. `[x]` B154. Live adaptive formats parity (yt-dlp live adaptive `incomplete` formats and fragment generation fixes)
+153. `[x]` B155. puremux v0.1.0 media-demux remux integration with FFmpeg fallback
 
 ---
 
@@ -2696,6 +2699,28 @@ only generates fragments for `--live-from-start`, which ytv1 does not expose).
 parser tests cover incomplete marking; selection tests prove the complete
 format wins over an equal-quality incomplete one.
 
+### B155. puremux v0.1.0 Media Remux Integration `[x]`
+
+**Goal.** Move ytv1's primary pure-Go merge path from the legacy
+`puremux.Merge` facade to the v0.1.0 `media.Demuxer` packet API, while keeping
+FFmpeg as the compatibility fallback for unsupported output/codec/metadata
+requests and parse/write failures.
+
+**Changes.** Upgraded the module dependency to v0.1.0; demux local
+WebM/Matroska, MP4/fMP4, Ogg, MPEG-TS, MP3, ADTS, and FLAC inputs through
+`pkg/media`; select the requested video/audio streams deterministically;
+interleave exact-timestamp packets into the existing puremux Session writer;
+and use v0.1.0 H.264/HEVC/AAC bitstream helpers for MPEG-TS output framing.
+Partial outputs must be removed before invoking FFmpeg, and input
+intermediates remain owned until either backend succeeds.
+
+**Verification.** Unit coverage pins v0.1 demux use for a CRC-valid Ogg/Opus
+input, spec-derived AVCC/ASC bytes converted to Annex-B/ADTS and round-tripped
+through MPEG-TS, dOps-to-OpusHead endianness/mapping plus truncation boundaries,
+and deterministic FFmpeg fallback on media parse failure. `CGO_ENABLED=0 go
+build ./...`, `go vet ./...`, `go test ./... -count=1`, `git diff --check`, and
+`go mod tidy -diff` are green.
+
 ---
 
 ## 4. Public API Contract
@@ -2985,6 +3010,7 @@ Cycle B is complete only when all are true:
 - `2026-08-20`: Completed `B154` by parsing `targetDurationSec`, marking live adaptive HTTPS formats `Incomplete` while a stream is live, deprioritizing incomplete formats in selection so complete HLS/manifest formats win, annotating them `incomplete` in format summaries, and adding `internal/downloader.LiveAdaptiveDownloader` for complete post-live downloads (`X-Head-Seqnum` discovery on the bare URL plus sequential `sq=0..lastSeq-2` fragment fetch, wired into file and `-o -` paths); downloader/parser/selection regression tests added; live streams keep direct-stream behavior (upstream generates fragments only for `--live-from-start`, not exposed by ytv1); verified with `go vet ./...` and `go test ./...`.
 
 - `2026-08-21`: Completed the `B154` live verification follow-up against live stream `IuMqEC-vDAM` (오선의 미국 증시 라이브): three defects found and fixed. (1) `ParseHLSManifest` misclassified codecless `EXT-X-MEDIA TYPE=AUDIO` renditions (itag 233/234) as 0x0 video-only because the mime fallback is `video/mp4`; audio renditions without CODECS now default to `audio/mp4` with audio-only flags. (2) The default selector `bestvideo+bestaudio/best` could not pick a muxed live HLS format for the video slot, and `sortFormats` lacked the incomplete penalty, so the default selection chose incomplete live adaptive HTTPS (299+140) instead of yt-dlp's `312+234`; added `bestvideo*`/`bv*` (and `bestaudio*`/`ba*`) selector syntax admitting muxed candidates, media-specific specs now rank by quality only (a 360p AV no longer outranks 1080p video-only), `sortFormats` applies a complete-over-incomplete top-penalty, and the default selector is now `bestvideo*+bestaudio/best` (yt-dlp parity). (3) `Download` with `-o -` entered the file-backed merge path for merged selections (writing `-.mp4.f312.video` intermediates); stdout downloads now fall back to the best single format so media bytes always reach stdout. Verified end-to-end: `--get-format` now matches yt-dlp exactly (`312 + 234`), and a 15-second `-o -` probe captured ~13 MB starting with the MPEG-TS sync byte `0x47`.
+- `2026-09-04`: Completed `B155` by upgrading to puremux v0.1.0 and replacing the legacy path-only `puremux.Merge` call with content-probed `media.Demuxer` inputs, deterministic video/audio stream selection, exact-time-base packet interleaving, dOps-to-OpusHead configuration translation, and pure-Go AVCC/HVCC/ASC framing for MPEG-TS output. FFmpeg remains the fallback for unsupported output/codec/metadata and all puremux parse/write failures; failed pure-Go attempts remove partial output without consuming intermediates. Added Ogg/Opus-to-WebM, AVCC+ASC-to-TS round-trip, dOps boundary, and parse-fallback regressions; verified with non-CGO build, full vet/tests, diff check, and tidy check.
 
 ---
 

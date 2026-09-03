@@ -1568,9 +1568,9 @@ func ToClientConfig(opts Options) (client.Config, error) {
 	}
 	cfg.DownloadTransport.SkipUnavailableFragments = opts.SkipUnavailableFragments
 
-	// Muxer: puremux (pure Go; reads WebM/MKV/MP4 input, writes WebM/MKV) is
-	// the primary muxer. FFmpeg handles MP4 output, metadata embedding, and
-	// any puremux failure; FFmpegLocation/postprocessor-args configure it.
+	// Muxer: puremux v0.1 media demux + packet remux is the primary path for
+	// compatible WebM/MKV/MPEG-TS output. FFmpeg handles MP4 output, metadata,
+	// unsupported combinations, and puremux failures.
 	ffmpegFallback := muxer.NewFFmpegMuxerWithExtraArgs(opts.FFmpegLocation, ffmpegMergerPostprocessorArgs(opts.PostprocessorArgs))
 	cfg.Muxer = muxer.NewPureMuxMuxer(ffmpegFallback)
 

@@ -1,7 +1,6 @@
 // Package muxer provides media container muxers. FFmpegMuxer shells out to
-// the ffmpeg binary; PureMuxMuxer performs pure-Go container remuxing via the
-// github.com/famomatic/puremux/pkg/puremux package and falls back to FFmpeg
-// for cases it cannot handle (MP4 output, metadata embedding, unsupported codecs).
+// the ffmpeg binary; PureMuxMuxer performs pure-Go packet demuxing/remuxing
+// through puremux v0.1 and falls back to FFmpeg for unsupported cases.
 package muxer
 
 import (
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/famomatic/puremux/pkg/media"
 	puremux "github.com/famomatic/puremux/pkg/puremux"
 	"github.com/famomatic/ytv1/internal/types"
 )
@@ -20,13 +20,15 @@ var pureMuxUnsupportedSentinels = []error{
 	puremux.ErrUnsupportedInput,
 	puremux.ErrUnsupportedOutput,
 	puremux.ErrIncompatible,
+	media.ErrUnsupportedFormat,
+	media.ErrUnsupportedCodec,
 }
 
 // PureMuxMuxer merges video and audio files using the pure-Go puremux
 // pipeline. It is always Available() (no external binary required) for
-// WebM/MKV output from WebM/MKV/MP4 inputs. MP4 output, metadata-embedding
-// requests, and puremux failures are routed to the optional Fallback Muxer
-// (typically *FFmpegMuxer) when present.
+// supported WebM/MKV/MPEG-TS output. MP4 output, metadata-embedding requests,
+// unsupported codec combinations, and puremux failures are routed to the
+// optional Fallback Muxer (typically *FFmpegMuxer) when present.
 type PureMuxMuxer struct {
 	// Fallback handles cases puremux cannot mux (e.g. MP4 output, metadata
 	// embedding) or when puremux fails. May be nil; when nil, Merge returns
@@ -55,9 +57,10 @@ func (m *PureMuxMuxer) Available() bool {
 	return true
 }
 
-// Merge merges videoPath and audioPath into outputPath. WebM/MKV output from
-// WebM/MKV/MP4 inputs is remuxed through puremux; MP4 output and
-// metadata-embed requests fall back to Fallback when configured.
+// Merge merges videoPath and audioPath into outputPath. The v0.1 media API
+// probes and demuxes each input, then compressed packets are interleaved into
+// a puremux Session. Unsupported cases and any failed pure-Go attempt fall
+// back to Fallback when configured.
 func (m *PureMuxMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPath string, meta types.Metadata) error {
 	if err := validateFilePath(videoPath, "video"); err != nil {
 		return err
@@ -80,7 +83,7 @@ func (m *PureMuxMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPa
 		cfg = puremux.DefaultConfig()
 	}
 
-	err := puremux.Merge(ctx, []string{videoPath, audioPath}, outputPath, cfg)
+	err := remuxMediaFiles(ctx, videoPath, audioPath, outputPath, cfg)
 	if err == nil {
 		// Clean up intermediates on success, matching FFmpegMuxer.Merge.
 		_ = os.Remove(videoPath)
