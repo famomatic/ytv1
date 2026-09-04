@@ -68,6 +68,24 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	if len(filteredFormats) > 0 {
 		formats = filteredFormats
 	}
+	selected, selectErr := SelectFormatsForDownloadOptions(formats, DownloadOptions{
+		Itag: options.Itag,
+		Mode: options.Mode,
+	})
+	if selectErr == nil {
+		if videoFormat, audioFormat, ok := hlsMergeFormats(selected); ok {
+			pr, pw := io.Pipe()
+			go func() {
+				err := c.muxHLSStreamsTo(streamCtx, videoID, videoFormat, audioFormat, pw, "-")
+				if err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+				_ = pw.Close()
+			}()
+			return &streamBody{rc: pr, cancel: streamCancel}, mergedHLSOutputFormat(videoFormat, audioFormat), nil
+		}
+	}
 
 	chosen, ok := selectDownloadFormat(formats, DownloadOptions{
 		Itag: options.Itag,
@@ -106,6 +124,18 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	// caller's read. Each error path above calls streamCancel() explicitly;
 	// the success path transfers ownership to streamBody.Close().
 	return &streamBody{rc: resp.Body, cancel: streamCancel}, chosen, nil
+}
+
+func mergedHLSOutputFormat(video, audio FormatInfo) FormatInfo {
+	output := video
+	output.Protocol = "mpegts"
+	output.MimeType = "video/mp2t"
+	output.HasAudio = true
+	output.HasVideo = true
+	output.Bitrate += audio.Bitrate
+	output.ContentLength = 0
+	output.Parts = nil
+	return output
 }
 
 // openStreamViaSource opens a readable stream from a non-YouTube source.

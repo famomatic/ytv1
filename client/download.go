@@ -18,15 +18,17 @@ import (
 	"time"
 
 	"github.com/famomatic/ytv1/internal/downloader"
+	internalmuxer "github.com/famomatic/ytv1/internal/muxer"
 	"github.com/famomatic/ytv1/internal/source"
 	"github.com/famomatic/ytv1/internal/types"
 )
 
 var (
-	createFile = os.Create
-	openFile   = os.OpenFile
-	removeFile = os.Remove
-	renameFile = os.Rename
+	createFile        = os.Create
+	openFile          = os.OpenFile
+	removeFile        = os.Remove
+	renameFile        = os.Rename
+	muxLiveHLSStreams = internalmuxer.MuxHLSStreams
 )
 
 // DownloadOptions controls stream download behavior.
@@ -118,10 +120,21 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return nil, err
 	}
 
-	// stdout cannot receive a merged pair; stream the best single format
-	// (the default selector's final /best fallback) so `-o -` always emits
-	// media bytes (e.g. live HLS muxed formats for piping into a player).
+	// Separate YouTube live HLS renditions can be packet-muxed directly to
+	// stdout. This preserves the selected audio track while still emitting a
+	// single media byte stream suitable for a player pipe.
 	if options.OutputPath == "-" && len(selected) > 1 {
+		if videoFormat, audioFormat, ok := hlsMergeFormats(selected); ok {
+			written := &countingWriter{w: os.Stdout}
+			err := c.muxHLSStreamsTo(ctx, videoID, videoFormat, audioFormat, written, "-")
+			if err != nil {
+				return nil, err
+			}
+			return &DownloadResult{VideoID: videoID, Itag: videoFormat.Itag, OutputPath: "-", Bytes: written.n}, nil
+		}
+
+		// Other protocol pairs still need a seekable/file-backed merge. Preserve
+		// the prior single-format fallback for those callers.
 		single, singleErr := SelectFormatsForDownloadOptions(formats, DownloadOptions{
 			Itag:           options.Itag,
 			Mode:           options.Mode,
@@ -154,6 +167,83 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return c.downloadFallbackSingleWithRefresh(ctx, videoID, info.Title, info.Author, formats, options.OutputPath, options)
 	}
 	return res, err
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	return n, err
+}
+
+func hlsMergeFormats(selected []FormatInfo) (FormatInfo, FormatInfo, bool) {
+	if len(selected) != 2 {
+		return FormatInfo{}, FormatInfo{}, false
+	}
+	var (
+		video, audio       FormatInfo
+		hasVideo, hasAudio bool
+	)
+	for _, format := range selected {
+		if format.HasVideo && !hasVideo {
+			video = format
+			hasVideo = true
+		}
+		if format.HasAudio && !format.HasVideo && !hasAudio {
+			audio = format
+			hasAudio = true
+		}
+	}
+	if !hasVideo || !hasAudio || !isHLSFormat(video) || !isHLSFormat(audio) {
+		return FormatInfo{}, FormatInfo{}, false
+	}
+	return video, audio, true
+}
+
+func isHLSFormat(format FormatInfo) bool {
+	return strings.EqualFold(strings.TrimSpace(format.Protocol), "hls") || strings.HasSuffix(strings.ToLower(format.URL), ".m3u8")
+}
+
+func (c *Client) muxHLSStreamsTo(ctx context.Context, videoID string, video, audio FormatInfo, dst io.Writer, progressPath string) error {
+	videoURL, err := c.resolveSelectedFormatURL(ctx, videoID, video)
+	if err != nil {
+		return err
+	}
+	audioURL, err := c.resolveSelectedFormatURL(ctx, videoID, audio)
+	if err != nil {
+		return err
+	}
+	transport := downloader.TransportConfig{
+		MaxRetries:                  c.config.DownloadTransport.MaxRetries,
+		InitialBackoff:              c.config.DownloadTransport.InitialBackoff,
+		MaxBackoff:                  c.config.DownloadTransport.MaxBackoff,
+		RetryStatusCodes:            append([]int(nil), c.config.DownloadTransport.RetryStatusCodes...),
+		SkipUnavailableFragments:    c.config.DownloadTransport.SkipUnavailableFragments,
+		MaxSkippedFragments:         c.config.DownloadTransport.MaxSkippedFragments,
+		ThrottledRateBytesPerSecond: c.config.DownloadTransport.ThrottledRateBytesPerSecond,
+		ThrottledRateMinDuration:    c.config.DownloadTransport.ThrottledRateMinDuration,
+	}
+	reporter := newDownloadProgressReporter(c.config.OnDownloadProgress, videoID, progressPath, video.Itag, inferProgressPart(progressPath))
+	if reporter != nil {
+		dst = &progressCountingWriter{w: dst, rep: reporter}
+	}
+	err = muxLiveHLSStreams(ctx,
+		internalmuxer.HLSStreamInput{
+			URL: videoURL, Client: c.httpClient(), Transport: transport,
+			Headers: c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, video.SourceClient)),
+		},
+		internalmuxer.HLSStreamInput{
+			URL: audioURL, Client: c.httpClient(), Transport: transport,
+			Headers: c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, audio.SourceClient)),
+		},
+		dst,
+	)
+	reporter.finish()
+	return err
 }
 
 // downloadViaSource extracts through a non-YouTube source and downloads the

@@ -90,7 +90,31 @@ hls_playlist/itag/312/playlist/index.m3u8
 	if !strings.HasPrefix(audio.MimeType, "audio/") {
 		t.Fatalf("audio rendition mime = %q, want audio/*", audio.MimeType)
 	}
-	if !video.HasAudio || !video.HasVideo || video.Height != 1080 || video.FPS != 60 {
+	if video.HasAudio || !video.HasVideo || video.Height != 1080 || video.FPS != 60 {
 		t.Fatalf("video variant misclassified: %+v", video)
+	}
+	if strings.Contains(strings.ToLower(video.MimeType), "mp4a") {
+		t.Fatalf("external audio codec leaked into video MIME: %q", video.MimeType)
+	}
+}
+
+func TestParseHLSManifest_CodeclessVariantWithAudioGroupRemainsMuxed(t *testing.T) {
+	raw := `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=640x360,AUDIO="aud"
+video/itag/230/index.m3u8
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Default",URI="audio/itag/234/index.m3u8"
+`
+	out, err := ParseHLSManifest(raw, "https://example.test/master.m3u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var video Format
+	for _, f := range out {
+		if f.Itag == 230 {
+			video = f
+		}
+	}
+	if !video.HasAudio || !video.HasVideo {
+		t.Fatalf("codecless complete variant flags = audio:%v video:%v, want AV", video.HasAudio, video.HasVideo)
 	}
 }

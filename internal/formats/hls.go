@@ -55,6 +55,26 @@ func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
 		return nil, nil
 	}
 
+	// EXT-X-STREAM-INF may precede or follow the EXT-X-MEDIA declaration it
+	// references. Collect URI-backed audio groups first so a variant whose
+	// CODECS attribute lists both its video codec and the external rendition's
+	// audio codec is not mistaken for an internally muxed AV stream.
+	audioGroups := make(map[string]bool)
+	groupScanner := bufio.NewScanner(strings.NewReader(raw))
+	for groupScanner.Scan() {
+		line := strings.TrimSpace(groupScanner.Text())
+		if !strings.HasPrefix(line, "#EXT-X-MEDIA:") {
+			continue
+		}
+		attrs := ParseM3U8Attrs(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+		if strings.EqualFold(attrs["TYPE"], "AUDIO") && strings.TrimSpace(attrs["URI"]) != "" {
+			audioGroups[attrs["GROUP-ID"]] = true
+		}
+	}
+	if err := groupScanner.Err(); err != nil {
+		return nil, err
+	}
+
 	formats := make([]Format, 0, 16)
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	var pendingStreamAttrs map[string]string
@@ -126,7 +146,18 @@ func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
 			f.Codecs = codecs
 		}
 		f.HasAudio, f.HasVideo = deriveMediaFlags(f, true)
-		if strings.TrimSpace(pendingStreamAttrs["CODECS"]) == "" {
+		codecsRaw := strings.TrimSpace(pendingStreamAttrs["CODECS"])
+		audioGroup := strings.TrimSpace(pendingStreamAttrs["AUDIO"])
+		if codecsRaw != "" && audioGroups[audioGroup] && f.HasVideo {
+			// RFC 8216 requires CODECS to describe codecs used by referenced
+			// rendition groups as well as the variant itself. YouTube therefore
+			// lists mp4a here even though the selected itag contains video only;
+			// the AAC packets live in the URI-backed EXT-X-MEDIA rendition.
+			videoCodecs := filterM3U8Codecs(codecsRaw, true)
+			f.MimeType = inferMimeFromM3U8Codecs(videoCodecs)
+			f.Codecs = extractCodecsFromMime(f.MimeType)
+			f.HasAudio, f.HasVideo = false, true
+		} else if codecsRaw == "" {
 			// A master-playlist variant with no CODECS attribute is a muxed
 			// audio+video rendition by HLS convention. Without this, the
 			// inferred "video/mp4" mime marks it video-only and it is wrongly
@@ -261,6 +292,23 @@ func inferMimeFromM3U8Codecs(codecsRaw string) string {
 	default:
 		return "video/mp4"
 	}
+}
+
+func filterM3U8Codecs(codecsRaw string, video bool) string {
+	filtered := make([]string, 0, 2)
+	for _, codec := range strings.Split(codecsRaw, ",") {
+		codec = strings.TrimSpace(codec)
+		lc := strings.ToLower(codec)
+		isVideo := strings.HasPrefix(lc, "avc1") || strings.HasPrefix(lc, "av01") ||
+			strings.HasPrefix(lc, "vp9") || strings.HasPrefix(lc, "vp09") ||
+			strings.HasPrefix(lc, "hev1") || strings.HasPrefix(lc, "hvc1")
+		isAudio := strings.HasPrefix(lc, "mp4a") || strings.HasPrefix(lc, "opus") ||
+			strings.HasPrefix(lc, "aac")
+		if (video && isVideo) || (!video && isAudio) {
+			filtered = append(filtered, codec)
+		}
+	}
+	return strings.Join(filtered, ",")
 }
 
 func extractCodecsFromMime(mimeType string) []string {

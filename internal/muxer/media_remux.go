@@ -23,6 +23,8 @@ type mediaRemuxInput struct {
 	stream  media.Stream
 	trackID int
 	private []byte
+	pending *media.Packet
+	offset  time.Duration
 
 	h264 *h264.Configuration
 	hevc *hevc.Configuration
@@ -216,7 +218,7 @@ func remuxMediaPackets(ctx context.Context, session *puremux.Session, inputs []*
 			if packet == nil {
 				continue
 			}
-			stamp, err := packetDecodeTime(packet, inputs[i].stream)
+			stamp, err := packetDecodeTime(packet, inputs[i])
 			if err != nil {
 				return err
 			}
@@ -230,7 +232,7 @@ func remuxMediaPackets(ctx context.Context, session *puremux.Session, inputs []*
 
 		input := inputs[pick]
 		packet := current[pick]
-		pts, dts, err := packetTimes(packet, input.stream)
+		pts, dts, err := packetTimes(packet, input)
 		if err != nil {
 			return err
 		}
@@ -269,6 +271,11 @@ func remuxMediaPackets(ctx context.Context, session *puremux.Session, inputs []*
 }
 
 func readSelectedPacket(ctx context.Context, input *mediaRemuxInput) (*media.Packet, error) {
+	if input.pending != nil {
+		packet := input.pending
+		input.pending = nil
+		return packet, nil
+	}
 	for {
 		packet, err := input.demuxer.ReadPacket(ctx)
 		if err != nil {
@@ -281,7 +288,7 @@ func readSelectedPacket(ctx context.Context, input *mediaRemuxInput) (*media.Pac
 	}
 }
 
-func packetDecodeTime(packet *media.Packet, stream media.Stream) (time.Duration, error) {
+func packetDecodeTime(packet *media.Packet, input *mediaRemuxInput) (time.Duration, error) {
 	stamp := packet.DTS
 	if !stamp.Valid {
 		stamp = packet.PTS
@@ -289,15 +296,15 @@ func packetDecodeTime(packet *media.Packet, stream media.Stream) (time.Duration,
 	if !stamp.Valid {
 		return 0, errors.New("puremux: packet has neither DTS nor PTS")
 	}
-	value, ok := stamp.Duration(stream.TimeBase)
+	value, ok := stamp.Duration(input.stream.TimeBase)
 	if !ok {
 		return 0, errors.New("puremux: packet timestamp cannot be represented as duration")
 	}
-	return value, nil
+	return value + input.offset, nil
 }
 
-func packetTimes(packet *media.Packet, stream media.Stream) (time.Duration, time.Duration, error) {
-	dts, err := packetDecodeTime(packet, stream)
+func packetTimes(packet *media.Packet, input *mediaRemuxInput) (time.Duration, time.Duration, error) {
+	dts, err := packetDecodeTime(packet, input)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -305,11 +312,11 @@ func packetTimes(packet *media.Packet, stream media.Stream) (time.Duration, time
 	if !stamp.Valid {
 		stamp = packet.DTS
 	}
-	pts, ok := stamp.Duration(stream.TimeBase)
+	pts, ok := stamp.Duration(input.stream.TimeBase)
 	if !ok {
 		return 0, 0, errors.New("puremux: packet PTS cannot be represented as duration")
 	}
-	return pts, dts, nil
+	return pts + input.offset, dts, nil
 }
 
 func (input *mediaRemuxInput) packetData(packet *media.Packet) ([]byte, error) {
