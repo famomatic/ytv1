@@ -43,6 +43,7 @@
 - `2026-08-20` (B151 yt-dlp 2026.08.19 upstream sync)
 - `2026-09-04` (B155 puremux v0.1.0 media-demux remux integration)
 - `2026-09-04` (B156 YouTube live demuxed HLS audio playback fix)
+- `2026-09-04` (B157 puremux v0.1.1 dependency refresh)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -213,6 +214,7 @@
 - SOOP live muxer migration landed (2026-07-26): the hand-rolled MPEG-TS muxer (`internal/source/soop/ts.go`) is replaced by puremux's live TS backend (`puremux.NewSession` + `ContainerMPEGTS` + `WriteVideo`/`WriteADTS`). puremux's preprocessor now absorbs the agent's startup pathologies — the backfill burst's out-of-order and duplicated chunk timestamps that produced `mpegts: DTS out of order` / mpv `Invalid video timestamp` — via a 400ms reorder jitter buffer plus `MinMonotonicStep=1ms` duplicate separation, and enforces keyframe-first start with A/V sync alignment. Slice-less video chunks (bare SPS/PPS/SEI) are held and prepended to the next slice-bearing AU so the aligner cannot drop parameter sets. Source 2.56 GHz chunk ticks convert exactly to `time.Duration` (× 25/64). Requires puremux ≥ v0.0.5 (local `go.work` until tagged); `go build`/`vet`/`test ./...` green.
 - B155 landed (2026-09-04): ytv1 now consumes tagged puremux v0.1.0 and its public media demux/bitstream APIs for the primary merge path. Local WebM/Matroska, MP4/fMP4, Ogg, MPEG-TS, MP3, ADTS, and FLAC inputs are probed by content; selected compressed video/audio packets retain exact source time bases and are interleaved into WebM/MKV/MPEG-TS sessions. TS output converts AVCC/HVCC to Annex-B and ASC-described raw AAC to ADTS. MP4 output, metadata, incompatible codecs, malformed inputs, and write failures fall back to FFmpeg after partial-output cleanup.
 - B156 landed (2026-09-04): URI-backed HLS audio rendition groups are now classified as external audio instead of being inferred from the variant's aggregate CODECS list. `OpenStream` and `Download(..., OutputPath: "-")` retain the selected demuxed audio rendition and combine sequence-aligned video/audio segments into one live MPEG-TS stream in pure Go, starting near the live edge and handling YouTube's ID3-prefixed ADTS audio.
+- B157 landed (2026-09-04): the primary merge backend dependency and documented runtime requirement are updated from puremux v0.1.0 to v0.1.1 with the full package regression suite and vet remaining green.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -369,6 +371,7 @@
 152. `[x]` B154. Live adaptive formats parity (yt-dlp live adaptive `incomplete` formats and fragment generation fixes)
 153. `[x]` B155. puremux v0.1.0 media-demux remux integration with FFmpeg fallback
 154. `[x]` B156. YouTube live HLS audio-group classification and real-time merged playback for stdout/OpenStream
+155. `[x]` B157. puremux v0.1.1 dependency refresh and regression verification
 
 ---
 
@@ -2749,6 +2752,17 @@ against YouTube live ID `rFZHOHl-L8A` and content-probed at least 1 MiB from
 both `OpenStream` and `Download(..., OutputPath: "-")` as MPEG-TS containing
 H.264 video and AAC audio.
 
+### B157. puremux v0.1.1 Dependency Refresh `[x]`
+
+**Goal.** Consume the puremux v0.1.1 maintenance release without changing
+ytv1's public API or muxing policy.
+
+**Changes.** Updated the module requirement and checksum from puremux v0.1.0
+to v0.1.1 and synchronized the README runtime dependency note.
+
+**Verification.** `go mod tidy`, `go vet ./...`, and
+`go test ./... -count=1` are green.
+
 ---
 
 ## 4. Public API Contract
@@ -3040,6 +3054,7 @@ Cycle B is complete only when all are true:
 - `2026-08-21`: Completed the `B154` live verification follow-up against live stream `IuMqEC-vDAM` (오선의 미국 증시 라이브): three defects found and fixed. (1) `ParseHLSManifest` misclassified codecless `EXT-X-MEDIA TYPE=AUDIO` renditions (itag 233/234) as 0x0 video-only because the mime fallback is `video/mp4`; audio renditions without CODECS now default to `audio/mp4` with audio-only flags. (2) The default selector `bestvideo+bestaudio/best` could not pick a muxed live HLS format for the video slot, and `sortFormats` lacked the incomplete penalty, so the default selection chose incomplete live adaptive HTTPS (299+140) instead of yt-dlp's `312+234`; added `bestvideo*`/`bv*` (and `bestaudio*`/`ba*`) selector syntax admitting muxed candidates, media-specific specs now rank by quality only (a 360p AV no longer outranks 1080p video-only), `sortFormats` applies a complete-over-incomplete top-penalty, and the default selector is now `bestvideo*+bestaudio/best` (yt-dlp parity). (3) `Download` with `-o -` entered the file-backed merge path for merged selections (writing `-.mp4.f312.video` intermediates); stdout downloads now fall back to the best single format so media bytes always reach stdout. Verified end-to-end: `--get-format` now matches yt-dlp exactly (`312 + 234`), and a 15-second `-o -` probe captured ~13 MB starting with the MPEG-TS sync byte `0x47`.
 - `2026-09-04`: Completed `B155` by upgrading to puremux v0.1.0 and replacing the legacy path-only `puremux.Merge` call with content-probed `media.Demuxer` inputs, deterministic video/audio stream selection, exact-time-base packet interleaving, dOps-to-OpusHead configuration translation, and pure-Go AVCC/HVCC/ASC framing for MPEG-TS output. FFmpeg remains the fallback for unsupported output/codec/metadata and all puremux parse/write failures; failed pure-Go attempts remove partial output without consuming intermediates. Added Ogg/Opus-to-WebM, AVCC+ASC-to-TS round-trip, dOps boundary, and parse-fallback regressions; verified with non-CGO build, full vet/tests, diff check, and tidy check.
 - `2026-09-04`: Completed `B156` by correcting URI-backed HLS audio-group classification, retaining separate best video+audio selections in `OpenStream` and stdout downloads, and adding a pure-Go live MPEG-TS packet mux path with media-sequence alignment, live-edge startup, timestamp normalization, fMP4 initialization reuse, and YouTube ID3-prefixed ADTS handling. Added parser/downloader/muxer/client regressions and a live-gated dual-path content probe; verified against live ID `rFZHOHl-L8A` plus full vet/tests.
+- `2026-09-04`: Completed `B157` by upgrading the primary merge backend from puremux v0.1.0 to v0.1.1, tidying module checksums, synchronizing README requirements, and verifying the full test suite plus vet.
 
 ---
 
