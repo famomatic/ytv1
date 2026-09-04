@@ -46,6 +46,7 @@
 - `2026-09-04` (B157 puremux v0.1.1 dependency refresh)
 - `2026-09-04` (B158 ytv1 v0.2.7 patch release)
 - `2026-09-05` (B159 puremux v0.2.1 media API migration and FFmpeg dependency reduction)
+- `2026-09-05` (B160 ytv1 v0.2.8 patch release)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -219,6 +220,7 @@
 - B157 landed (2026-09-04): the primary merge backend dependency and documented runtime requirement are updated from puremux v0.1.0 to v0.1.1 with the full package regression suite and vet remaining green.
 - B158 landed (2026-09-04): ytv1 advances from v0.2.6 to the v0.2.7 patch release, containing the puremux v0.1 media remux integration, YouTube live demuxed-HLS audio fix, and puremux v0.1.1 dependency refresh.
 - B159 landed (2026-09-05): migrated the removed puremux compatibility facade to v0.2.1 `pkg/media`, added selected-track native progressive MP4/WebM/MKV/MPEG-TS remuxing with exact timestamp ordering and recoverable destination replacement, moved YouTube demuxed HLS and SOOP live output to `media.LiveMuxer`, and narrowed FFmpeg to transcoding, metadata, and unsupported/failure fallback cases.
+- B160 landed (2026-09-05): ytv1 advances from v0.2.7 to the v0.2.8 patch release, containing the puremux v0.2.1 media API migration, native progressive MP4 remuxing, and expanded FFmpeg-free live and file mux paths.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -378,6 +380,7 @@
 155. `[x]` B157. puremux v0.1.1 dependency refresh and regression verification
 156. `[x]` B158. ytv1 v0.2.7 patch release
 157. `[x]` B159. puremux v0.2.1 media API migration and FFmpeg dependency reduction
+158. `[x]` B160. ytv1 v0.2.8 patch release
 
 ---
 
@@ -2806,6 +2809,20 @@ and updated WebM integration fixtures are covered by regressions.
 `CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./... -count=1`,
 `git diff --check`, and `go mod tidy -diff` are green.
 
+### B160. ytv1 v0.2.8 Patch Release `[x]`
+
+**Goal.** Advance the latest ytv1 release version by one patch from v0.2.7 to
+v0.2.8 after the B159 puremux v0.2.1 migration and native muxing expansion.
+
+**Changes.** Release the current `main` state under annotated Git tag
+`v0.2.8`. ytv1 keeps its existing release-build version injection through
+`main.currentVersion`; no runtime or public API change is introduced solely
+for the version bump.
+
+**Verification.** The B159 source passed the non-CGO build, vet, full test,
+tidy-diff, and diff-check gates. The release version build path additionally
+prints `ytv1 v0.2.8`, and `go test ./cmd/ytv1 -count=1` is green.
+
 ---
 
 ## 4. Public API Contract
@@ -2830,6 +2847,7 @@ Cycle B is complete only when all are true:
 
 - `2026-09-05`: Started `B159` for the breaking puremux v0.2.1 media API migration, native MP4 remux adoption, live muxer migration, and FFmpeg dependency reduction.
 - `2026-09-05`: Completed `B159` by upgrading puremux from v0.1.1 to v0.2.1, replacing the removed `pkg/puremux` Session facade with `pkg/media` exact-timestamp muxers, retaining deterministic requested-stream filtering and MPEG-TS framing conversion, adding recoverable same-directory output replacement, enabling native progressive MP4 merges, and migrating YouTube demuxed HLS plus SOOP agent output to the bounded `media.LiveMuxer`. FFmpeg now remains only for metadata embedding, MP3 transcoding, unsupported codec/container combinations, and puremux failures; non-CGO build, vet, full tests, tidy diff, and diff checks passed.
+- `2026-09-05`: Completed `B160` by advancing ytv1 from v0.2.7 to the v0.2.8 patch release, verifying the build-time version string and CLI test suite, and tagging the release state on `main`.
 
 - `2026-02-16`: Replaced completed deep-port migration plan (`R0-R11`) with new execution cycle (`B0-B9`) focused on YouTube CLI substitute readiness for yt-dlp-style operations.
 - `2026-02-16`: Marked `B0` as in-progress to begin gap matrix and target-definition reset using current repository baseline.
