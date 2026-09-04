@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -59,9 +60,9 @@ func TestDownloadAndMerge_WebMUsesPureMux(t *testing.T) {
 	// NoEmbedMetadata mirrors the yt-dlp-parity CLI default: puremux cannot
 	// tag containers, so embedding is off and the merge routes through puremux.
 	res, err := c.Download(context.Background(), videoID, DownloadOptions{
-		Mode:             SelectionModeBest,
-		OutputPath:       out,
-		NoEmbedMetadata:  true,
+		Mode:            SelectionModeBest,
+		OutputPath:      out,
+		NoEmbedMetadata: true,
 	})
 	if err != nil {
 		t.Fatalf("Download() error = %v", err)
@@ -93,12 +94,18 @@ func TestDownloadAndMerge_WebMUsesPureMux(t *testing.T) {
 // single VP9 video track (video=true) or Opus audio track (video=false).
 func minimalWebMFixture(video bool) []byte {
 	var codecID string
+	var codecPrivate []byte
+	var defaultDuration uint64
 	var trackType uint64
 	if video {
 		codecID = "V_VP9"
+		codecPrivate = []byte{1, 1, 0, 2, 1, 0, 3, 1, 8, 4, 1, 0}
+		defaultDuration = 40_000_000
 		trackType = 1
 	} else {
 		codecID = "A_OPUS"
+		codecPrivate = append([]byte("OpusHead"), 1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0, 0, 0)
+		defaultDuration = 20_000_000
 		trackType = 2
 	}
 
@@ -107,6 +114,8 @@ func minimalWebMFixture(video bool) []byte {
 	trackEntry.Write(webmUint(0x73C5, 1))
 	trackEntry.Write(webmUint(0x83, trackType))
 	trackEntry.Write(webmBytes(0x86, []byte(codecID)))
+	trackEntry.Write(webmBytes(0x63A2, codecPrivate))
+	trackEntry.Write(webmUint(0x23E383, defaultDuration))
 	if video {
 		videoEl := bytes.NewBuffer(nil)
 		videoEl.Write(webmUint(0xB0, 320))
@@ -115,6 +124,7 @@ func minimalWebMFixture(video bool) []byte {
 	} else {
 		audioEl := bytes.NewBuffer(nil)
 		audioEl.Write(webmUint(0x9F, 2))
+		audioEl.Write(webmFloat(0xB5, 48_000))
 		trackEntry.Write(webmMaster(0xE1, audioEl.Bytes()))
 	}
 
@@ -177,6 +187,14 @@ func webmBytes(id uint32, val []byte) []byte {
 	b.Write(webmSize(uint64(len(val))))
 	b.Write(val)
 	return b.Bytes()
+}
+
+func webmFloat(id uint32, val float64) []byte {
+	bits := math.Float64bits(val)
+	return webmBytes(id, []byte{
+		byte(bits >> 56), byte(bits >> 48), byte(bits >> 40), byte(bits >> 32),
+		byte(bits >> 24), byte(bits >> 16), byte(bits >> 8), byte(bits),
+	})
 }
 
 func webmID(id uint32) []byte {

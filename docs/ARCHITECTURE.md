@@ -16,20 +16,29 @@
 - `internal/challenge/*`: challenge inventory and solver interfaces.
 - `internal/formats/*`: direct + manifest format normalization and expansion.
 - `internal/downloader/*`: segmented and retry-aware media transfer internals.
-- `internal/muxer/*`: puremux v0.1 compressed-packet remuxing and FFmpeg compatibility fallback.
+- `internal/muxer/*`: puremux v0.2.1 compressed-packet remuxing/live normalization and FFmpeg compatibility fallback.
 
 ## Merge pipeline
 
-1. Downloaded video and audio intermediates are opened through puremux v0.1's
-   `media.Demuxer`, which probes the container and exposes streams, codec
-   configuration, exact time bases, and compressed packets.
-2. The requested video/audio streams are selected deterministically and their
-   packets are interleaved by decode timestamp into a puremux `Session`.
-3. WebM/MKV-compatible payloads remain opaque. MPEG-TS output applies only
-   framing transforms: AVCC/HVCC to Annex-B and raw AAC plus ASC to ADTS.
-4. MP4 output, metadata embedding, unsupported codec/container pairs, and any
-   puremux parse/write error are delegated to the configured FFmpeg muxer.
-   A failed pure-Go attempt removes its partial output before fallback.
+1. Downloaded video and audio intermediates are opened through puremux
+   v0.2.1's `media.Demuxer`, which probes the container and exposes streams,
+   codec configuration, exact integer time bases, and compressed packets.
+2. A `media.Muxer` receives only the requested video stream from the first
+   input and audio stream from the second, interleaved by decode timestamp.
+   It writes native progressive MP4, WebM/Matroska, or MPEG-TS into a
+   same-directory temporary file that replaces the destination on success.
+3. MP4/WebM/MKV-compatible payloads remain compressed and undecoded. MPEG-TS
+   output applies only framing transforms: AVCC/HVCC to Annex-B and raw AAC
+   plus ASC to ADTS.
+4. Metadata embedding, unsupported codec/container pairs, and puremux
+   parse/write errors are delegated to the configured FFmpeg muxer. A failed
+   pure-Go attempt retains the intermediates so fallback can consume them.
+
+Demuxed YouTube HLS and SOOP agent streams wrap the MPEG-TS serializer with
+the opt-in `media.LiveMuxer`. It provides bounded jitter ordering, monotonic
+DTS repair, keyframe-first A/V alignment, duration completion, and H.264/HEVC
+B-frame presentation timing without changing the exact-timestamp contract of
+ordinary file remuxing.
 
 Neither backend owns the downloaded intermediates until it succeeds, so a
 fallback can retry the same files. The pure-Go path never decodes audio or

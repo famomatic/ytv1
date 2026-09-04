@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/famomatic/puremux/pkg/media"
-	puremux "github.com/famomatic/puremux/pkg/puremux"
 )
 
 func TestMuxHLSStreamsProducesVideoAndAudio(t *testing.T) {
@@ -51,14 +50,15 @@ func TestMuxHLSStreamsProducesVideoAndAudio(t *testing.T) {
 func testLiveHLSTSSegment(t *testing.T, video bool) []byte {
 	t.Helper()
 	var output bytes.Buffer
-	cfg := puremux.DefaultConfig()
-	cfg.OutputContainer = puremux.ContainerMPEGTS
-	session, err := puremux.NewSession(&output, cfg)
+	mux, err := media.NewMuxer(&output, media.MuxOptions{Format: media.FormatMPEGTS})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if video {
-		track, err := session.AddTrack(puremux.Track{Codec: puremux.CodecH264, IsVideo: true, Width: 320, Height: 180})
+		track, err := mux.AddStream(media.Stream{
+			Type: media.MediaVideo, Codec: media.CodecH264,
+			TimeBase: media.Rational{Num: 1, Den: 90_000}, Width: 320, Height: 180,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -67,19 +67,30 @@ func testLiveHLSTSSegment(t *testing.T, video bool) []byte {
 			0, 0, 0, 1, 0x68, 0xce, 0x06, 0xe2,
 			0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00,
 		}
-		if err := session.WritePacket(&puremux.Packet{Data: annexB, PTS: 0, DTS: 0, IsKeyframe: true, Codec: puremux.CodecH264, TrackID: track}); err != nil {
+		if err := mux.WritePacket(context.Background(), &media.Packet{
+			StreamIndex: track, Data: annexB,
+			PTS: media.KnownTimestamp(0), DTS: media.KnownTimestamp(0),
+			Duration: media.KnownTimestamp(3_000), Flags: media.PacketKeyframe,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	} else {
-		track, err := session.AddTrack(puremux.Track{Codec: puremux.CodecAAC, Channels: 2, SampleRate: 44100})
+		track, err := mux.AddStream(media.Stream{
+			Type: media.MediaAudio, Codec: media.CodecAAC,
+			TimeBase: media.Rational{Num: 1, Den: 44_100}, Channels: 2, SampleRate: 44_100,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := session.WriteADTS(track, testADTSFrame(64), 0); err != nil {
+		if err := mux.WritePacket(context.Background(), &media.Packet{
+			StreamIndex: track, Data: testADTSFrame(64),
+			PTS: media.KnownTimestamp(0), DTS: media.KnownTimestamp(0),
+			Duration: media.KnownTimestamp(1_024), Flags: media.PacketKeyframe,
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := session.Close(); err != nil {
+	if err := mux.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return output.Bytes()

@@ -8,7 +8,6 @@ import (
 	"net/http"
 
 	"github.com/famomatic/puremux/pkg/media"
-	puremux "github.com/famomatic/puremux/pkg/puremux"
 	"github.com/famomatic/ytv1/internal/downloader"
 )
 
@@ -24,8 +23,8 @@ type HLSStreamInput struct {
 
 // MuxHLSStreams follows separate HLS video and audio renditions and emits one
 // playable MPEG-TS stream. Segments are aligned by media sequence, demuxed one
-// pair at a time, and fed into a persistent puremux session so this works for
-// unbounded live playlists without temporary files or an FFmpeg dependency.
+// pair at a time, and fed into a persistent puremux LiveMuxer so this works
+// for unbounded live playlists without temporary files or FFmpeg.
 func MuxHLSStreams(ctx context.Context, video, audio HLSStreamInput, dst io.Writer) error {
 	videoReader := downloader.NewHLSMediaSegmentReader(httpClientOrDefault(video), video.URL).
 		WithRequestHeaders(video.Headers).
@@ -36,22 +35,26 @@ func MuxHLSStreams(ctx context.Context, video, audio HLSStreamInput, dst io.Writ
 		WithTransportConfig(audio.Transport).
 		WithLiveEdgeSegments(3)
 
-	cfg := puremux.DefaultConfig()
-	cfg.OutputContainer = puremux.ContainerMPEGTS
-	session, err := puremux.NewSession(dst, cfg)
+	baseMux, err := media.NewMuxer(dst, media.MuxOptions{Format: media.FormatMPEGTS})
 	if err != nil {
-		return fmt.Errorf("live HLS mux: create session: %w", err)
+		return fmt.Errorf("live HLS mux: create MPEG-TS muxer: %w", err)
+	}
+	liveMux, err := media.NewLiveMuxer(baseMux, media.DefaultLiveIngestOptions())
+	if err != nil {
+		_ = baseMux.Close()
+		return fmt.Errorf("live HLS mux: create live muxer: %w", err)
 	}
 
 	var (
-		videoSegment *downloader.HLSMediaSegment
-		audioSegment *downloader.HLSMediaSegment
-		trackIDs     [2]int
-		trackCodecs  [2]media.CodecID
-		started      bool
+		videoSegment  *downloader.HLSMediaSegment
+		audioSegment  *downloader.HLSMediaSegment
+		trackIDs      [2]int
+		trackCodecs   [2]media.CodecID
+		trackTimeBase [2]media.Rational
+		started       bool
 	)
 	finish := func(runErr error) error {
-		closeErr := session.Close()
+		closeErr := liveMux.Close()
 		if runErr != nil {
 			return runErr
 		}
@@ -111,20 +114,12 @@ func MuxHLSStreams(ctx context.Context, video, audio HLSStreamInput, dst io.Writ
 
 		if !started {
 			for i, input := range inputs {
-				trackID, trackErr := session.AddTrack(puremux.Track{
-					Codec:        mediaCodec(input.stream.Codec),
-					IsVideo:      input.stream.Type == media.MediaVideo,
-					Width:        input.stream.Width,
-					Height:       input.stream.Height,
-					Channels:     input.stream.Channels,
-					SampleRate:   float64(input.stream.SampleRate),
-					CodecPrivate: input.private,
-				})
+				trackID, trackErr := liveMux.AddStream(input.stream)
 				if trackErr != nil {
 					closeInputs(inputs)
 					return finish(fmt.Errorf("live HLS mux: add %s track: %w", mediaTypeName(input.stream.Type), trackErr))
 				}
-				trackIDs[i], trackCodecs[i] = trackID, input.stream.Codec
+				trackIDs[i], trackCodecs[i], trackTimeBase[i] = trackID, input.stream.Codec, input.stream.TimeBase
 			}
 			started = true
 		} else {
@@ -137,8 +132,9 @@ func MuxHLSStreams(ctx context.Context, video, audio HLSStreamInput, dst io.Writ
 		}
 		for i := range inputs {
 			inputs[i].trackID = trackIDs[i]
+			inputs[i].outputTimeBase = trackTimeBase[i]
 		}
-		remuxErr := remuxMediaPackets(ctx, session, inputs)
+		remuxErr := remuxMediaPackets(ctx, liveMux, inputs)
 		closeInputs(inputs)
 		if remuxErr != nil {
 			return finish(remuxErr)
@@ -175,15 +171,14 @@ func openHLSMediaSegment(ctx context.Context, segment *downloader.HLSMediaSegmen
 	stream, ok := bestMediaStream(demuxer.Streams(), kind)
 	if !ok {
 		_ = demuxer.Close()
-		return nil, fmt.Errorf("%w: segment contains no %s stream", puremux.ErrUnsupportedInput, mediaTypeName(kind))
+		return nil, fmt.Errorf("%w: segment contains no %s stream", media.ErrInvalidData, mediaTypeName(kind))
 	}
-	codec := mediaCodec(stream.Codec)
-	if codec == puremux.CodecUnknown || !puremux.CanRemuxCodecs(puremux.ContainerMPEGTS, []puremux.CodecType{codec}) {
+	if !canMuxMPEGTSCodec(stream.Codec) {
 		_ = demuxer.Close()
-		return nil, fmt.Errorf("%w: codec %s cannot be written to mpegts", puremux.ErrIncompatible, stream.Codec)
+		return nil, fmt.Errorf("%w: codec %s cannot be written to mpegts", media.ErrIncompatible, stream.Codec)
 	}
 	input := &mediaRemuxInput{demuxer: demuxer, stream: stream}
-	if err := input.configureBitstream(puremux.ContainerMPEGTS); err != nil {
+	if err := input.configureBitstream(media.FormatMPEGTS); err != nil {
 		_ = demuxer.Close()
 		return nil, err
 	}
@@ -201,16 +196,35 @@ func alignHLSInputs(ctx context.Context, inputs []*mediaRemuxInput) error {
 		}
 		input.pending = packet
 	}
-	videoTime, err := packetDecodeTime(inputs[0].pending, inputs[0])
+	videoStamp, err := decodeTimestamp(inputs[0].pending)
 	if err != nil {
 		return err
 	}
-	audioTime, err := packetDecodeTime(inputs[1].pending, inputs[1])
+	audioStamp, err := decodeTimestamp(inputs[1].pending)
 	if err != nil {
 		return err
 	}
-	inputs[1].offset = videoTime - audioTime
+	videoInAudioBase, ok := inputs[0].stream.TimeBase.Rescale(videoStamp, inputs[1].stream.TimeBase)
+	if !ok {
+		return errors.New("cannot align HLS stream time bases")
+	}
+	offset, ok := subtractTimestamp(videoInAudioBase, audioStamp)
+	if !ok {
+		return errors.New("HLS stream timestamp offset overflow")
+	}
+	inputs[1].offset = offset
 	return nil
+}
+
+func decodeTimestamp(packet *media.Packet) (int64, error) {
+	stamp := packet.DTS
+	if !stamp.Valid {
+		stamp = packet.PTS
+	}
+	if !stamp.Valid {
+		return 0, errors.New("packet has neither DTS nor PTS")
+	}
+	return stamp.Value, nil
 }
 
 func stripLeadingID3(data []byte) ([]byte, error) {

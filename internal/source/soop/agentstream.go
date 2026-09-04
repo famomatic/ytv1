@@ -25,7 +25,7 @@ import (
 	"strconv"
 	"time"
 
-	puremux "github.com/famomatic/puremux/pkg/puremux"
+	"github.com/famomatic/puremux/pkg/media"
 )
 
 // SVC codes used by the agent-streaming choreography.
@@ -128,23 +128,35 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	// clock, so it is fed to WriteVideo as the decode time. On streams whose
 	// H.264 carries B-frames (some SOOP encoders, e.g. 1440p60) the display
 	// reordering lives only in the bitstream POC, not the timestamps; puremux
-	// v0.0.9's WriteVideo parses each AU's POC and derives the presentation PTS
+	// v0.2.1's LiveMuxer parses each AU's POC and derives the presentation PTS
 	// from it while keeping DTS = this decode clock (so the PES DTS stays
 	// strictly monotonic and B-frames present correctly). B-frame-free streams
 	// (e.g. 1080p50) collapse to DTS == PTS. Verified on real captures of both.
-	cfg := puremux.DefaultConfig()
-	cfg.OutputContainer = puremux.ContainerMPEGTS
-	cfg.Preprocessor.MinMonotonicStep = uint64(time.Millisecond)
-	mux, err := puremux.NewSession(out, cfg)
+	baseMux, err := media.NewMuxer(out, media.MuxOptions{Format: media.FormatMPEGTS})
 	if err != nil {
-		return fmt.Errorf("soop: puremux session: %w", err)
+		return fmt.Errorf("soop: puremux MPEG-TS muxer: %w", err)
 	}
-	vidTrack, err := mux.AddTrack(puremux.Track{Codec: puremux.CodecH264, IsVideo: true})
+	liveOpts := media.DefaultLiveIngestOptions()
+	liveOpts.MinMonotonicStep = time.Millisecond
+	mux, err := media.NewLiveMuxer(baseMux, liveOpts)
 	if err != nil {
+		_ = baseMux.Close()
+		return fmt.Errorf("soop: puremux live muxer: %w", err)
+	}
+	streamTimeBase := media.Rational{Num: 1, Den: int64(time.Second)}
+	vidTrack, err := mux.AddStream(media.Stream{
+		Type: media.MediaVideo, Codec: media.CodecH264, TimeBase: streamTimeBase,
+		DefaultPacket: time.Second / 60,
+	})
+	if err != nil {
+		_ = mux.Close()
 		return fmt.Errorf("soop: puremux video track: %w", err)
 	}
-	audTrack, err := mux.AddTrack(puremux.Track{Codec: puremux.CodecAAC})
+	audTrack, err := mux.AddStream(media.Stream{
+		Type: media.MediaAudio, Codec: media.CodecAAC, TimeBase: streamTimeBase,
+	})
 	if err != nil {
+		_ = mux.Close()
 		return fmt.Errorf("soop: puremux audio track: %w", err)
 	}
 	// Flush the preprocessor tail (reorder window holds the newest packets)
@@ -227,9 +239,9 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 						au = append(vidPrefix, es...)
 						vidPrefix = nil
 					}
-					werr = mux.WriteVideo(vidTrack, au, srcDur(chunkTS(header)))
+					werr = mux.WriteVideo(ctx, vidTrack, au, int64(srcDur(chunkTS(header))))
 				case chunkAudio:
-					werr = mux.WriteADTS(audTrack, es, srcDur(chunkTS(header)))
+					werr = mux.WriteADTS(ctx, audTrack, es, int64(srcDur(chunkTS(header))))
 				}
 			})
 			if werr != nil {

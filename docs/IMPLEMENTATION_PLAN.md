@@ -45,6 +45,7 @@
 - `2026-09-04` (B156 YouTube live demuxed HLS audio playback fix)
 - `2026-09-04` (B157 puremux v0.1.1 dependency refresh)
 - `2026-09-04` (B158 ytv1 v0.2.7 patch release)
+- `2026-09-05` (B159 puremux v0.2.1 media API migration and FFmpeg dependency reduction)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -217,6 +218,7 @@
 - B156 landed (2026-09-04): URI-backed HLS audio rendition groups are now classified as external audio instead of being inferred from the variant's aggregate CODECS list. `OpenStream` and `Download(..., OutputPath: "-")` retain the selected demuxed audio rendition and combine sequence-aligned video/audio segments into one live MPEG-TS stream in pure Go, starting near the live edge and handling YouTube's ID3-prefixed ADTS audio.
 - B157 landed (2026-09-04): the primary merge backend dependency and documented runtime requirement are updated from puremux v0.1.0 to v0.1.1 with the full package regression suite and vet remaining green.
 - B158 landed (2026-09-04): ytv1 advances from v0.2.6 to the v0.2.7 patch release, containing the puremux v0.1 media remux integration, YouTube live demuxed-HLS audio fix, and puremux v0.1.1 dependency refresh.
+- B159 landed (2026-09-05): migrated the removed puremux compatibility facade to v0.2.1 `pkg/media`, added selected-track native progressive MP4/WebM/MKV/MPEG-TS remuxing with exact timestamp ordering and recoverable destination replacement, moved YouTube demuxed HLS and SOOP live output to `media.LiveMuxer`, and narrowed FFmpeg to transcoding, metadata, and unsupported/failure fallback cases.
 
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
@@ -362,7 +364,7 @@
 141. `[x]` B140. Single-line progress behavior for captured/non-TTY output
 142. `[x]` B141. Clear interactive progress line on completion
 143. `[x]` B142. puremux package as primary muxer with FFmpeg fallback
-144. `[-]` B143. (reserved for follow-up muxer validation)
+144. `[x]` B143. Follow-up muxer validation reservation (resolved by B155-B157 integration and regression verification)
 145. `[x]` B144. Silent download truncation prevention (premature EOF detection, chunked completeness verification, DASH r=-1 expansion, post-download ContentLength integrity check)
 146. `[x]` B145. Concurrency, resource-safety, and edge-case hardening pass (owned HTTP transport isolation, RLock session cache read path with atomic LRU tracking, HLS EXT-X-MAP per-segment init rewrite on rotation, downloadAndMerge same-itag intermediate path collision guard, challenge cache TTL semantics aligned with session cache, sanitizeOutputToken Windows reserved-name and trailing-dot handling)
 147. `[x]` B146. OpenStream context deadline leak fix (media GET request bound to the metadata-timeout context, so RequestTimeout deadline aborts caller body reads)
@@ -375,6 +377,7 @@
 154. `[x]` B156. YouTube live HLS audio-group classification and real-time merged playback for stdout/OpenStream
 155. `[x]` B157. puremux v0.1.1 dependency refresh and regression verification
 156. `[x]` B158. ytv1 v0.2.7 patch release
+157. `[x]` B159. puremux v0.2.1 media API migration and FFmpeg dependency reduction
 
 ---
 
@@ -2781,6 +2784,28 @@ for the version bump.
 path additionally prints `ytv1 v0.2.7`, and `go test ./cmd/ytv1 -count=1` is
 green.
 
+### B159. puremux v0.2.1 Media API Migration and FFmpeg Reduction `[x]`
+
+**Goal.** Consume puremux v0.2.1 despite the intentional removal of the
+`pkg/puremux` compatibility facade, while expanding the native pure-Go path so
+ordinary MP4 merges no longer require FFmpeg.
+
+**Changes.** Upgrade the module dependency to v0.2.1; migrate file remuxing to
+the exact-timestamp `pkg/media` mux API with native progressive MP4,
+WebM/Matroska, and MPEG-TS output; migrate YouTube demuxed-live HLS and SOOP
+agent streaming to the opt-in v0.2.1 `media.LiveMuxer`; preserve atomic output
+and intermediate-file ownership semantics; and keep FFmpeg as the fallback for
+metadata embedding, unsupported combinations or malformed inputs, plus the
+existing MP3 transcoding path. Update operator/runtime documentation and pin
+the expanded native behavior with regression tests.
+
+**Verification.** Native MP4, requested-stream filtering, cross-time-base packet
+rescaling, sub-nanosecond exact ordering, atomic destination replacement,
+AVCC/ASC-to-MPEG-TS conversion, live HLS A/V output, malformed-input fallback,
+and updated WebM integration fixtures are covered by regressions.
+`CGO_ENABLED=0 go build ./...`, `go vet ./...`, `go test ./... -count=1`,
+`git diff --check`, and `go mod tidy -diff` are green.
+
 ---
 
 ## 4. Public API Contract
@@ -2802,6 +2827,9 @@ Cycle B is complete only when all are true:
 ---
 
 ## 6. Change Log (Plan)
+
+- `2026-09-05`: Started `B159` for the breaking puremux v0.2.1 media API migration, native MP4 remux adoption, live muxer migration, and FFmpeg dependency reduction.
+- `2026-09-05`: Completed `B159` by upgrading puremux from v0.1.1 to v0.2.1, replacing the removed `pkg/puremux` Session facade with `pkg/media` exact-timestamp muxers, retaining deterministic requested-stream filtering and MPEG-TS framing conversion, adding recoverable same-directory output replacement, enabling native progressive MP4 merges, and migrating YouTube demuxed HLS plus SOOP agent output to the bounded `media.LiveMuxer`. FFmpeg now remains only for metadata embedding, MP3 transcoding, unsupported codec/container combinations, and puremux failures; non-CGO build, vet, full tests, tidy diff, and diff checks passed.
 
 - `2026-02-16`: Replaced completed deep-port migration plan (`R0-R11`) with new execution cycle (`B0-B9`) focused on YouTube CLI substitute readiness for yt-dlp-style operations.
 - `2026-02-16`: Marked `B0` as in-progress to begin gap matrix and target-definition reset using current repository baseline.

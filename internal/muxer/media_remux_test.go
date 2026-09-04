@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/famomatic/puremux/pkg/media"
-	puremux "github.com/famomatic/puremux/pkg/puremux"
 	"github.com/famomatic/ytv1/internal/types"
 )
 
@@ -53,6 +52,45 @@ func TestPureMuxMuxerUsesMediaDemuxerForOggOpus(t *testing.T) {
 	}
 }
 
+func TestPureMuxMuxerKeepsOnlyRequestedInputStreams(t *testing.T) {
+	dir := t.TempDir()
+	videoPath := filepath.Join(dir, "muxed-input.webm")
+	audioPath := filepath.Join(dir, "replacement-audio.webm")
+	outputPath := filepath.Join(dir, "selected.webm")
+	if err := writeMuxedWebM(videoPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMinimalWebM(audioPath, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := NewPureMuxMuxer(nil).Merge(context.Background(), videoPath, audioPath, outputPath, types.Metadata{}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	source, err := media.OpenFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demuxer, err := media.Open(context.Background(), source, media.OpenOptions{})
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	defer demuxer.Close()
+	var videoStreams, audioStreams int
+	for _, stream := range demuxer.Streams() {
+		switch stream.Type {
+		case media.MediaVideo:
+			videoStreams++
+		case media.MediaAudio:
+			audioStreams++
+		}
+	}
+	if videoStreams != 1 || audioStreams != 1 {
+		t.Fatalf("streams=%+v, want exactly one selected video and audio", demuxer.Streams())
+	}
+}
+
 func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "merged.ts")
@@ -60,9 +98,7 @@ func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := puremux.DefaultConfig()
-	cfg.OutputContainer = puremux.ContainerMPEGTS
-	session, err := puremux.NewSession(f, cfg)
+	mux, err := media.NewMuxer(f, media.MuxOptions{Format: media.FormatMPEGTS})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +109,14 @@ func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 			Data:        []byte{0, 0, 0, 2, 0x65, 0x88},
 			PTS:         media.KnownTimestamp(0),
 			DTS:         media.KnownTimestamp(0),
+			Duration:    media.KnownTimestamp(3_000),
 			Flags:       media.PacketKeyframe,
 		}}},
 		stream: media.Stream{
 			Index: 0, Type: media.MediaVideo, Codec: media.CodecH264,
 			TimeBase: media.Rational{Num: 1, Den: 90_000}, Width: 320, Height: 180,
 			Config: media.CodecConfig{Format: media.CodecConfigAVCC, Data: []byte{
-				1, 100, 0, 31, 0xff, 0xe1, 0, 2, 0x67, 0x64, 1, 0, 1, 0x68,
+				1, 0x42, 0, 0x1f, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 1, 0x68,
 			}},
 		},
 	}
@@ -90,6 +127,7 @@ func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 			Data:        append([]byte(nil), audioPayload...),
 			PTS:         media.KnownTimestamp(0),
 			DTS:         media.KnownTimestamp(0),
+			Duration:    media.KnownTimestamp(1_024),
 			Flags:       media.PacketKeyframe,
 		}}},
 		stream: media.Stream{
@@ -100,24 +138,20 @@ func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 	}
 	inputs := []*mediaRemuxInput{video, audio}
 	for _, input := range inputs {
-		if err := input.configureBitstream(puremux.ContainerMPEGTS); err != nil {
+		if err := input.configureBitstream(media.FormatMPEGTS); err != nil {
 			t.Fatal(err)
 		}
-		input.trackID, err = session.AddTrack(puremux.Track{
-			Codec: mediaCodec(input.stream.Codec), IsVideo: input.stream.Type == media.MediaVideo,
-			Width: input.stream.Width, Height: input.stream.Height,
-			SampleRate: float64(input.stream.SampleRate), Channels: input.stream.Channels,
-		})
+		input.trackID, err = mux.AddStream(input.stream)
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if err := remuxMediaPackets(context.Background(), session, inputs); err != nil {
+	if err := remuxMediaPackets(context.Background(), mux, inputs); err != nil {
 		t.Fatalf("remuxMediaPackets: %v", err)
 	}
-	if err := session.Close(); err != nil {
-		t.Fatalf("session.Close: %v", err)
+	if err := mux.Close(); err != nil {
+		t.Fatalf("mux.Close: %v", err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
@@ -146,7 +180,7 @@ func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 		stream := demuxer.Streams()[packet.StreamIndex]
 		switch stream.Codec {
 		case media.CodecH264:
-			gotVideo = bytes.Contains(packet.Data, []byte{0, 0, 0, 1, 0x67, 0x64}) &&
+			gotVideo = bytes.Contains(packet.Data, []byte{0, 0, 0, 1, 0x67}) &&
 				bytes.Contains(packet.Data, []byte{0, 0, 0, 1, 0x65, 0x88})
 		case media.CodecAAC:
 			gotAudio = bytes.Equal(packet.Data, audioPayload) &&
@@ -156,6 +190,65 @@ func TestMediaRemuxAVCCAndASCToMPEGTS(t *testing.T) {
 	}
 	if !gotVideo || !gotAudio {
 		t.Fatalf("TS round trip gotVideo=%v gotAudio=%v", gotVideo, gotAudio)
+	}
+}
+
+func TestMediaRemuxPacketRescalesToPersistentTrackTimeBase(t *testing.T) {
+	input := &mediaRemuxInput{
+		stream:         media.Stream{TimeBase: media.Rational{Num: 1, Den: 1_000}},
+		outputTimeBase: media.Rational{Num: 1, Den: 90_000},
+		trackID:        3,
+		offset:         5,
+	}
+	out, err := input.outputPacket(&media.Packet{
+		PTS: media.KnownTimestamp(10), DTS: media.KnownTimestamp(9),
+		Duration: media.KnownTimestamp(2), Flags: media.PacketKeyframe,
+	}, []byte{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.StreamIndex != 3 || out.PTS.Value != 1_350 || out.DTS.Value != 1_260 ||
+		out.Duration.Value != 180 || !out.Duration.Valid {
+		t.Fatalf("rescaled packet = %+v", out)
+	}
+}
+
+func TestComparePacketDecodeTimePreservesSubNanosecondOrder(t *testing.T) {
+	leftInput := &mediaRemuxInput{stream: media.Stream{TimeBase: media.Rational{Num: 1, Den: 2_000_000_000}}}
+	rightInput := &mediaRemuxInput{stream: media.Stream{TimeBase: media.Rational{Num: 1, Den: 1_000_000_000}}}
+	left := &media.Packet{DTS: media.KnownTimestamp(1)}
+	right := &media.Packet{DTS: media.KnownTimestamp(0)}
+	comparison, err := comparePacketDecodeTime(left, leftInput, right, rightInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comparison <= 0 {
+		t.Fatalf("comparison=%d, want left 0.5ns timestamp after right 0ns", comparison)
+	}
+}
+
+func TestInstallPureMuxOutputReplacesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	temporaryPath := filepath.Join(dir, "new.tmp")
+	outputPath := filepath.Join(dir, "output.mp4")
+	if err := os.WriteFile(temporaryPath, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outputPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installPureMuxOutput(temporaryPath, outputPath); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("output = %q, want new", got)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, ".ytv1-puremux-backup-*.tmp")); err != nil || len(matches) != 0 {
+		t.Fatalf("backup leftovers=%v err=%v", matches, err)
 	}
 }
 
@@ -180,30 +273,55 @@ func TestPureMuxMuxerFallsBackOnMediaParseFailure(t *testing.T) {
 	}
 }
 
-func TestOpusHeadFromDOPSEndianAndMapping(t *testing.T) {
-	// ISO/IEC 14496-12 OpusSpecificBox payload: version 0, two channels,
-	// pre-skip 312, input rate 48 kHz, gain -2, mapping family 1, followed by
-	// stream/coupled counts and the two channel-map entries. Integer fields in
-	// dOps are big-endian; RFC 7845 OpusHead stores them little-endian.
-	dops := []byte{0, 2, 0x01, 0x38, 0, 0, 0xbb, 0x80, 0xff, 0xfe, 1, 1, 1, 0, 1}
-	head, err := opusHeadFromDOPS(dops)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := append([]byte("OpusHead"), 1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0xfe, 0xff, 1, 1, 1, 0, 1)
-	if !bytes.Equal(head, want) {
-		t.Fatalf("OpusHead = %x, want %x", head, want)
-	}
-	for _, malformed := range [][]byte{nil, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1}} {
-		if _, err := opusHeadFromDOPS(malformed); err == nil {
-			t.Fatalf("malformed dOps accepted: %x", malformed)
-		}
-	}
-}
-
 type packetDemuxer struct {
 	packets []*media.Packet
 	next    int
+}
+
+func writeMuxedWebM(path string) (retErr error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := f.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
+	mux, err := media.NewMuxer(f, media.MuxOptions{Format: media.FormatWebM})
+	if err != nil {
+		return err
+	}
+	video, err := mux.AddStream(media.Stream{
+		Type: media.MediaVideo, Codec: media.CodecVP9,
+		TimeBase: media.Rational{Num: 1, Den: 1_000}, Width: 320, Height: 240,
+		Config: media.CodecConfig{Format: media.CodecConfigVP9FeatureMetadata,
+			Data: []byte{1, 1, 0, 2, 1, 0, 3, 1, 8, 4, 1, 0}},
+	})
+	if err != nil {
+		_ = mux.Close()
+		return err
+	}
+	opusHead := append([]byte("OpusHead"), 1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0, 0, 0)
+	audio, err := mux.AddStream(media.Stream{
+		Type: media.MediaAudio, Codec: media.CodecOpus,
+		TimeBase: media.Rational{Num: 1, Den: 1_000}, SampleRate: 48_000, Channels: 2,
+		Config: media.CodecConfig{Format: media.CodecConfigOpusHead, Data: opusHead},
+	})
+	if err != nil {
+		_ = mux.Close()
+		return err
+	}
+	for _, packet := range []*media.Packet{
+		{StreamIndex: video, Data: []byte{0x01, 0x02}, PTS: media.KnownTimestamp(0), DTS: media.KnownTimestamp(0), Duration: media.KnownTimestamp(40), Flags: media.PacketKeyframe},
+		{StreamIndex: audio, Data: []byte{0xf8, 0x55}, PTS: media.KnownTimestamp(0), DTS: media.KnownTimestamp(0), Duration: media.KnownTimestamp(20), Flags: media.PacketKeyframe},
+	} {
+		if err := mux.WritePacket(context.Background(), packet); err != nil {
+			_ = mux.Close()
+			return err
+		}
+	}
+	return mux.Close()
 }
 
 func (d *packetDemuxer) Streams() []media.Stream { return nil }

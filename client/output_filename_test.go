@@ -86,7 +86,7 @@ func TestPredictOutputFilename_WebMDefaultNoFFmpeg(t *testing.T) {
 
 // TestPredictOutputFilename_MP4PairStaysMP4 verifies that a non-WebM (MP4)
 // video+audio pair still predicts .mp4 by default, preserving broad
-// compatibility and falling back to ffmpeg.
+// compatibility through puremux's native MP4 output.
 func TestPredictOutputFilename_MP4PairStaysMP4(t *testing.T) {
 	info := &VideoInfo{ID: "video123", Title: "Some title"}
 	formats := []FormatInfo{

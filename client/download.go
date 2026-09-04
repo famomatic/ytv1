@@ -149,7 +149,7 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 	// Do not silently downgrade separate best video+audio selections to a
 	// lower progressive stream just because local merge support is unavailable.
 	if len(selected) > 1 && (c.config.Muxer == nil || !c.config.Muxer.Available()) {
-		return nil, fmt.Errorf("%w: selected formats require merge; configure ffmpeg or choose a single progressive format", ErrMuxerUnavailable)
+		return nil, fmt.Errorf("%w: selected formats require merge; configure a muxer or choose a single progressive format", ErrMuxerUnavailable)
 	}
 
 	if len(selected) == 1 {
@@ -300,7 +300,7 @@ func (c *Client) downloadSourceSession(ctx context.Context, name string, info *V
 		return nil, ErrNoPlayableFormats
 	}
 	if len(selected) > 1 && (c.config.Muxer == nil || !c.config.Muxer.Available()) {
-		return nil, fmt.Errorf("%w: selected formats require merge; configure ffmpeg or choose a single format", ErrMuxerUnavailable)
+		return nil, fmt.Errorf("%w: selected formats require merge; configure a muxer or choose a single format", ErrMuxerUnavailable)
 	}
 
 	if len(selected) == 1 {
@@ -2128,7 +2128,8 @@ func normalizedMergeOutputExt(raw string) string {
 // Otherwise, when both selected formats are WebM (VP8/VP9/AV1 video + Opus
 // audio), default to "webm" so the pure-Go puremux muxer can handle the
 // merge without an FFmpeg binary. For any other codec pair, keep "mp4" so
-// FFmpeg (when available) produces a broadly compatible container.
+// puremux v0.2.1 (or the compatibility fallback) produces a broadly
+// compatible container.
 func defaultMergeExtForFormats(requested string, vidF, audF FormatInfo) string {
 	requested = strings.TrimSpace(requested)
 	if requested != "" {

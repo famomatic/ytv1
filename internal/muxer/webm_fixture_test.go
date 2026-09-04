@@ -13,43 +13,53 @@ import (
 // the puremux module).
 func writeMinimalWebM(path string, video bool) error {
 	var (
-		codecID   string
-		trackType uint64 // 1 = video, 2 = audio
+		codecID         string
+		codecPrivate    []byte
+		defaultDuration uint64
+		trackType       uint64 // 1 = video, 2 = audio
 	)
 	if video {
 		codecID = "V_VP9"
+		// Matroska VP9 feature metadata: profile 0, level unspecified, 8-bit,
+		// 4:2:0. A complete record also permits puremux's native MP4 mapping.
+		codecPrivate = []byte{1, 1, 0, 2, 1, 0, 3, 1, 8, 4, 1, 0}
+		defaultDuration = 40_000_000
 		trackType = 1
 	} else {
 		codecID = "A_OPUS"
+		codecPrivate = append([]byte("OpusHead"), 1, 2, 0x38, 0x01, 0x80, 0xbb, 0, 0, 0, 0, 0)
+		defaultDuration = 20_000_000
 		trackType = 2
 	}
 
 	trackEntry := bytes.NewBuffer(nil)
-	trackEntry.Write(ebmlUint(0xD7, 1))               // TrackNumber = 1
-	trackEntry.Write(ebmlUint(0x73C5, 1))             // TrackUID = 1
-	trackEntry.Write(ebmlUint(0x83, trackType))        // TrackType
-	trackEntry.Write(ebmlBytes(0x86, []byte(codecID))) // CodecID
+	trackEntry.Write(ebmlUint(0xD7, 1))                   // TrackNumber = 1
+	trackEntry.Write(ebmlUint(0x73C5, 1))                 // TrackUID = 1
+	trackEntry.Write(ebmlUint(0x83, trackType))           // TrackType
+	trackEntry.Write(ebmlBytes(0x86, []byte(codecID)))    // CodecID
+	trackEntry.Write(ebmlBytes(0x63A2, codecPrivate))     // CodecPrivate
+	trackEntry.Write(ebmlUint(0x23E383, defaultDuration)) // DefaultDuration
 	if video {
 		videoEl := bytes.NewBuffer(nil)
-		videoEl.Write(ebmlUint(0xB0, 320)) // PixelWidth
-		videoEl.Write(ebmlUint(0xBA, 240)) // PixelHeight
+		videoEl.Write(ebmlUint(0xB0, 320))                  // PixelWidth
+		videoEl.Write(ebmlUint(0xBA, 240))                  // PixelHeight
 		trackEntry.Write(ebmlMaster(0xE0, videoEl.Bytes())) // Video
 	} else {
 		audioEl := bytes.NewBuffer(nil)
-		audioEl.Write(ebmlUint(0x9F, 2))             // Channels = 2
-		audioEl.Write(ebmlFloat(0xB5, 48000.0))      // SamplingFrequency
+		audioEl.Write(ebmlUint(0x9F, 2))                    // Channels = 2
+		audioEl.Write(ebmlFloat(0xB5, 48000.0))             // SamplingFrequency
 		trackEntry.Write(ebmlMaster(0xE1, audioEl.Bytes())) // Audio
 	}
 
 	tracks := ebmlMaster(0x1654AE6B, ebmlMaster(0xAE, trackEntry.Bytes()))
 
 	info := bytes.NewBuffer(nil)
-	info.Write(ebmlUint(0x2AD7B1, 1_000_000))           // TimecodeScale
-	info.Write(ebmlBytes(0x4D80, []byte("ytv1-test")))  // MuxingApp
-	info.Write(ebmlBytes(0x5741, []byte("ytv1-test")))  // WritingApp
+	info.Write(ebmlUint(0x2AD7B1, 1_000_000))          // TimecodeScale
+	info.Write(ebmlBytes(0x4D80, []byte("ytv1-test"))) // MuxingApp
+	info.Write(ebmlBytes(0x5741, []byte("ytv1-test"))) // WritingApp
 
 	cluster := bytes.NewBuffer(nil)
-	cluster.Write(ebmlUint(0xE7, 0)) // Timestamp = 0
+	cluster.Write(ebmlUint(0xE7, 0))                                             // Timestamp = 0
 	cluster.Write(ebmlBytes(0xA3, simpleBlock(1, 0, video, []byte{0x01, 0x02}))) // SimpleBlock
 
 	segmentBody := bytes.NewBuffer(nil)
@@ -62,7 +72,7 @@ func writeMinimalWebM(path string, video bool) error {
 	header.Write(ebmlUint(0x42F7, 1))               // EBMLReadVersion = 1
 	header.Write(ebmlUint(0x42F2, 4))               // EBMLMaxIDLength = 4
 	header.Write(ebmlUint(0x42F3, 8))               // EBMLMaxSizeLength = 8
-	header.Write(ebmlBytes(0x4282, []byte("webm")))  // DocType
+	header.Write(ebmlBytes(0x4282, []byte("webm"))) // DocType
 	header.Write(ebmlUint(0x4287, 4))               // DocTypeVersion = 4
 	header.Write(ebmlUint(0x4285, 2))               // DocTypeReadVersion = 2
 
