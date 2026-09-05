@@ -3,6 +3,7 @@ package selector
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -58,6 +59,9 @@ func Parse(s string) (*Selector, error) {
 var resRegex = regexp.MustCompile(`^(res|height|width)(:|<=|>=|=|<|>)(\d+)$`)
 
 func parseStreamSpec(s string) (*StreamSpec, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, fmt.Errorf("empty format selector")
+	}
 	// s = "bestvideo[ext=mp4]"
 	// Split into base "bestvideo" and modifiers "[ext=mp4]"
 
@@ -84,16 +88,20 @@ func parseStreamSpec(s string) (*StreamSpec, error) {
 	}
 
 	// Parse modifiers
-	modRex := regexp.MustCompile(`\[([^\]]+)\]`)
-	matches := modRex.FindAllStringSubmatch(mods, -1)
-	for _, m := range matches {
-		// m[1] is the content "ext=mp4"
-		inner := m[1]
-		f, err := parseModifier(inner)
+	for mods != "" {
+		if mods[0] != '[' {
+			return nil, fmt.Errorf("trailing selector text: %q", mods)
+		}
+		end := strings.IndexByte(mods, ']')
+		if end < 0 || strings.Contains(mods[1:end], "[") {
+			return nil, fmt.Errorf("unbalanced selector brackets")
+		}
+		f, err := parseModifier(mods[1:end])
 		if err != nil {
 			return nil, err
 		}
 		spec.Filters = append(spec.Filters, *f)
+		mods = strings.TrimSpace(mods[end+1:])
 	}
 
 	return spec, nil
@@ -108,10 +116,22 @@ func parseModifier(s string) (*FormatFilter, error) {
 			key := strings.TrimSpace(s[:idx])
 			val := strings.TrimSpace(s[idx+len(op):])
 
+			if val == "" {
+				return nil, fmt.Errorf("empty modifier value")
+			}
+			if key != "ext" {
+				n, err := strconv.Atoi(val)
+				if err != nil || n < 0 {
+					return nil, fmt.Errorf("invalid numeric modifier %q", val)
+				}
+			}
 			// Map key to filter type
 			switch key {
 			case "ext":
-				return &FormatFilter{Type: "ext", Value: val}, nil
+				if op != "=" && op != "!=" && op != ":" {
+					return nil, fmt.Errorf("unsupported extension operator %q", op)
+				}
+				return &FormatFilter{Type: "ext", Value: val, Op: op}, nil
 			case "res", "height":
 				return &FormatFilter{Type: "res", Value: val, Op: op}, nil
 			case "width":

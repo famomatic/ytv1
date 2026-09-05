@@ -19,12 +19,17 @@ type DASHManifest struct {
 	Formats    []Format
 }
 
-func FetchDASHManifest(ctx context.Context, client *http.Client, url string) (*DASHManifest, error) {
+func FetchDASHManifest(ctx context.Context, client *http.Client, url string, headers ...http.Header) (*DASHManifest, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	for _, h := range headers {
+		for key, values := range h {
+			req.Header[key] = append([]string(nil), values...)
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch DASH manifest: %w", err)
@@ -41,7 +46,10 @@ func FetchDASHManifest(ctx context.Context, client *http.Client, url string) (*D
 	}
 
 	raw := string(body)
-	parsedFormats, _ := ParseDASHManifest(raw, url)
+	parsedFormats, parseErr := ParseDASHManifest(raw, url)
+	if parseErr != nil {
+		return nil, parseErr
+	}
 
 	return &DASHManifest{
 		RawContent: raw,
@@ -56,31 +64,36 @@ type dashMPD struct {
 }
 
 type dashPeriod struct {
-	AdaptationSets []dashAdaptationSet `xml:"AdaptationSet"`
+	BaseURL         string              `xml:"BaseURL"`
+	SegmentTemplate *struct{}           `xml:"SegmentTemplate"`
+	AdaptationSets  []dashAdaptationSet `xml:"AdaptationSet"`
 }
 
 type dashAdaptationSet struct {
-	MimeType string               `xml:"mimeType,attr"`
-	Codecs   string               `xml:"codecs,attr"`
-	Rep      []dashRepresentation `xml:"Representation"`
+	BaseURL         string               `xml:"BaseURL"`
+	SegmentTemplate *struct{}            `xml:"SegmentTemplate"`
+	MimeType        string               `xml:"mimeType,attr"`
+	Codecs          string               `xml:"codecs,attr"`
+	Rep             []dashRepresentation `xml:"Representation"`
 }
 
 type dashRepresentation struct {
-	ID                string `xml:"id,attr"`
-	Bandwidth         int    `xml:"bandwidth,attr"`
-	Width             int    `xml:"width,attr"`
-	Height            int    `xml:"height,attr"`
-	FrameRate         string `xml:"frameRate,attr"`
-	MimeType          string `xml:"mimeType,attr"`
-	Codecs            string `xml:"codecs,attr"`
-	AudioSamplingRate string `xml:"audioSamplingRate,attr"`
-	BaseURL           string `xml:"BaseURL"`
+	SegmentTemplate   *struct{} `xml:"SegmentTemplate"`
+	ID                string    `xml:"id,attr"`
+	Bandwidth         int       `xml:"bandwidth,attr"`
+	Width             int       `xml:"width,attr"`
+	Height            int       `xml:"height,attr"`
+	FrameRate         string    `xml:"frameRate,attr"`
+	MimeType          string    `xml:"mimeType,attr"`
+	Codecs            string    `xml:"codecs,attr"`
+	AudioSamplingRate string    `xml:"audioSamplingRate,attr"`
+	BaseURL           string    `xml:"BaseURL"`
 }
 
 // ParseDASHManifest parses DASH MPD into normalized formats.
 func ParseDASHManifest(raw, manifestURL string) ([]Format, error) {
 	if strings.TrimSpace(raw) == "" {
-		return nil, nil
+		return nil, fmt.Errorf("empty DASH manifest")
 	}
 	var mpd dashMPD
 	if err := xml.Unmarshal([]byte(raw), &mpd); err != nil {
@@ -88,15 +101,25 @@ func ParseDASHManifest(raw, manifestURL string) ([]Format, error) {
 	}
 
 	formats := make([]Format, 0, 16)
-	base := strings.TrimSpace(mpd.BaseURL)
+	base := resolveManifestRefURL(manifestURL, "", strings.TrimSpace(mpd.BaseURL))
 	for _, period := range mpd.Periods {
 		for _, adp := range period.AdaptationSets {
 			for _, rep := range adp.Rep {
-				uri := strings.TrimSpace(rep.BaseURL)
-				if uri == "" {
+				segmented := len(mpd.Periods) > 1 || period.SegmentTemplate != nil || adp.SegmentTemplate != nil || rep.SegmentTemplate != nil
+				absURL := base
+				for _, part := range []string{period.BaseURL, adp.BaseURL, rep.BaseURL} {
+					if strings.TrimSpace(part) != "" {
+						absURL = resolveManifestRefURL(absURL, "", strings.TrimSpace(part))
+					}
+				}
+				if !segmented && rep.BaseURL == "" && adp.BaseURL == "" {
 					continue
 				}
-				absURL := resolveManifestRefURL(manifestURL, base, uri)
+				protocol, mpdURL := "https", ""
+				if segmented {
+					protocol, mpdURL, absURL = "dash", manifestURL, manifestURL
+				}
+
 				mimeType := firstNonEmpty(strings.TrimSpace(rep.MimeType), strings.TrimSpace(adp.MimeType))
 				codecsRaw := firstNonEmpty(strings.TrimSpace(rep.Codecs), strings.TrimSpace(adp.Codecs))
 				if mimeType != "" && codecsRaw != "" && !strings.Contains(mimeType, "codecs=") {
@@ -105,17 +128,22 @@ func ParseDASHManifest(raw, manifestURL string) ([]Format, error) {
 				container, codecs := parseMimeDetails(mimeType)
 
 				f := Format{
-					Itag:            parseInt(rep.ID),
-					URL:             absURL,
-					MimeType:        mimeType,
-					Container:       container,
-					Codecs:          codecs,
-					Bitrate:         rep.Bandwidth,
-					Width:           rep.Width,
-					Height:          rep.Height,
-					FPS:             parseFrameRate(rep.FrameRate),
-					AudioSampleRate: parseInt(rep.AudioSamplingRate),
-					Protocol:        "dash",
+					Itag:             parseInt(rep.ID),
+					URL:              absURL,
+					MimeType:         mimeType,
+					Container:        container,
+					Codecs:           codecs,
+					Bitrate:          rep.Bandwidth,
+					Width:            rep.Width,
+					Height:           rep.Height,
+					FPS:              parseFrameRate(rep.FrameRate),
+					AudioSampleRate:  parseInt(rep.AudioSamplingRate),
+					Protocol:         protocol,
+					ManifestURL:      mpdURL,
+					RepresentationID: rep.ID,
+				}
+				if f.Itag <= 0 {
+					f.Itag = 1000000 + len(formats)
 				}
 				f.HasAudio, f.HasVideo = deriveMediaFlags(f, true)
 				formats = append(formats, f)

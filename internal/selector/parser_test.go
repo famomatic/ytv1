@@ -39,11 +39,11 @@ func TestParse(t *testing.T) {
 					{
 						{Filters: []FormatFilter{
 							{Type: "media", Value: "video", Op: "best"},
-							{Type: "ext", Value: "mp4"},
+							{Type: "ext", Value: "mp4", Op: "="},
 						}},
 						{Filters: []FormatFilter{
 							{Type: "media", Value: "audio", Op: "best"},
-							{Type: "ext", Value: "m4a"},
+							{Type: "ext", Value: "m4a", Op: "="},
 						}},
 					},
 				},

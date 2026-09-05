@@ -143,7 +143,11 @@ func matches(f types.FormatInfo, filter *FormatFilter) bool {
 			return f.HasAudio
 		}
 	case "ext":
-		return formatExt(f) == strings.ToLower(filter.Value)
+		matches := formatExt(f) == strings.ToLower(filter.Value)
+		if filter.Op == "!=" {
+			return !matches
+		}
+		return matches
 	case "res":
 		val, err := strconv.Atoi(filter.Value)
 		if err != nil {

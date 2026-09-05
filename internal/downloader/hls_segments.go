@@ -12,10 +12,11 @@ import (
 // initialization segment. Sequence is the HLS media-sequence number and is
 // used to align independently published video and audio renditions.
 type HLSMediaSegment struct {
-	Sequence int
-	Duration time.Duration
-	Data     []byte
-	Init     []byte
+	Discontinuity bool
+	Sequence      int
+	Duration      time.Duration
+	Data          []byte
+	Init          []byte
 }
 
 // HLSMediaSegmentReader incrementally follows a media playlist and returns
@@ -68,23 +69,32 @@ func (r *HLSMediaSegmentReader) Next(ctx context.Context) (*HLSMediaSegment, err
 			if err != nil {
 				return nil, err
 			}
-			if seg.Map != nil && seg.Map.URI != r.initURI {
-				r.initData, err = doGETBytesWithRetry(ctx, r.dl.Client, seg.Map.URI, r.dl.Headers, r.dl.Transport)
+			if seg.Map == nil {
+				r.initURI = ""
+				r.initData = nil
+			}
+			if seg.Map != nil && hlsMapKey(seg.Map) != r.initURI {
+				r.initData, err = r.dl.fetchObject(ctx, seg.Map.URI, seg.Map.Range)
 				if err != nil {
 					return nil, err
 				}
-				r.initURI = seg.Map.URI
+				r.initData, err = decryptHLSBody(r.initData, seg.Map.Key, 0)
+				if err != nil {
+					return nil, err
+				}
+				r.initURI = hlsMapKey(seg.Map)
 			}
 			r.dl.lastSeq = seg.Seq
-			r.dl.seenSegments = trackSeen(r.dl.seenSegments, seg.URL)
+			r.dl.seenSegments = trackSeen(r.dl.seenSegments, hlsSegmentKey(seg))
 			if len(r.pending) == 0 && !r.endList {
 				r.nextRefresh = time.Now().Add(refreshDelay(r.target))
 			}
 			return &HLSMediaSegment{
-				Sequence: seg.Seq,
-				Duration: time.Duration(seg.Duration * float64(time.Second)),
-				Data:     body,
-				Init:     append([]byte(nil), r.initData...),
+				Sequence:      seg.Seq,
+				Duration:      time.Duration(seg.Duration * float64(time.Second)),
+				Discontinuity: seg.Discontinuity,
+				Data:          body,
+				Init:          append([]byte(nil), r.initData...),
 			}, nil
 		}
 		if r.endList && r.dl.lastSeq >= 0 {

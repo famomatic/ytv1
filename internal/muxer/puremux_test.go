@@ -62,11 +62,11 @@ func TestPureMuxMuxerMergesWebMInputs(t *testing.T) {
 		t.Fatalf("output is not a WebM/Matroska file: % x", b[:min(8, len(b))])
 	}
 
-	if _, err := os.Stat(videoPath); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("video intermediate should be removed, stat err=%v", err)
+	if _, err := os.Stat(videoPath); err != nil {
+		t.Errorf("video input should remain owned by caller, stat err=%v", err)
 	}
-	if _, err := os.Stat(audioPath); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("audio intermediate should be removed, stat err=%v", err)
+	if _, err := os.Stat(audioPath); err != nil {
+		t.Errorf("audio input should remain owned by caller, stat err=%v", err)
 	}
 }
 

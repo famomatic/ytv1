@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/famomatic/ytv1/internal/timeshift"
@@ -76,21 +77,27 @@ func envSeconds(name string) time.Duration {
 // until ctx is cancelled, so segments are ready when a player first fetches the
 // playlist.
 type dvrServer struct {
-	dvr *timeshift.DVR
-	st  *agentServeState
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+	dvr    *timeshift.DVR
+	st     *agentServeState
 }
 
 // newDVRServer starts recording p into a fresh DVR and returns an HTTP handler
 // for it. Cancel ctx to stop recording and release the agent session.
 func (s *Source) newDVRServer(ctx context.Context, p agentStreamParams, st *agentServeState) *dvrServer {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	dvr := timeshift.NewDVR(dvrConfigFromEnv())
 	go func() {
+		defer close(done)
 		if err := s.streamAgentMedia(ctx, p, dvr); err != nil {
 			fmt.Fprintf(os.Stderr, "soop: agent DVR recording ended: %v\n", err)
 		}
-		_ = dvr.Close()
+		dvr.Finish()
 	}()
-	return &dvrServer{dvr: dvr, st: st}
+	return &dvrServer{dvr: dvr, st: st, cancel: cancel, done: done}
 }
 
 func (ds *dvrServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -100,10 +107,14 @@ func (ds *dvrServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Make the first playlist fetch wait briefly for the first segment so the
 	// player never sees an empty live playlist (which some demuxers reject).
 	if r.URL.Path == "/index.m3u8" {
-		deadline := time.Now().Add(8 * time.Second)
-		for ds.dvr.SegmentCount() == 0 && time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancel()
+		if err := ds.dvr.WaitReady(ctx); err != nil {
+			http.Error(w, "DVR not ready", http.StatusServiceUnavailable)
+			return
 		}
 	}
 	ds.dvr.Handler().ServeHTTP(w, r)
 }
+
+func (ds *dvrServer) Close() { ds.once.Do(func() { ds.cancel(); <-ds.done; _ = ds.dvr.Close() }) }

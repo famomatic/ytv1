@@ -76,7 +76,9 @@ func (r *defaultResolver) GetPlayerJS(ctx context.Context, playerURL string) (st
 	// network round-trip instead of racing duplicate player JS downloads.
 	lock, release := r.fetchLocks.acquire(cacheKey)
 	defer release()
-	lock.Lock()
+	if err := lock.LockContext(ctx); err != nil {
+		return "", err
+	}
 	defer lock.Unlock()
 
 	// Re-check under the lock: another caller may have populated it.

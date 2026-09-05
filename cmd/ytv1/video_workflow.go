@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -56,6 +57,12 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		}
 		return err
 	}
+	if activeDownloadArchive != nil && activeDownloadArchive.Has(client.ArchiveID(info)) {
+		if opts.BreakOnExisting {
+			return errBreakOnExisting
+		}
+		return nil
+	}
 	extractMs := time.Since(extractStart).Milliseconds()
 	if opts.Verbose {
 		fmt.Fprintln(statusW(), formatExtractionEvent(client.ExtractionEvent{
@@ -67,7 +74,11 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 
 	if opts.PrintJSON || opts.DumpSingleJSON {
-		if err := emitDumpSingleJSON(os.Stdout, url, info); err != nil {
+		payload, err := c.PlaybackJSON(ctx, url, info, buildDownloadOptions(opts))
+		if err != nil {
+			return err
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(payload); err != nil {
 			return err
 		}
 		return recordForcedArchiveIfRequested(info, opts)
@@ -105,6 +116,11 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 	}
 
 	if opts.WriteInfoJSON {
+		resolved, err := c.ResolveVideoURLs(ctx, url, info)
+		if err != nil {
+			return err
+		}
+		info = resolved
 		if err := writeInfoJSONSidecar(url, info, opts); err != nil {
 			return err
 		}
@@ -160,7 +176,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		if shouldPrintHumanText(opts) {
 			fmt.Fprintf(statusW(), "Skipping existing file: %s\n", downloadOpts.OutputPath)
 		}
-		if err := recordCompletedDownload(info.ID); err != nil {
+		if err := recordCompletedDownload(client.ArchiveID(info)); err != nil {
 			return err
 		}
 		return nil
@@ -169,7 +185,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 		if shouldPrintHumanText(opts) {
 			fmt.Fprintf(statusW(), "Skipping existing post-processed file: %s\n", downloadOpts.OutputPath)
 		}
-		if err := recordCompletedDownload(info.ID); err != nil {
+		if err := recordCompletedDownload(client.ArchiveID(info)); err != nil {
 			return err
 		}
 		return nil
@@ -216,7 +232,7 @@ func processURL(ctx context.Context, c *client.Client, url string, opts cli.Opti
 			)
 		}
 	}
-	if err := recordCompletedDownload(info.ID); err != nil {
+	if err := recordCompletedDownload(client.ArchiveID(info)); err != nil {
 		return err
 	}
 	return nil

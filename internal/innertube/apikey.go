@@ -45,10 +45,10 @@ type resolvedWatchData struct {
 }
 
 type APIKeyResolver struct {
-	httpClient  *http.Client
-	mu          sync.RWMutex
-	cache       map[string]resolvedWatchData
-	fetchLocks  *keyLock
+	httpClient *http.Client
+	mu         sync.RWMutex
+	cache      map[string]resolvedWatchData
+	fetchLocks *keyLock
 }
 
 func NewAPIKeyResolver(httpClient *http.Client) *APIKeyResolver {
@@ -147,7 +147,9 @@ func (r *APIKeyResolver) resolveWatchDataCached(ctx context.Context, cacheKey st
 
 	lock, release := r.fetchLocks.acquire(cacheKey)
 	defer release()
-	lock.Lock()
+	if err := lock.LockContext(ctx); err != nil {
+		return resolvedWatchData{}, err
+	}
 	defer lock.Unlock()
 
 	// Re-check under the lock: a concurrent caller may have populated it.

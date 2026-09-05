@@ -1,6 +1,9 @@
 package client
 
-import "sync"
+import (
+	"github.com/famomatic/ytv1/internal/ctxsync"
+	"sync"
+)
 
 // keyLock serializes operations that share a logical key (for example a
 // video ID). It prevents thundering-herd duplicate network fetches when
@@ -16,7 +19,7 @@ type keyLock struct {
 }
 
 type lockEntry struct {
-	mu      sync.Mutex
+	mu      ctxsync.Mutex
 	waiters int
 }
 
@@ -26,7 +29,7 @@ func newKeyLock() *keyLock {
 
 // acquire returns a mutex for the given key. The caller must call the
 // returned release function exactly once when done (typically via defer).
-func (l *keyLock) acquire(key string) (*sync.Mutex, func()) {
+func (l *keyLock) acquire(key string) (*ctxsync.Mutex, func()) {
 	l.mu.Lock()
 	entry, ok := l.locks[key]
 	if !ok {

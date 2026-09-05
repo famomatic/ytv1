@@ -49,11 +49,17 @@ func playlistRangeIndexes(start int, end int, step int) []int {
 	if step > 0 {
 		for i := start; i <= end; i += step {
 			out = append(out, i)
+			if step > end-i {
+				break
+			}
 		}
 		return out
 	}
 	for i := start; i >= end; i += step {
 		out = append(out, i)
+		if step < end-i {
+			break
+		}
 	}
 	return out
 }
@@ -131,11 +137,11 @@ func clampPlaylistRange(start int, end int, step int, total int, context string)
 		return 0, 0, 0, fmt.Errorf("%w: invalid ascending playlist item range for negative step %q", ErrInvalidInput, context)
 	}
 	if total == 0 {
-		return 1, 0, step, nil
+		return 1, 0, 1, nil
 	}
 	if step > 0 {
 		if start > total || end < 1 {
-			return 1, 0, step, nil
+			return 1, 0, 1, nil
 		}
 		if start < 1 {
 			start = 1
@@ -146,7 +152,7 @@ func clampPlaylistRange(start int, end int, step int, total int, context string)
 		return start, end, step, nil
 	}
 	if start < 1 || end > total {
-		return 1, 0, step, nil
+		return 1, 0, 1, nil
 	}
 	if start > total {
 		start = total

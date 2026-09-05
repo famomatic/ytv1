@@ -109,14 +109,9 @@ func TestExtractSegments_RepeatMinusOne_DynamicManifest(t *testing.T) {
 	}
 
 	d := NewDASHDownloader(nil, "https://example.com/manifest.mpd", "999")
-	segments, _, err := d.extractSegments(mpd)
-	if err != nil {
-		t.Fatalf("extractSegments() error = %v", err)
-	}
-
-	// Dynamic manifest: r=-1 generates a single segment; caller re-fetches.
-	if len(segments) != 1 {
-		t.Fatalf("expected 1 segment for dynamic r=-1, got %d", len(segments))
+	_, _, err = d.extractSegments(mpd)
+	if err == nil {
+		t.Fatal("expected unbounded dynamic timeline error")
 	}
 }
 
@@ -156,4 +151,3 @@ func TestExtractSegments_RepeatValue(t *testing.T) {
 	// Suppress unused fmt import warning for future test additions.
 	_ = fmt.Sprint
 }
-

@@ -3,7 +3,6 @@ package muxer
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -44,7 +43,7 @@ func (f *FFmpegMuxer) Available() bool {
 }
 
 // Merge merges video and audio files into a single output file with metadata.
-// It deletes the input files upon successful merge.
+// Input files remain owned by the caller.
 func (f *FFmpegMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPath string, meta types.Metadata) error {
 	if err := validateFilePath(videoPath, "video"); err != nil {
 		return err
@@ -72,8 +71,6 @@ func (f *FFmpegMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPat
 	}
 
 	// Clean up input files
-	_ = os.Remove(videoPath)
-	_ = os.Remove(audioPath)
 
 	return nil
 }

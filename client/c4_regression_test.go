@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -21,6 +22,8 @@ func loadClientFixture(t *testing.T, name string) string {
 }
 
 func TestRegression_DSYFmhjDbvs_DownloadMergeLifecycle(t *testing.T) {
+	var eventMu sync.Mutex
+
 	mediaBase := "https://media.example"
 	fixture := loadClientFixture(t, "dsyfmhjdbvs_player_response.json")
 	var extractionEvents []ExtractionEvent
@@ -99,9 +102,13 @@ func TestRegression_DSYFmhjDbvs_DownloadMergeLifecycle(t *testing.T) {
 		ClientOverrides: []string{"mweb"},
 		Muxer:           testMuxer{},
 		OnExtractionEvent: func(evt ExtractionEvent) {
+			eventMu.Lock()
+			defer eventMu.Unlock()
 			extractionEvents = append(extractionEvents, evt)
 		},
 		OnDownloadEvent: func(evt DownloadEvent) {
+			eventMu.Lock()
+			defer eventMu.Unlock()
 			downloadEvents = append(downloadEvents, evt)
 		},
 	})

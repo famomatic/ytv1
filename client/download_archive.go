@@ -32,7 +32,7 @@ func OpenDownloadArchive(path string) (*DownloadArchive, error) {
 			return nil, err
 		}
 	}
-	f, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}
@@ -48,10 +48,11 @@ func OpenDownloadArchive(path string) (*DownloadArchive, error) {
 		if line == "" {
 			continue
 		}
-		if _, err := ExtractVideoID(line); err != nil {
+		key, err := archiveKey(line)
+		if err != nil {
 			continue
 		}
-		archive.ids[line] = struct{}{}
+		archive.ids[key] = struct{}{}
 	}
 	if err := scanner.Err(); err != nil {
 		_ = f.Close()
@@ -79,7 +80,11 @@ func (a *DownloadArchive) Has(videoID string) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	_, ok := a.ids[videoID]
+	key, err := archiveKey(videoID)
+	if err != nil {
+		return false
+	}
+	_, ok := a.ids[key]
 	return ok
 }
 
@@ -88,9 +93,11 @@ func (a *DownloadArchive) Add(videoID string) error {
 	if a == nil {
 		return nil
 	}
-	if _, err := ExtractVideoID(videoID); err != nil {
+	key, err := archiveKey(videoID)
+	if err != nil {
 		return fmt.Errorf("invalid video id for archive: %q", videoID)
 	}
+	videoID = key
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, exists := a.ids[videoID]; exists {
@@ -104,4 +111,39 @@ func (a *DownloadArchive) Add(videoID string) error {
 	}
 	a.ids[videoID] = struct{}{}
 	return nil
+}
+
+// ArchiveID returns a source-qualified archive key, preserving legacy YouTube IDs.
+func ArchiveID(info *VideoInfo) string {
+	if info == nil {
+		return ""
+	}
+	if info.SourceName == "" || info.SourceName == "youtube" {
+		return info.ID
+	}
+	return info.SourceName + " " + info.ID
+}
+func archiveKey(input string) (string, error) {
+	fields := strings.Fields(input)
+	if len(fields) == 2 {
+		name, id := strings.ToLower(fields[0]), fields[1]
+		if name == "youtube" {
+			return ExtractVideoID(id)
+		}
+		valid := func(s string) bool {
+			if s == "" {
+				return false
+			}
+			for _, r := range s {
+				if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+					return false
+				}
+			}
+			return true
+		}
+		if valid(name) && valid(id) {
+			return name + " " + id, nil
+		}
+	}
+	return ExtractVideoID(input)
 }

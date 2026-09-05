@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/famomatic/puremux/pkg/media"
 	"github.com/famomatic/ytv1/internal/types"
@@ -71,15 +70,16 @@ func (m *PureMuxMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPa
 
 	err := remuxMediaFiles(ctx, videoPath, audioPath, outputPath)
 	if err == nil {
-		// Clean up intermediates on success, matching FFmpegMuxer.Merge.
-		_ = os.Remove(videoPath)
-		_ = os.Remove(audioPath)
+		// The caller owns intermediate file cleanup.
 		return nil
 	}
 
 	if isPureMuxUnsupported(err) {
 		// puremux declared it cannot handle this (input/output/codec) pair.
 		// Fall back to FFmpeg if available.
+		if m.Fallback == nil || !m.Fallback.Available() {
+			return fmt.Errorf("%w: %w", ErrPureMuxUnavailable, err)
+		}
 		return m.fallbackOrUnavailable(ctx, videoPath, audioPath, outputPath, meta)
 	}
 
@@ -91,9 +91,7 @@ func (m *PureMuxMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPa
 		}
 		return nil
 	}
-	// No fallback: remove any partial/corrupt output puremux may have written
-	// so a failed merge does not leave a truncated file masquerading as output.
-	_ = os.Remove(outputPath)
+	// The failed temporary output is removed by the remuxer; preserve prior output.
 	return fmt.Errorf("puremux merge failed: %w", err)
 }
 

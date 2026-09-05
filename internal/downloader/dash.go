@@ -5,10 +5,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -22,10 +22,15 @@ type DASHDownloader struct {
 	// State
 	seenSegments     map[string]bool
 	lastSeq          int64
+	writtenInit      string
 	skippedFragments int
 }
 
 func NewDASHDownloader(client *http.Client, manifestURL, representationID string) *DASHDownloader {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
 	return &DASHDownloader{
 		Client:           client,
 		ManifestURL:      manifestURL,
@@ -58,10 +63,16 @@ type dashMPD struct {
 }
 
 type dashPeriod struct {
-	AdaptationSet []dashAdaptationSet `xml:"AdaptationSet"`
+	ID              string               `xml:"id,attr"`
+	Start           string               `xml:"start,attr"`
+	Duration        string               `xml:"duration,attr"`
+	BaseURL         string               `xml:"BaseURL"`
+	SegmentTemplate *dashSegmentTemplate `xml:"SegmentTemplate"`
+	AdaptationSet   []dashAdaptationSet  `xml:"AdaptationSet"`
 }
 
 type dashAdaptationSet struct {
+	BaseURL         string               `xml:"BaseURL"`
 	MimeType        string               `xml:"mimeType,attr"`
 	Representation  []dashRepresentation `xml:"Representation"`
 	SegmentTemplate *dashSegmentTemplate `xml:"SegmentTemplate"`
@@ -75,11 +86,29 @@ type dashRepresentation struct {
 }
 
 type dashSegmentTemplate struct {
-	Timescale       int64                `xml:"timescale,attr"`
-	Initialization  string               `xml:"initialization,attr"`
-	Media           string               `xml:"media,attr"`
-	StartNumber     int64                `xml:"startNumber,attr"`
-	SegmentTimeline *dashSegmentTimeline `xml:"SegmentTimeline"`
+	offsetSet              bool
+	Duration               int64                `xml:"duration,attr"`
+	PresentationTimeOffset int64                `xml:"presentationTimeOffset,attr"`
+	Timescale              int64                `xml:"timescale,attr"`
+	Initialization         string               `xml:"initialization,attr"`
+	Media                  string               `xml:"media,attr"`
+	StartNumber            *int64               `xml:"startNumber,attr"`
+	SegmentTimeline        *dashSegmentTimeline `xml:"SegmentTimeline"`
+}
+
+func (t *dashSegmentTemplate) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type plain dashSegmentTemplate
+	var v plain
+	if err := d.DecodeElement(&v, &start); err != nil {
+		return err
+	}
+	*t = dashSegmentTemplate(v)
+	for _, a := range start.Attr {
+		if a.Name.Local == "presentationTimeOffset" {
+			t.offsetSet = true
+		}
+	}
+	return nil
 }
 
 type dashSegmentTimeline struct {
@@ -93,8 +122,11 @@ type dashS struct {
 }
 
 type dashSegment struct {
-	URL string
-	Seq int64
+	PeriodKey string
+	InitURL   string
+	Period    int
+	URL       string
+	Seq       int64
 }
 
 func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
@@ -121,6 +153,16 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 		}
 
 		isDynamic := mpd.Type == "dynamic"
+		if isDynamic {
+			next := make(map[string]bool, len(segments))
+			for _, seg := range segments {
+				k := dashSegmentKey(seg)
+				if d.seenSegments[k] {
+					next[k] = true
+				}
+			}
+			d.seenSegments = next
+		}
 		if !isDynamic && len(segments) > 1 && normalizeTransportConfig(d.Transport).MaxConcurrency > 1 {
 			if err := d.downloadSegmentsConcurrent(ctx, segments, w); err != nil {
 				return err
@@ -139,10 +181,8 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 		// it. For dynamic manifests we therefore dedup by the stable segment URL
 		// only. Static manifests keep the fast lastSeq short-circuit.
 		for _, seg := range segments {
-			if !isDynamic && seg.Seq <= d.lastSeq && d.lastSeq != -1 {
-				continue
-			}
-			if d.seenSegments[seg.URL] {
+
+			if d.seenSegments[dashSegmentKey(seg)] {
 				continue
 			}
 
@@ -153,14 +193,14 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
 					}
 					d.lastSeq = seg.Seq
-					d.seenSegments = trackSeen(d.seenSegments, seg.URL)
+					d.seenSegments[dashSegmentKey(seg)] = true
 					continue
 				}
 				return err
 			}
 
 			d.lastSeq = seg.Seq
-			d.seenSegments = trackSeen(d.seenSegments, seg.URL)
+			d.seenSegments[dashSegmentKey(seg)] = true
 		}
 
 		if !isDynamic {
@@ -183,104 +223,19 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 	}
 }
 
-// maxConcurrentDASHSegments caps the number of segments buffered in memory
-// during concurrent DASH downloads to prevent OOM on large static streams.
-const maxConcurrentDASHSegments = 64
-
 func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
-	for start := 0; start < len(segments); start += maxConcurrentDASHSegments {
-		end := start + maxConcurrentDASHSegments
-		if end > len(segments) {
-			end = len(segments)
-		}
-		if err := d.downloadSegmentBatchConcurrent(ctx, segments[start:end], w); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (d *DASHDownloader) downloadSegmentBatchConcurrent(ctx context.Context, segments []dashSegment, w io.Writer) error {
-	type item struct {
-		seq  int64
-		url  string
-		body []byte
-		err  error
-	}
-	cfg := normalizeTransportConfig(d.Transport)
-	concurrency := cfg.MaxConcurrency
-	if concurrency > len(segments) {
-		concurrency = len(segments)
-	}
-	sem := make(chan struct{}, concurrency)
-	out := make([]item, len(segments))
-	// started tracks whether each goroutine actually ran to completion
-	// (set its out[i] entry). A goroutine that bails on ctx.Done() before
-	// setting out[i] leaves a zero-value item with err==nil, which would
-	// otherwise be written as an empty body — silently truncating the stream.
-	started := make([]bool, len(segments))
-	var wg sync.WaitGroup
-	// parentCtx is the caller's context; ctx below is an internal derivation we
-	// cancel on the first segment failure to stop sibling downloads. We must
-	// distinguish the two so a real segment error is reported instead of the
-	// internal cancellation it triggers.
-	parentCtx := ctx
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for i, seg := range segments {
-		wg.Add(1)
-		i, seg := i, seg
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
+	return orderedFetch(ctx, len(segments), fragmentWindow(d.Transport),
+		func(ctx context.Context, i int) ([]byte, error) {
+			seg := segments[i]
 			body, err := doGETBytesWithRetry(ctx, d.Client, seg.URL, d.Headers, d.Transport)
-			out[i] = item{
-				seq:  seg.Seq,
-				url:  seg.URL,
-				body: body,
-				err:  err,
-			}
-			started[i] = true
 			if err != nil {
-				cancel()
+				return nil, fmt.Errorf("failed to download segment seq=%d: %w", seg.Seq, err)
 			}
-		}()
-	}
-	wg.Wait()
-
-	// Prefer a concrete segment failure over the internal cancellation it
-	// triggers: cancel() fires before wg.Done, so ctx.Err() would otherwise
-	// mask the real status/network error as a bare context.Canceled.
-	for i := range out {
-		if started[i] && out[i].err != nil {
-			return fmt.Errorf("failed to download segment seq=%d: %w", segments[i].Seq, out[i].err)
-		}
-	}
-	// No concrete failure: a genuine parent-context cancellation is the only
-	// remaining reason a goroutine may have skipped its write.
-	if parentCtx.Err() != nil {
-		return parentCtx.Err()
-	}
-	for i := range out {
-		if !started[i] {
-			return fmt.Errorf("segment seq=%d was not downloaded (cancelled)", segments[i].Seq)
-		}
-		if len(out[i].body) == 0 {
-			return fmt.Errorf("segment seq=%d downloaded as empty body", segments[i].Seq)
-		}
-		if _, err := w.Write(out[i].body); err != nil {
-			return err
-		}
-		d.lastSeq = out[i].seq
-		d.seenSegments = trackSeen(d.seenSegments, out[i].url)
-	}
-	return nil
+			if len(body) == 0 {
+				return nil, fmt.Errorf("empty DASH segment seq=%d", seg.Seq)
+			}
+			return body, nil
+		}, func(ctx context.Context, i int, body []byte) error { return d.writeSegment(ctx, segments[i], body, w) })
 }
 
 func (d *DASHDownloader) fetchManifest(ctx context.Context) ([]byte, error) {
@@ -295,143 +250,6 @@ func parseDASH(data []byte) (*dashMPD, error) {
 	return &mpd, nil
 }
 
-func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Duration, error) {
-	// Find Representation
-	var rep *dashRepresentation
-	var adapt *dashAdaptationSet
-
-	found := false
-	for _, p := range mpd.Period {
-		for i, a := range p.AdaptationSet {
-			for j, r := range a.Representation {
-				if r.ID == d.RepresentationID {
-					rep = &p.AdaptationSet[i].Representation[j]
-					adapt = &p.AdaptationSet[i]
-					found = true
-					break
-				}
-			}
-			if found {
-				break
-			}
-		}
-		if found {
-			break
-		}
-	}
-
-	if !found {
-		return nil, 0, fmt.Errorf("representation %s not found", d.RepresentationID)
-	}
-
-	// Resolve Template
-	tmpl := rep.SegmentTemplate
-	if tmpl == nil {
-		tmpl = adapt.SegmentTemplate
-	}
-	if tmpl == nil {
-		return nil, 0, fmt.Errorf("SegmentTemplate not found for representation %s", d.RepresentationID)
-	}
-
-	// Resolve BaseURL
-	baseURL := mpd.BaseURL
-	if rep.BaseURL != "" {
-		baseURL = rep.BaseURL // Overrides? Or appends? DASH standard says ... complex. Assuming override or relative.
-		// YouTube usually puts BaseURL in Rep usually? Or MPD level.
-	}
-
-	// Timeline processing
-	if tmpl.SegmentTimeline == nil {
-		// Number based template?
-		return nil, 0, fmt.Errorf("SegmentTimeline missing (Number-based template not implemented)")
-	}
-
-	var segments []dashSegment
-	currentTime := int64(0)
-	currentSeq := tmpl.StartNumber // Defaults to 1?
-	if currentSeq == 0 {
-		currentSeq = 1
-	}
-
-	for _, s := range tmpl.SegmentTimeline.S {
-		if s.T != nil {
-			currentTime = *s.T
-		}
-
-		// DASH spec: r=-1 means "repeat until the end of the Period" (or
-		// until the next S element's t boundary). For static manifests this
-		// must be expanded using the mediaPresentationDuration, otherwise the
-		// stream is silently truncated. yt-dlp handles this by computing the
-		// repeat count from the remaining presentation duration.
-		const maxSegmentRepeatCount = 10000
-		repeatCount := s.R
-		if repeatCount < 0 {
-			// r=-1: expand to fill the remaining presentation duration.
-			// For dynamic manifests (isDynamic), the caller re-fetches the
-			// manifest periodically, so we only need the currently-available
-			// segments. For static manifests, we must compute the full count
-			// from mediaPresentationDuration to avoid truncation.
-			if mpd.Type != "dynamic" && mpd.MediaPresentationDuration != "" {
-				if totalDur, derr := parseDuration(mpd.MediaPresentationDuration); derr == nil && totalDur > 0 && s.D > 0 {
-					// timescale defaults to 1 when absent (DASH spec 5.3.9.2)
-					timescale := tmpl.Timescale
-					if timescale <= 0 {
-						timescale = 1
-					}
-					segmentDur := time.Duration(s.D) * time.Second / time.Duration(timescale)
-					if segmentDur > 0 {
-						elapsed := time.Duration(currentTime) * time.Second / time.Duration(timescale)
-						remaining := totalDur - elapsed
-						if remaining > 0 {
-							// r counts additional repeats after the first
-							// segment, so subtract 1 from the total segment
-							// count to get the repeat count.
-							repeatCount = int64(remaining/segmentDur) - 1
-						}
-					}
-				}
-			}
-			if repeatCount < 0 {
-				// Could not compute (dynamic manifest or missing duration):
-				// generate a single segment; the caller re-fetches for
-				// dynamic manifests.
-				repeatCount = 0
-			}
-		}
-		if repeatCount > maxSegmentRepeatCount {
-			repeatCount = maxSegmentRepeatCount
-		}
-		count := repeatCount + 1
-		for i := int64(0); i < count; i++ {
-			// Generate URL
-			urlStr := strings.ReplaceAll(tmpl.Media, "$RepresentationID$", d.RepresentationID)
-			urlStr = strings.ReplaceAll(urlStr, "$Number$", fmt.Sprintf("%d", currentSeq))
-			urlStr = strings.ReplaceAll(urlStr, "$Time$", fmt.Sprintf("%d", currentTime))
-			urlStr = strings.ReplaceAll(urlStr, "$Bandwidth$", fmt.Sprintf("%d", rep.Bandwidth))
-
-			fullURL := resolveURL(d.ManifestURL, baseURL+urlStr)
-
-			segments = append(segments, dashSegment{
-				URL: fullURL,
-				Seq: currentSeq,
-			})
-
-			currentTime += s.D
-			currentSeq++
-		}
-	}
-
-	// Duration calculation (minimumUpdatePeriod)
-	timeout := 5 * time.Second
-	if mpd.MinimumUpdatePeriod != "" {
-		if d, err := parseDuration(mpd.MinimumUpdatePeriod); err == nil {
-			timeout = d
-		}
-	}
-
-	return segments, timeout, nil
-}
-
 func (d *DASHDownloader) downloadSegment(ctx context.Context, seg dashSegment, w io.Writer) error {
 	body, err := doGETBytesWithRetry(ctx, d.Client, seg.URL, d.Headers, d.Transport)
 	if err != nil {
@@ -440,8 +258,7 @@ func (d *DASHDownloader) downloadSegment(ctx context.Context, seg dashSegment, w
 	if len(body) == 0 {
 		return fmt.Errorf("segment seq=%d downloaded as empty body", seg.Seq)
 	}
-	_, err = w.Write(body)
-	return err
+	return d.writeSegment(ctx, seg, body, w)
 }
 
 func parseDuration(s string) (time.Duration, error) {
@@ -498,7 +315,7 @@ func scanDurationComponents(part string, units map[byte]time.Duration, d *time.D
 		for j < len(part) && (part[j] == '.' || (part[j] >= '0' && part[j] <= '9')) {
 			j++
 		}
-		if j == i {
+		if j == i || j == len(part) {
 			return fmt.Errorf("invalid ISO 8601 duration segment: %q", part)
 		}
 		scale, ok := units[part[j]]
@@ -509,7 +326,11 @@ func scanDurationComponents(part string, units map[byte]time.Duration, d *time.D
 		if err != nil {
 			return fmt.Errorf("invalid ISO 8601 duration value %q: %w", part[i:j], err)
 		}
-		*d += time.Duration(f * float64(scale))
+		value := f * float64(scale)
+		if math.IsInf(value, 0) || math.IsNaN(value) || value >= float64(math.MaxInt64) || value < 0 || *d > time.Duration(math.MaxInt64)-time.Duration(value) {
+			return fmt.Errorf("ISO 8601 duration overflow")
+		}
+		*d += time.Duration(value)
 		*consumed = true
 		i = j + 1
 	}

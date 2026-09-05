@@ -47,6 +47,10 @@
 - `2026-09-04` (B158 ytv1 v0.2.7 patch release)
 - `2026-09-05` (B159 puremux v0.2.1 media API migration and FFmpeg dependency reduction)
 - `2026-09-05` (B160 ytv1 v0.2.8 patch release)
+- `2026-09-05` (B161 whole-repository audit: 43 findings and 8 improvement opportunities)
+- `2026-09-05` (B162-B166 completed: audit remediation, tests/vet/race, before/after benchmarks)
+
+- `2026-09-05` (B167-B168 puremux v0.2.2 compatibility and ytv1 v0.2.9 release)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -54,10 +58,12 @@
 - Live-gated E2E tests and default test suite were green at cycle closeout.
 - Core parity blocks are in place: Innertube policy, JS challenge, POT policy/injection, format materialization, retryable downloader transport, CLI diagnostics.
 
-### 1.3 Current Gap Theme (New Cycle Focus)
-- CLI still supports only a narrow selector mapping (`best`, `bestaudio`, `bestvideo`, `mp4`, `mp3`) and lacks yt-dlp-grade selection grammar behavior.
-- CLI/operator workflow parity is incomplete (batch controls, archive/idempotency, richer output templating, predictable failure controls).
-- Need explicit substitute-level acceptance criteria and regression matrix focused on real operator workflows, not only single-ID success.
+### 1.3 Current Gap Theme (Audit Follow-up)
+- B162-B166 address F01-F43 and O01-O08; [remediation report](AUDIT_FIXES_2026-09-05.md) records behavior, validation, and the API/source/protocol/output matrix.
+- Unsupported encryption, unbounded dynamic DASH repetition, and absent representations in a Period fail explicitly.
+- Local fixtures and race checks cover the changed paths. Real YouTube/SOOP long-running broadcasts and external encoder binaries remain separate environment-dependent verification.
+
+### Historical Completion Notes
 - B0 documentation sync is complete across plan/readme/architecture with explicit scorecard targets and workflow matrix classes.
 - B1 first increment landed: CLI now forwards custom `-f` expressions to package selector flow, while preserving mp3/mode aliases and numeric itag input handling.
 - B1 second increment landed in selector engine: fixed `ext=m4a` matching for `audio/mp4`, added width-filter semantics, improved `best` ranking to prefer AV candidates, and added selector behavior tests for merge/fallback/filter paths.
@@ -222,6 +228,8 @@
 - B159 landed (2026-09-05): migrated the removed puremux compatibility facade to v0.2.1 `pkg/media`, added selected-track native progressive MP4/WebM/MKV/MPEG-TS remuxing with exact timestamp ordering and recoverable destination replacement, moved YouTube demuxed HLS and SOOP live output to `media.LiveMuxer`, and narrowed FFmpeg to transcoding, metadata, and unsupported/failure fallback cases.
 - B160 landed (2026-09-05): ytv1 advances from v0.2.7 to the v0.2.8 patch release, containing the puremux v0.2.1 media API migration, native progressive MP4 remuxing, and expanded FFmpeg-free live and file mux paths.
 
+- B161 audit recorded 43 defects and 8 improvement opportunities. B162-B166 remediate that report; see [AUDIT_FIXES_2026-09-05.md](AUDIT_FIXES_2026-09-05.md).
+
 ### 1.4 Immediate Next Tasks (Strict Order)
 1. `[x]` B0. Rebaseline and target-definition reset for Cycle B
 2. `[x]` B1. Format selector grammar parity (`-f`)
@@ -381,6 +389,14 @@
 156. `[x]` B158. ytv1 v0.2.7 patch release
 157. `[x]` B159. puremux v0.2.1 media API migration and FFmpeg dependency reduction
 158. `[x]` B160. ytv1 v0.2.8 patch release
+159. `[x]` B161. User-requested whole-repository edge-case, concurrency, functionality, and optimization audit (2026-09-05); report and local reproducers, no production fixes.
+160. `[x]` B162. Audit safety fixes: sparse resume corruption, prior-output deletion, archive write collisions, parser panics, WebSocket write deadline, source cancellation, and Parts ownership (F01-F08).
+161. `[x]` B163. Audit media pipeline fixes: keep/MP3/live output contracts, source/OpenStream dispatch, HLS/DASH correctness, URL resolution and manifest transport (F09-F22, F34-F35, F41-F43).
+162. `[x]` B164. Audit long-lived source/cache fixes: DVR segmentation/shutdown, agent server lifecycle, session/token refresh, and dynamic DASH dedup (F23-F27, F32-F33, F38).
+163. `[x]` B165. Audit metadata/selection fixes: transcript schema, selector validation, reverse playlist ranges, thumbnail integrity, output templates, and multi-source metadata/archive (F28-F31, F36-F37, F39-F40).
+164. `[x]` B166. Audit performance and validation improvements with measurements (O01-O08); follow correctness fixes.
+165. `[x]` B167. User-requested puremux v0.2.2 dependency bump and compatibility verification.
+166. `[x]` B168. Commit audit remediation and dependency update; release ytv1 v0.2.9 with annotated tag and push main/tag to origin.
 
 ---
 
@@ -2825,6 +2841,14 @@ prints `ytv1 v0.2.8`, and `go test ./cmd/ytv1 -count=1` is green.
 
 ---
 
+### B161. Whole-Repository Audit `[x]`
+
+- User explicitly requested an audit of edge cases, races, functional gaps, and optimization opportunities.
+- Report: [AUDIT_2026-09-05.md](AUDIT_2026-09-05.md), including locations, triggers, evidence level, and proposed fixes for every finding.
+- Validation: existing `go test ./...`, `go vet ./...`, and `go test -race ./...` pass. Go-overlay probes reproduce 21 observed defects; the separately enabled alias race test produces the expected detector failure.
+- Reproducers/logs: `F:/cache/ytv1-audit-20260905/`. No production or existing test files changed; no live YouTube/SOOP E2E or benchmark was run.
+- B162-B166 capture discovered follow-up tasks in order. They are not started or marked fixed by this audit.
+
 ## 4. Public API Contract
 
 1. Preserve `client.New`, `GetVideo`, `GetFormats`, `ResolveStreamURL` behavior.
@@ -3136,3 +3160,28 @@ Cycle B is complete only when all are true:
    owner: `internal/source/soop` maintainers.
 3. `Low` - Live-gated confidence depends on periodic reruns; fixture matrix alone cannot detect all upstream runtime shifts.
    owner: release/checklist maintainers (`client/e2e_integration_test.go` + CI operators).
+
+
+### B162-B166. Audit Remediation
+- B162 safety and ownership: contiguous chunk-resume prefix, append-only archive writes, parser validation, prior output preservation, WebSocket lifetime, source cancellation, deep Parts copies.
+- B163 media pipeline: protocol-aware readers and MP3 output, simultaneous track downloads, caller-owned mux cleanup, HLS ranges/encrypted init, DASH templates/initialization/Periods, resolved playback JSON and manifest headers/errors.
+- B164 long-lived resources: bounded DVR PES/PTS handling, Finish vs Close, source-owned server cache and cleanup, all-address session expiry, token TTL, stable dynamic DASH identities.
+- B165 metadata and selection: srv3 captions, strict selector grammar/inequality, safe reverse ranges, transactional thumbnails, one-pass templates, source identity and archive keys.
+- B166 performance: cached extraction coalescing, expiry precomputation/default LRU cap, cancellable lock acquisition, bounded ordered fragment workers, independent timestamp-based live HLS tracks, reusable DVR handler and readiness signals.
+- Additive public changes authorized by the remediation scope: Client.Close/ResolveVideoURLs/PlaybackJSON, ArchiveID, source identity fields, manifest/representation addressing fields, PO token TTL and fragment memory settings. Minimal v1 API signatures are unchanged.
+- Benchmark baseline: 9ca90c0, Windows/amd64 i9-9900K, identical fixtures in an isolated cache worktree. Cached-session URL scanning/allocation removed; HLS 1,000-fragment fixture median 2.60 ms -> 2.15 ms and about 20% fewer allocated bytes.
+- Full resolution table, test references, API constraints, and measurement details: [AUDIT_FIXES_2026-09-05.md](AUDIT_FIXES_2026-09-05.md).
+
+- Final remediation gates: `go test ./...`, `go vet ./...`, `go test -race ./...`, and `git diff --check` passed. Logs are retained in `F:\cache\ytv1-audit-20260905\fixes-*.log`. B162-B166 are complete.
+
+
+### B167. puremux v0.2.2 Dependency Upgrade `[x]`
+- Updated go.mod/go.sum to github.com/famomatic/puremux v0.2.2; go mod tidy and module verification passed.
+- v0.2.2 preserves source track disposition/labels and rejects unsupported output metadata by default. Native file/playback mux paths explicitly permit omitting unsupported metadata, preserving their prior behavior. Codec/timing incompatibilities still fail; requested metadata embedding still uses the configured fallback.
+- Preserve the underlying puremux incompatibility alongside ErrPureMuxUnavailable when no fallback exists.
+- Full tests, vet, race tests, and the non-CGO v0.2.9 CLI build/version check passed.
+
+### B168. ytv1 v0.2.9 Release `[x]`
+- Includes B162-B166 audit remediation and the B167 puremux v0.2.2 upgrade.
+- Follows the repository release convention: main.currentVersion build injection and annotated Git tag v0.2.9 on main, pushed together to origin.
+- Version check: ytv1 v0.2.9. The verification binary is stored outside the repository at F:/cache/ytv1-v0.2.9.exe.

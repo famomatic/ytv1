@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,8 +29,9 @@ const (
 
 // wsConn is a loopback text-only WebSocket connection.
 type wsConn struct {
-	conn net.Conn
-	br   *bufio.Reader
+	conn    net.Conn
+	writeMu sync.Mutex
+	br      *bufio.Reader
 }
 
 // wsDial opens a WebSocket connection to host (host:port) at the given path.
@@ -80,6 +82,7 @@ func wsDial(host, path string, timeout time.Duration) (*wsConn, error) {
 			break
 		}
 	}
+	_ = conn.SetWriteDeadline(time.Time{})
 	return &wsConn{conn: conn, br: br}, nil
 }
 
@@ -89,6 +92,9 @@ func (c *wsConn) writeText(payload []byte) error {
 }
 
 func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(agentDialTimeout))
 	frame, err := encodeClientFrame(opcode, payload)
 	if err != nil {
 		return err

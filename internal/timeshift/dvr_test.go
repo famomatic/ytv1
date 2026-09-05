@@ -124,7 +124,8 @@ func TestSegmenterCutsOnKeyframes(t *testing.T) {
 func TestDVRPlaylistAndSegmentServing(t *testing.T) {
 	d := NewDVR(Config{TargetSegmentDuration: 1 * time.Second, Window: time.Minute})
 	d.Write(buildTSStream(7))
-	d.Close()
+	d.Finish()
+	defer d.Close()
 	if d.SegmentCount() < 3 {
 		t.Fatalf("want >=3 segments, got %d", d.SegmentCount())
 	}
@@ -147,8 +148,8 @@ func TestDVRPlaylistAndSegmentServing(t *testing.T) {
 			t.Fatalf("playlist missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, "#EXT-X-ENDLIST") {
-		t.Fatal("live playlist must not have ENDLIST")
+	if !strings.Contains(body, "#EXT-X-ENDLIST") {
+		t.Fatal("finished playlist must have ENDLIST")
 	}
 
 	// Segment fetch + range support.
@@ -180,7 +181,8 @@ func TestDVREvictsOldSegments(t *testing.T) {
 	// Small window keeps only ~2s of history; feeding 3s of segments must evict.
 	d := NewDVR(Config{TargetSegmentDuration: 1 * time.Second, Window: 2 * time.Second})
 	d.Write(buildTSStream(9)) // ~4s of keyframes
-	d.Close()
+	d.Finish()
+	defer d.Close()
 
 	d.mu.RLock()
 	first := d.segs[0].seq
@@ -244,7 +246,8 @@ func TestDVREvictsByBytes(t *testing.T) {
 	// Large time Window, tiny byte cap → eviction is driven by bytes.
 	d := NewDVR(Config{TargetSegmentDuration: 1 * time.Second, Window: time.Hour, MaxBytes: 4096})
 	d.Write(buildTSStream(9))
-	d.Close()
+	d.Finish()
+	defer d.Close()
 
 	d.mu.RLock()
 	segs := len(d.segs)

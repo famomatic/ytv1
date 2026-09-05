@@ -17,7 +17,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/famomatic/ytv1/internal/source"
 	"github.com/famomatic/ytv1/internal/types"
@@ -27,10 +28,13 @@ import (
 // once (metadata then download), and each join to the local agent would take the
 // same session port and conflict. Keyed by broadcast number, the first call
 // starts the stream+server and later calls reuse the URL.
-var (
-	agentStreamMu    sync.Mutex
-	agentStreamByBNO = map[string]string{}
-)
+type agentEndpoint struct {
+	url     string
+	expires time.Time
+	close   func()
+}
+
+// Endpoint ownership is per Source, including credentials and server lifecycle.
 
 // watchAPI mints the broadcast fan_ticket the agent gateway validates, and also
 // returns authoritative gateway/relay coordinates. Var for tests.
@@ -161,11 +165,11 @@ func (fw flushWriter) Write(b []byte) (int, error) {
 // a detached daemon there could outlive a wedged pipe (e.g. MPV closing behind a
 // shell pipe that hides the broken-pipe) and keep pulling from the agent forever.
 // main sets this from the CLI options before extraction.
-var detachServe bool
+var detachServe atomic.Bool
 
 // SetDetachServe records whether the current run only resolves a URL and exits
 // (true) versus downloads the media itself (false). See detachServe.
-func SetDetachServe(v bool) { detachServe = v }
+func SetDetachServe(v bool) { detachServe.Store(v) }
 
 // serveAgentStream returns a loopback URL that streams the agent's live media as
 // MPEG-TS. In resolve-only runs it uses a detached `ytv1 soopserve` process so
@@ -173,10 +177,22 @@ func SetDetachServe(v bool) { detachServe = v }
 // serves in-process so the server dies when this process does. A per-BNO cache
 // keeps Extract's metadata and download passes on one URL and one agent session.
 func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
-	agentStreamMu.Lock()
-	defer agentStreamMu.Unlock()
-	if u, ok := agentStreamByBNO[p.BNO]; ok {
-		return u, nil
+	s.agentMu.Lock()
+	defer s.agentMu.Unlock()
+	if s.closed {
+		return "", fmt.Errorf("source closed")
+	}
+	if s.streams == nil {
+		s.streams = make(map[string]agentEndpoint)
+	}
+	if e, ok := s.streams[p.BNO]; ok && (e.expires.IsZero() || time.Now().Before(e.expires)) {
+		return e.url, nil
+	}
+	if old, ok := s.streams[p.BNO]; ok {
+		delete(s.streams, p.BNO)
+		if old.close != nil {
+			go old.close()
+		}
 	}
 	// NOTE: no pre-flight media probe here. SOOPStreamer serves a single session
 	// per broadcast, so probing would consume that session and the daemon's
@@ -185,7 +201,7 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	// auto-fallen-back to the CDN; force the CDN with YTV1_SOOP_NO_AGENT=1.
 	var url string
 	var err error
-	if detachServe {
+	if detachServe.Load() {
 		// Resolve-only run: a player opens the URL, so serve the seekable HLS DVR
 		// (when timeshift is on). The detached daemon does this itself; the
 		// in-process fallback mirrors it.
@@ -200,7 +216,9 @@ func (s *Source) serveAgentStream(p agentStreamParams) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	agentStreamByBNO[p.BNO] = url
+	if _, ok := s.streams[p.BNO]; !ok {
+		s.streams[p.BNO] = agentEndpoint{url: url, expires: time.Now().Add(90 * time.Second)}
+	}
 	return url, nil
 }
 
@@ -213,15 +231,70 @@ func (s *Source) serveInProcess(p agentStreamParams, useTimeshift, playerMode bo
 	if err != nil {
 		return "", err
 	}
-	handler := http.Handler(s.agentHandler(p, nil, playerMode))
+	recordCtx, cancel := context.WithCancel(context.Background())
+	st := &agentServeState{lastActive: time.Now()}
+	handler := http.Handler(s.agentHandler(p, st, playerMode))
 	streamPath := "live.ts"
 	if useTimeshift {
-		handler = s.newDVRServer(context.Background(), p, nil)
+		handler = s.newDVRServer(recordCtx, p, st)
 		streamPath = "index.m3u8"
 	}
-	srv := &http.Server{Handler: handler}
+	inner := handler
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(w, r)
+		if !useTimeshift {
+			st.mu.Lock()
+			ended := st.everConnected && st.active == 0
+			st.mu.Unlock()
+			if ended {
+				s.agentMu.Lock()
+				if e, ok := s.streams[p.BNO]; ok {
+					e.expires = time.Now()
+					s.streams[p.BNO] = e
+				}
+				s.agentMu.Unlock()
+			}
+		}
+	})
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	url := fmt.Sprintf("http://%s/%s", ln.Addr().String(), streamPath)
+	closeServer := func() {
+		cancel()
+		_ = srv.Close()
+		if ds, ok := inner.(*dvrServer); ok {
+			ds.Close()
+		}
+	}
+	s.streams[p.BNO] = agentEndpoint{url: url, close: closeServer}
 	go func() { _ = srv.Serve(ln) }()
-	return fmt.Sprintf("http://%s/%s", ln.Addr().String(), streamPath), nil
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-recordCtx.Done():
+				return
+			case <-ticker.C:
+			}
+			st.mu.Lock()
+			active, ever, last := st.active, st.everConnected, st.lastActive
+			st.mu.Unlock()
+			idle := 90 * time.Second
+			if ever {
+				idle = 15 * time.Second
+			}
+			if active == 0 && time.Since(last) > idle {
+				s.agentMu.Lock()
+				if e, ok := s.streams[p.BNO]; ok && e.url == url {
+					delete(s.streams, p.BNO)
+				}
+				s.agentMu.Unlock()
+				closeServer()
+				return
+			}
+		}
+	}()
+	return url, nil
 }
 
 // buildAgentMedia assembles the Media whose single format is the loopback agent
@@ -255,4 +328,36 @@ func buildAgentMedia(input, streamURL string, info *liveInfo) *source.Media {
 			SourceClient: sourceName,
 		}},
 	}
+}
+
+// MediaURLValid validates loopback endpoint lifetime without probing a one-shot stream.
+func (s *Source) MediaURLValid(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Hostname() != "127.0.0.1" {
+		return true
+	}
+	s.agentMu.Lock()
+	defer s.agentMu.Unlock()
+	for _, e := range s.streams {
+		if e.url == raw {
+			return e.expires.IsZero() || time.Now().Before(e.expires)
+		}
+	}
+	return false
+}
+func (s *Source) Close() error {
+	s.agentMu.Lock()
+	s.closed = true
+	entries := s.streams
+	s.streams = nil
+	s.agentMu.Unlock()
+	for _, e := range entries {
+		if e.close != nil {
+			e.close()
+		}
+	}
+	return nil
 }

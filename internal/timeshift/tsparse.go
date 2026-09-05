@@ -63,9 +63,10 @@ func parsePATFirstPMTPID(sec []byte) int {
 
 // parsePMTVideoPID returns the elementary PID of the first video stream (H.264
 // stream_type 0x1B or HEVC 0x24) in a PMT section payload, or -1.
-func parsePMTVideoPID(sec []byte) int {
+func parsePMTVideoPID(sec []byte) int { pid, _ := parsePMTVideo(sec); return pid }
+func parsePMTVideo(sec []byte) (int, byte) {
 	if len(sec) < 12 || sec[0] != 0x02 {
-		return -1
+		return -1, 0
 	}
 	sectionLen := (int(sec[1]&0x0F) << 8) | int(sec[2])
 	end := 3 + sectionLen - 4
@@ -79,24 +80,34 @@ func parsePMTVideoPID(sec []byte) int {
 		pid := (int(sec[i+1]&0x1F) << 8) | int(sec[i+2])
 		esInfoLen := (int(sec[i+3]&0x0F) << 8) | int(sec[i+4])
 		if streamType == 0x1B || streamType == 0x24 {
-			return pid
+			return pid, streamType
 		}
 		i += 5 + esInfoLen
 	}
-	return -1
+	return -1, 0
 }
 
-// isKeyframePES reports whether a video PES payload's access unit contains a
-// keyframe indicator: an H.264 IDR slice (NAL type 5) or an SPS (type 7), which
-// precedes an IDR. The scan is limited to the first packet's payload, where a
-// keyframe AU's SPS/PPS/IDR sit.
+// isKeyframePES detects an H.264 IDR in a reassembled PES access unit.
 func isKeyframePES(pes []byte) bool {
+	return isKeyframeCodec(pes, 0x1b)
+}
+func isKeyframeCodec(pes []byte, codec byte) bool {
 	es := pesElementaryData(pes)
 	// Annex-B: scan for start codes (00 00 01) and inspect the NAL type.
 	for i := 0; i+3 < len(es); i++ {
 		if es[i] == 0 && es[i+1] == 0 && es[i+2] == 1 {
+			if codec == 0x24 {
+				typ := (es[i+3] >> 1) & 0x3f
+				if typ >= 16 && typ <= 21 {
+					return true
+				}
+				if typ <= 31 {
+					return false
+				}
+				continue
+			}
 			nalType := es[i+3] & 0x1F
-			if nalType == 5 || nalType == 7 {
+			if nalType == 5 {
 				return true
 			}
 			if nalType == 1 { // a non-IDR slice: this AU is not a keyframe

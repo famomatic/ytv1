@@ -34,6 +34,8 @@ type Config struct {
 	// PoTokenProvider is the provider for PO Tokens.
 	// If nil, PO Tokens will not be injected, which may cause throttling or errors.
 	PoTokenProvider innertube.PoTokenProvider
+	// PoTokenCacheTTL defaults to 5 minutes; negative delegates every call to the provider.
+	PoTokenCacheTTL time.Duration
 
 	// PoTokenFetchPolicy overrides POT enforcement per streaming protocol.
 	// Supported values: required|recommended|never.
@@ -103,7 +105,8 @@ type Config struct {
 	DownloadTransport DownloadTransportConfig
 
 	// Muxer handles optional video+audio merging in Download(options.Merge=true).
-	// If nil, merge operations will warn and fallback to pre-muxed formats.
+	// If nil or unavailable, a selected merge returns ErrMuxerUnavailable.
+	// Select a single muxed format explicitly to avoid requiring a muxer.
 	Muxer Muxer
 
 	// Logger receives non-fatal package warnings (optional).
@@ -116,6 +119,7 @@ type Config struct {
 	// Concurrency contract: this callback may be invoked from multiple
 	// goroutines concurrently (extraction races across client profiles).
 	// Implementations must be goroutine-safe; the bundled CLI printer is.
+	// Callbacks run synchronously and must not call extraction on this Client.
 	OnExtractionEvent func(ExtractionEvent)
 
 	// OnDownloadEvent receives download lifecycle events (optional).
@@ -124,6 +128,7 @@ type Config struct {
 	// Concurrency contract: this callback may be invoked from multiple
 	// goroutines concurrently (parallel chunk/segment downloads). It must be
 	// goroutine-safe; the bundled CLI printer is.
+	// Callbacks run synchronously: avoid blocking and re-entering this operation.
 	OnDownloadEvent func(DownloadEvent)
 
 	// OnDownloadProgress receives byte-level direct media download progress (optional).
@@ -132,6 +137,7 @@ type Config struct {
 	// Concurrency contract: this callback may be invoked from multiple
 	// goroutines concurrently (parallel chunk downloads). It must be
 	// goroutine-safe; the bundled CLI printer is.
+	// Callbacks run synchronously: avoid blocking and re-entering this operation.
 	OnDownloadProgress func(DownloadProgressEvent)
 
 	// KeepIntermediateFiles keeps intermediate video/audio files after merge download.
@@ -146,7 +152,7 @@ type Config struct {
 	SessionCacheTTL time.Duration
 
 	// SessionCacheMaxEntries bounds in-memory video session count (LRU eviction).
-	// Zero or negative means unbounded.
+	// Zero uses 256 entries; negative means unbounded.
 	SessionCacheMaxEntries int
 
 	// SubtitlePolicy controls default subtitle track selection behavior.
@@ -172,6 +178,8 @@ type Muxer interface {
 
 // DownloadTransportConfig controls retry/backoff behavior for direct stream downloads.
 type DownloadTransportConfig struct {
+	MaxBufferedBytes            int64 // segmented downloads: default 512 MiB worker buffer budget
+	MaxSegmentBytes             int64 // segmented downloads: default 100 MiB per fragment
 	MaxRetries                  int
 	InitialBackoff              time.Duration
 	MaxBackoff                  time.Duration

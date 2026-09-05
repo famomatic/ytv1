@@ -314,12 +314,12 @@ func TestServeAgentStreamInProcessByDefault(t *testing.T) {
 	defer func(p int) { agentServicePort = p }(agentServicePort)
 	agentServicePort = port
 
-	defer func(v bool) { detachServe = v }(detachServe)
-	detachServe = false // a download run
-	defer func() { agentStreamByBNO = map[string]string{} }()
-	agentStreamByBNO = map[string]string{}
+	defer SetDetachServe(detachServe.Load())
+	SetDetachServe(false) // a download run
 
-	u, err := New(nil).serveAgentStream(agentStreamParams{BNO: "42", BjID: "bj"})
+	src := New(nil)
+	defer src.Close()
+	u, err := src.serveAgentStream(agentStreamParams{BNO: "42", BjID: "bj"})
 	if err != nil {
 		t.Fatalf("serveAgentStream: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestServeAgentStreamInProcessByDefault(t *testing.T) {
 		t.Fatalf("expected loopback url, got %q", u)
 	}
 	// The cache returns the same URL on a second call (no second agent session).
-	if u2, _ := New(nil).serveAgentStream(agentStreamParams{BNO: "42", BjID: "bj"}); u2 != u {
+	if u2, _ := src.serveAgentStream(agentStreamParams{BNO: "42", BjID: "bj"}); u2 != u {
 		t.Fatalf("cache miss: %q != %q", u2, u)
 	}
 	resp, err := http.Get(u)

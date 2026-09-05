@@ -211,7 +211,7 @@ func TestDASHDownloader_StaticConcurrentDownloadKeepsOrder(t *testing.T) {
 }
 
 func TestDASHDownloader_StaticConcurrentDownloadBatchesLongSegmentLists(t *testing.T) {
-	const segmentCount = maxConcurrentDASHSegments + 3
+	const segmentCount = 67
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/manifest.mpd" {

@@ -9,15 +9,16 @@ import (
 
 // YTDLPDumpSingleJSON is a yt-dlp-style single video JSON payload.
 type YTDLPDumpSingleJSON struct {
-	ID           string             `json:"id"`
-	Title        string             `json:"title,omitempty"`
-	WebpageURL   string             `json:"webpage_url,omitempty"`
-	OriginalURL  string             `json:"original_url,omitempty"`
-	Extractor    string             `json:"extractor,omitempty"`
-	ExtractorKey string             `json:"extractor_key,omitempty"`
-	URL          string             `json:"url,omitempty"`
-	Ext          string             `json:"ext,omitempty"`
-	Formats      []YTDLPFormatEntry `json:"formats,omitempty"`
+	RequestedFormats []YTDLPFormatEntry `json:"requested_formats,omitempty"`
+	ID               string             `json:"id"`
+	Title            string             `json:"title,omitempty"`
+	WebpageURL       string             `json:"webpage_url,omitempty"`
+	OriginalURL      string             `json:"original_url,omitempty"`
+	Extractor        string             `json:"extractor,omitempty"`
+	ExtractorKey     string             `json:"extractor_key,omitempty"`
+	URL              string             `json:"url,omitempty"`
+	Ext              string             `json:"ext,omitempty"`
+	Formats          []YTDLPFormatEntry `json:"formats,omitempty"`
 }
 
 // YTDLPPlaylistInfoJSON is a yt-dlp-style playlist info JSON payload.
@@ -50,16 +51,17 @@ type YTDLPPlaylistItemEntry struct {
 
 // YTDLPFormatEntry is one format entry in a yt-dlp-style payload.
 type YTDLPFormatEntry struct {
-	FormatID string `json:"format_id,omitempty"`
-	URL      string `json:"url,omitempty"`
-	Ext      string `json:"ext,omitempty"`
-	VCodec   string `json:"vcodec,omitempty"`
-	ACodec   string `json:"acodec,omitempty"`
-	Width    int    `json:"width,omitempty"`
-	Height   int    `json:"height,omitempty"`
-	FPS      int    `json:"fps,omitempty"`
-	TBR      int    `json:"tbr,omitempty"`
-	Protocol string `json:"protocol,omitempty"`
+	HTTPHeaders map[string]string `json:"http_headers,omitempty"`
+	FormatID    string            `json:"format_id,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Ext         string            `json:"ext,omitempty"`
+	VCodec      string            `json:"vcodec,omitempty"`
+	ACodec      string            `json:"acodec,omitempty"`
+	Width       int               `json:"width,omitempty"`
+	Height      int               `json:"height,omitempty"`
+	FPS         int               `json:"fps,omitempty"`
+	TBR         int               `json:"tbr,omitempty"`
+	Protocol    string            `json:"protocol,omitempty"`
 }
 
 // BuildYTDLPPlaylistInfoJSON builds a yt-dlp-style playlist payload.
@@ -127,6 +129,12 @@ func BuildYTDLPDumpSingleJSON(input string, info *VideoInfo) YTDLPDumpSingleJSON
 		}
 	}
 	webURL := CanonicalWatchURL(input, info.ID)
+	extractor, key := "youtube", "Youtube"
+	if info.SourceName != "" && info.SourceName != "youtube" {
+		extractor = info.SourceName
+		key = strings.ToUpper(extractor[:1]) + extractor[1:]
+		webURL = firstNonEmpty(info.WebpageURL, input)
+	}
 	bestURL, bestExt := PickBestDirectFormatURL(info.Formats)
 	formats := make([]YTDLPFormatEntry, 0, len(info.Formats))
 	for _, f := range info.Formats {
@@ -151,8 +159,8 @@ func BuildYTDLPDumpSingleJSON(input string, info *VideoInfo) YTDLPDumpSingleJSON
 		Title:        info.Title,
 		WebpageURL:   webURL,
 		OriginalURL:  strings.TrimSpace(input),
-		Extractor:    "youtube",
-		ExtractorKey: "Youtube",
+		Extractor:    extractor,
+		ExtractorKey: key,
 		URL:          bestURL,
 		Ext:          bestExt,
 		Formats:      formats,

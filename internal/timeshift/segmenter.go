@@ -10,6 +10,7 @@
 package timeshift
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -19,9 +20,10 @@ const tsPacketLen = 188
 // followed by a video keyframe and the packets up to (not including) the next
 // segment boundary.
 type Segment struct {
-	Seq      int
-	Data     []byte
-	Duration time.Duration
+	Seq           int
+	Data          []byte
+	Duration      time.Duration
+	Discontinuity bool
 }
 
 // TSSegmenter splits a continuous MPEG-TS stream (written to it as an io.Writer)
@@ -30,8 +32,12 @@ type Segment struct {
 // one muxer's PID assignment) and caches the latest PAT/PMT to prepend to every
 // segment, keeping each segment self-contained.
 type TSSegmenter struct {
-	target    time.Duration
-	onSegment func(Segment)
+	MaxSegmentBytes int64 // 0 uses the 64 MiB safety limit
+	pending, pes    []byte
+	codec           byte
+	discontinuity   bool
+	target          time.Duration
+	onSegment       func(Segment)
 
 	buf []byte // unparsed tail carried across Write calls (packet reassembly)
 
@@ -56,27 +62,35 @@ func NewTSSegmenter(target time.Duration, onSegment func(Segment)) *TSSegmenter 
 // Write consumes a chunk of the MPEG-TS byte stream. It is safe to call with
 // arbitrarily sized chunks; packets are reassembled internally.
 func (s *TSSegmenter) Write(p []byte) (int, error) {
-	s.buf = append(s.buf, p...)
-	// Resync to a packet boundary if needed, then process whole packets.
-	for len(s.buf) >= tsPacketLen {
-		if s.buf[0] != 0x47 {
-			// Drop one byte and resync (should not happen on a clean stream).
-			s.buf = s.buf[1:]
-			continue
-		}
+	original := len(p)
+	for len(p) > 0 {
+		n := min(tsPacketLen-len(s.buf), len(p))
+		s.buf = append(s.buf, p[:n]...)
+		p = p[n:]
 		if len(s.buf) < tsPacketLen {
 			break
 		}
-		pkt := s.buf[:tsPacketLen]
-		s.handlePacket(pkt)
-		s.buf = s.buf[tsPacketLen:]
+		if s.buf[0] != 0x47 {
+			s.buf = s.buf[1:]
+			continue
+		}
+		s.handlePacket(s.buf)
+		s.buf = s.buf[:0]
+		limit := s.MaxSegmentBytes
+		if limit <= 0 {
+			limit = 64 << 20
+		}
+		if int64(len(s.cur)+len(s.pending)) > limit {
+			return original - len(p), fmt.Errorf("DVR segment exceeds %d bytes without a usable keyframe", limit)
+		}
 	}
-	return len(p), nil
+	return original, nil
 }
 
 // Close flushes the final open segment (its true duration is unknown without a
 // following keyframe, so target is used as an estimate).
 func (s *TSSegmenter) Close() {
+	s.consumePES()
 	s.flush(s.segPTS + int64(s.target.Seconds()*90000))
 }
 
@@ -93,21 +107,48 @@ func (s *TSSegmenter) handlePacket(pkt []byte) {
 	case pid == s.pmtPID && s.pmtPID >= 0: // PMT
 		s.pmtPkt = append(s.pmtPkt[:0], pkt...)
 		if pusi {
-			s.vidPID = parsePMTVideoPID(payloadOf(pkt, true))
-		}
-	case pid == s.vidPID && s.vidPID >= 0: // video ES
-		if pusi {
-			if pes := payloadOf(pkt, false); isKeyframePES(pes) {
-				pts, ok := pesPTS(pes)
-				s.onKeyframe(pts, ok)
-			}
+			s.vidPID, s.codec = parsePMTVideo(payloadOf(pkt, true))
 		}
 	}
-	// Accumulate every packet of the open segment (including the PAT/PMT/video
-	// ones handled above) so playback is byte-identical to the source.
-	if s.started {
+	if pid == s.vidPID && s.vidPID >= 0 && pusi {
+		s.consumePES()
+	}
+	if pid == s.vidPID && s.vidPID >= 0 {
+		payload := payloadOf(pkt, false)
+		if len(s.pes)+len(payload) <= 1<<20 {
+			s.pes = append(s.pes, payload...)
+		}
+	}
+	if len(s.pes) > 0 {
+		s.pending = append(s.pending, pkt...)
+	} else if s.started {
 		s.cur = append(s.cur, pkt...)
 	}
+
+}
+
+func (s *TSSegmenter) consumePES() {
+	if len(s.pending) == 0 {
+		return
+	}
+	if isKeyframeCodec(s.pes, s.codec) {
+		pts, ok := pesPTS(s.pes)
+		s.onKeyframe(pts, ok)
+	}
+	if s.started {
+		s.cur = append(s.cur, s.pending...)
+	}
+	s.pending = nil
+	s.pes = nil
+}
+
+func ptsDelta(a, b int64) int64 {
+	const wrap = int64(1) << 33
+	delta := (a - b + wrap/2) % wrap
+	if delta < 0 {
+		delta += wrap
+	}
+	return delta - wrap/2
 }
 
 // onKeyframe handles a video keyframe access unit at pts (90kHz). It opens the
@@ -118,13 +159,21 @@ func (s *TSSegmenter) onKeyframe(pts int64, ptsOK bool) {
 		return
 	}
 	if !ptsOK || !s.havePTS {
-		return // cannot measure elapsed; keep accumulating
+		s.flush(s.segPTS + int64(s.target.Seconds()*90000))
+		s.beginSegment(pts, ptsOK)
+		return
 	}
-	elapsed := time.Duration(float64(pts-s.segPTS)/90000.0*float64(time.Second))
-	if elapsed >= s.target {
-		s.flush(pts)
+	delta := ptsDelta(pts, s.segPTS)
+	elapsed := time.Duration(float64(delta) / 90000 * float64(time.Second))
+	if delta < 0 || elapsed > 10*s.target {
+		s.flush(s.segPTS + int64(s.target.Seconds()*90000))
+		s.discontinuity = true
+		s.beginSegment(pts, ptsOK)
+	} else if elapsed >= s.target {
+		s.flush(s.segPTS + delta)
 		s.beginSegment(pts, ptsOK)
 	}
+
 }
 
 // beginSegment starts a new segment buffer seeded with the latest PAT+PMT so the
@@ -148,11 +197,12 @@ func (s *TSSegmenter) flush(endPTS int64) {
 	if !s.started || len(s.cur) == 0 {
 		return
 	}
-	dur := time.Duration(0)
+	dur := s.target
 	if s.havePTS && endPTS > s.segPTS {
 		dur = time.Duration(float64(endPTS-s.segPTS) / 90000.0 * float64(time.Second))
 	}
-	seg := Segment{Seq: s.seq, Data: append([]byte(nil), s.cur...), Duration: dur}
+	seg := Segment{Seq: s.seq, Data: append([]byte(nil), s.cur...), Duration: dur, Discontinuity: s.discontinuity}
+	s.discontinuity = false
 	s.seq++
 	s.started = false
 	s.cur = nil

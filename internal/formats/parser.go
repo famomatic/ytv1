@@ -11,6 +11,9 @@ import (
 
 // Format represents a media format.
 type Format struct {
+	// ManifestURL and RepresentationID address a segmented DASH representation.
+	ManifestURL      string
+	RepresentationID string
 	Itag             int
 	URL              string
 	MimeType         string

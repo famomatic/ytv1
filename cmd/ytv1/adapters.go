@@ -732,7 +732,7 @@ func recordForcedArchiveIfRequested(info *client.VideoInfo, opts cli.Options) er
 	if !opts.ForceWriteArchive || info == nil {
 		return nil
 	}
-	return recordCompletedDownload(info.ID)
+	return recordCompletedDownload(client.ArchiveID(info))
 }
 
 type downloadLimit struct {

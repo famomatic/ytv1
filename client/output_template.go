@@ -65,11 +65,11 @@ func RenderOutputTemplate(template string, data OutputTemplateData) string {
 		"%(release_date)s": sanitize(data.ReleaseDate),
 		"%(timestamp)s":    sanitize(data.Timestamp),
 	}
-	rendered := template
+	pairs := make([]string, 0, 2*len(values))
 	for token, value := range values {
-		rendered = strings.ReplaceAll(rendered, token, value)
+		pairs = append(pairs, token, value)
 	}
-	return rendered
+	return strings.NewReplacer(pairs...).Replace(template)
 }
 
 // FormatTemplateTokens contains template token values derived from selected formats.

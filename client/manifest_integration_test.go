@@ -17,7 +17,7 @@ func TestFetchDASHManifest_UsesRewrittenNURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotN = r.URL.Query().Get("n")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("dash-manifest"))
+		_, _ = w.Write([]byte("<MPD/>"))
 	}))
 	defer srv.Close()
 
@@ -42,8 +42,8 @@ func TestFetchDASHManifest_UsesRewrittenNURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchDASHManifest() error = %v", err)
 	}
-	if body != "dash-manifest" {
-		t.Fatalf("manifest body = %q, want %q", body, "dash-manifest")
+	if body != "<MPD/>" {
+		t.Fatalf("manifest body = %q, want %q", body, "<MPD/>")
 	}
 	if gotN != "bcd" {
 		t.Fatalf("dash n = %q, want %q", gotN, "bcd")
@@ -55,7 +55,7 @@ func TestFetchHLSManifest_UsesRewrittenNURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotN = r.URL.Query().Get("n")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("hls-manifest"))
+		_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-ENDLIST"))
 	}))
 	defer srv.Close()
 
@@ -80,8 +80,8 @@ func TestFetchHLSManifest_UsesRewrittenNURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchHLSManifest() error = %v", err)
 	}
-	if body != "hls-manifest" {
-		t.Fatalf("manifest body = %q, want %q", body, "hls-manifest")
+	if body != "#EXTM3U\n#EXT-X-ENDLIST" {
+		t.Fatalf("manifest body = %q, want %q", body, "#EXTM3U\n#EXT-X-ENDLIST")
 	}
 	if gotN != "bcd" {
 		t.Fatalf("hls n = %q, want %q", gotN, "bcd")
@@ -196,7 +196,7 @@ https://cdn.example.com/v/itag/22/prog.m3u8
 	}
 	var hasDash, hasHLS bool
 	for _, f := range info.Formats {
-		if f.Protocol == "dash" {
+		if f.RepresentationID == "140" && f.Protocol == "https" {
 			hasDash = true
 		}
 		if f.Protocol == "hls" {
@@ -207,4 +207,3 @@ https://cdn.example.com/v/itag/22/prog.m3u8
 		t.Fatalf("expected both dash and hls formats, got: %+v", info.Formats)
 	}
 }
-

@@ -101,8 +101,11 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 
 	// Heartbeat loop keeps the session alive; stops when the stream ends.
 	stop := make(chan struct{})
-	defer close(stop)
+	heartbeatErr := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	defer func() { close(stop); <-heartbeatDone }()
 	go func() {
+		defer close(heartbeatDone)
 		t := time.NewTicker(200 * time.Millisecond)
 		defer t.Stop()
 		for {
@@ -110,7 +113,11 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 			case <-stop:
 				return
 			case <-t.C:
-				_ = s.sendSVC(ws, svcHeartbeat, map[string]any{"BUFFER_LEFT": 0})
+				if err := s.sendSVC(ws, svcHeartbeat, map[string]any{"BUFFER_LEFT": 0}); err != nil {
+					heartbeatErr <- err
+					ws.close()
+					return
+				}
 			}
 		}
 	}()
@@ -206,6 +213,11 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 		_ = ws.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		op, payload, err := ws.readAny()
 		if err != nil {
+			select {
+			case hbErr := <-heartbeatErr:
+				return fmt.Errorf("soop: heartbeat: %w", hbErr)
+			default:
+			}
 			return err
 		}
 		if op == wsOpBinary {

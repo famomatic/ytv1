@@ -2,22 +2,25 @@ package types
 
 // FormatInfo is the normalized public format model.
 type FormatInfo struct {
-	Itag         int
-	URL          string
-	MimeType     string
-	Protocol     string
-	HasAudio     bool
-	HasVideo     bool
-	Bitrate      int
-	Width        int
-	Height       int
-	FPS          int
-	Ciphered     bool
-	IsDRM        bool
-	IsDamaged    bool
-	Quality      string
-	QualityLabel string
-	SourceClient string
+	// ManifestURL and RepresentationID address a segmented DASH representation.
+	ManifestURL      string
+	RepresentationID string
+	Itag             int
+	URL              string
+	MimeType         string
+	Protocol         string
+	HasAudio         bool
+	HasVideo         bool
+	Bitrate          int
+	Width            int
+	Height           int
+	FPS              int
+	Ciphered         bool
+	IsDRM            bool
+	IsDamaged        bool
+	Quality          string
+	QualityLabel     string
+	SourceClient     string
 	// TargetDurationSec > 0 marks a live adaptive format delivered as sq=<n>
 	// fragments. When the video is no longer live, the complete media must be
 	// downloaded fragment-by-fragment (the bare URL serves no data blocks).

@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/famomatic/ytv1/internal/formats"
@@ -71,7 +72,10 @@ func init() {
 
 // Source extracts SOOP VOD and live media.
 type Source struct {
-	http *http.Client
+	agentMu sync.Mutex
+	streams map[string]agentEndpoint
+	closed  bool
+	http    *http.Client
 }
 
 // New returns a SOOP source using the provided HTTP client. A default client is

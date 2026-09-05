@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -9,14 +10,16 @@ import (
 type StreamURLResolver func(itag int) (string, error)
 
 // SelectedStreamURLs returns direct playable URLs for selected formats, using
-// resolver only when a selected format lacks a usable non-ciphered URL.
+// resolver when signatures, throttling parameters, or source token policies apply.
 func SelectedStreamURLs(selected []FormatInfo, resolver StreamURLResolver) ([]string, error) {
 	if len(selected) == 0 {
 		return nil, ErrNoPlayableFormats
 	}
 	urls := make([]string, 0, len(selected))
 	for _, format := range selected {
-		if strings.TrimSpace(format.URL) != "" && !format.Ciphered {
+		u, _ := url.Parse(format.URL)
+		needsResolve := format.Ciphered || format.SourceClient != "" || (u != nil && u.Query().Get("n") != "")
+		if strings.TrimSpace(format.URL) != "" && !needsResolve {
 			urls = append(urls, format.URL)
 			continue
 		}

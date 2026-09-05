@@ -18,6 +18,8 @@ import (
 )
 
 type mediaRemuxInput struct {
+	advance func(context.Context) error
+	observe func(*media.Packet)
 	demuxer media.Demuxer
 	stream  media.Stream
 	trackID int
@@ -79,7 +81,10 @@ func remuxSelectedMediaFiles(ctx context.Context, videoPath, audioPath, outputPa
 	if err := temporary.Chmod(0o644); err != nil {
 		return fmt.Errorf("puremux: set output permissions: %w", err)
 	}
-	mux, err := media.NewMuxer(temporary, media.MuxOptions{Format: out})
+	// The native playback path may omit unsupported track labels/disposition.
+	// Requested metadata embedding uses the configured fallback; codec/timing
+	// incompatibilities remain errors even with AllowMetadataLoss.
+	mux, err := media.NewMuxer(temporary, media.MuxOptions{Format: out, AllowMetadataLoss: true})
 	if err != nil {
 		return fmt.Errorf("puremux: create muxer: %w", err)
 	}
@@ -308,10 +313,19 @@ func readSelectedPacket(ctx context.Context, input *mediaRemuxInput) (*media.Pac
 	}
 	for {
 		packet, err := input.demuxer.ReadPacket(ctx)
+		if errors.Is(err, io.EOF) && input.advance != nil {
+			if nextErr := input.advance(ctx); nextErr != nil {
+				return nil, nextErr
+			}
+			return readSelectedPacket(ctx, input)
+		}
 		if err != nil {
 			return nil, err
 		}
 		if packet.StreamIndex == input.stream.Index {
+			if input.observe != nil {
+				input.observe(packet)
+			}
 			return packet, nil
 		}
 		packet.Release()

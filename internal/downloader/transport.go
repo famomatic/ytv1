@@ -15,6 +15,8 @@ import (
 
 // TransportConfig controls retry/backoff behavior for downloader HTTP requests.
 type TransportConfig struct {
+	MaxBufferedBytes            int64 // concurrent fragment budget; default 512 MiB
+	MaxSegmentBytes             int64 // per-fragment limit; default 100 MiB
 	MaxRetries                  int
 	InitialBackoff              time.Duration
 	MaxBackoff                  time.Duration
@@ -27,6 +29,7 @@ type TransportConfig struct {
 }
 
 type effectiveTransportConfig struct {
+	MaxSegmentBytes             int64
 	MaxRetries                  int
 	InitialBackoff              time.Duration
 	MaxBackoff                  time.Duration
@@ -80,7 +83,14 @@ func normalizeTransportConfig(cfg TransportConfig) effectiveTransportConfig {
 	if throttledDuration <= 0 {
 		throttledDuration = 3 * time.Second
 	}
-	return effectiveTransportConfig{
+	segmentLimit := cfg.MaxSegmentBytes
+	if segmentLimit <= 0 {
+		segmentLimit = 100 << 20
+	}
+	if cfg.MaxBufferedBytes > 0 && segmentLimit > cfg.MaxBufferedBytes {
+		segmentLimit = cfg.MaxBufferedBytes
+	}
+	return effectiveTransportConfig{MaxSegmentBytes: segmentLimit,
 		MaxRetries:                  maxRetries,
 		InitialBackoff:              initialBackoff,
 		MaxBackoff:                  maxBackoff,
@@ -170,10 +180,19 @@ func doGETBytesWithRetry(
 		} else {
 			body, readErr := func() ([]byte, error) {
 				defer resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
+				if (req.Header.Get("Range") == "" && resp.StatusCode != http.StatusOK) || (req.Header.Get("Range") != "" && resp.StatusCode != http.StatusPartialContent) {
 					return nil, &downloadHTTPStatusError{
 						StatusCode: resp.StatusCode,
 						RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+					}
+				}
+				if requested := req.Header.Get("Range"); requested != "" {
+					var wantStart, wantEnd, gotStart, gotEnd int64
+					if _, err := fmt.Sscanf(requested, "bytes=%d-%d", &wantStart, &wantEnd); err != nil {
+						return nil, err
+					}
+					if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/", &gotStart, &gotEnd); err != nil || gotStart != wantStart || gotEnd != wantEnd {
+						return nil, fmt.Errorf("mismatched HLS Content-Range")
 					}
 				}
 				return readAllWithTransportConfig(ctx, resp.Body, effectiveCfg)
@@ -205,7 +224,7 @@ func readAllWithTransportConfig(ctx context.Context, r io.Reader, cfg effectiveT
 	if cfg.ThrottledRateBytesPerSecond > 0 {
 		r = throttledRateReader(ctx, r, cfg.ThrottledRateBytesPerSecond, cfg.ThrottledRateMinDuration)
 	}
-	return iox.ReadAllLimit(r, 100<<20) // 100 MB segment limit
+	return iox.ReadAllLimit(r, cfg.MaxSegmentBytes) // 100 MB segment limit
 }
 
 func throttledRateReader(ctx context.Context, src io.Reader, bytesPerSecond int64, minDuration time.Duration) io.Reader {

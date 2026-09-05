@@ -1,11 +1,14 @@
 package muxer
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/famomatic/puremux/pkg/media"
 	"github.com/famomatic/ytv1/internal/downloader"
@@ -22,126 +25,242 @@ type HLSStreamInput struct {
 }
 
 // MuxHLSStreams follows separate HLS video and audio renditions and emits one
-// playable MPEG-TS stream. Segments are aligned by media sequence, demuxed one
-// pair at a time, and fed into a persistent puremux LiveMuxer so this works
+// playable MPEG-TS stream. Each rendition advances independently; packets are
+// interleaved by timestamp into a persistent puremux LiveMuxer so this works
 // for unbounded live playlists without temporary files or FFmpeg.
 func MuxHLSStreams(ctx context.Context, video, audio HLSStreamInput, dst io.Writer) error {
-	videoReader := downloader.NewHLSMediaSegmentReader(httpClientOrDefault(video), video.URL).
-		WithRequestHeaders(video.Headers).
-		WithTransportConfig(video.Transport).
-		WithLiveEdgeSegments(3)
-	audioReader := downloader.NewHLSMediaSegmentReader(httpClientOrDefault(audio), audio.URL).
-		WithRequestHeaders(audio.Headers).
-		WithTransportConfig(audio.Transport).
-		WithLiveEdgeSegments(3)
-
-	baseMux, err := media.NewMuxer(dst, media.MuxOptions{Format: media.FormatMPEGTS})
+	ctx, cancel := context.WithCancel(ctx)
+	type nextResult struct {
+		segment *downloader.HLSMediaSegment
+		err     error
+	}
+	var wg sync.WaitGroup
+	defer func() { cancel(); wg.Wait() }()
+	prefetch := func(input HLSStreamInput) func(context.Context) (*downloader.HLSMediaSegment, error) {
+		reader := downloader.NewHLSMediaSegmentReader(httpClientOrDefault(input), input.URL).WithRequestHeaders(input.Headers).WithTransportConfig(input.Transport).WithLiveEdgeSegments(3)
+		ch := make(chan nextResult, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer close(ch)
+			for {
+				seg, err := reader.Next(ctx)
+				select {
+				case ch <- nextResult{seg, err}:
+				case <-ctx.Done():
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+		return func(callCtx context.Context) (*downloader.HLSMediaSegment, error) {
+			select {
+			case r, ok := <-ch:
+				if !ok {
+					return nil, io.EOF
+				}
+				return r.segment, r.err
+			case <-callCtx.Done():
+				return nil, callCtx.Err()
+			}
+		}
+	}
+	next := []func(context.Context) (*downloader.HLSMediaSegment, error){prefetch(video), prefetch(audio)}
+	inputs := make([]*mediaRemuxInput, 0, 2)
+	defer func() { closeInputs(inputs) }()
+	segments := make([]*downloader.HLSMediaSegment, 2)
+	for i, kind := range []media.MediaType{media.MediaVideo, media.MediaAudio} {
+		seg, err := next[i](ctx)
+		if err != nil {
+			return err
+		}
+		segments[i] = seg
+		input, err := openHLSMediaSegment(ctx, seg, kind)
+		if err != nil {
+			return err
+		}
+		inputs = append(inputs, input)
+		packet, err := readSelectedPacket(ctx, input)
+		if err != nil {
+			return err
+		}
+		input.pending = packet
+	}
+	// Container timestamps share the transport clock. Only packed AAC without
+	// timestamps needs an inferred origin; retain that timeline across fragments.
+	videoStamp, err := decodeTimestamp(inputs[0].pending)
 	if err != nil {
-		return fmt.Errorf("live HLS mux: create MPEG-TS muxer: %w", err)
+		return err
 	}
-	liveMux, err := media.NewLiveMuxer(baseMux, media.DefaultLiveIngestOptions())
+	for i, input := range inputs {
+		var end int64
+		base := input.stream.TimeBase
+		seed := int64(0)
+		if i == 1 {
+			var ok bool
+			seed, ok = inputs[0].stream.TimeBase.Rescale(videoStamp, base)
+			if !ok {
+				return fmt.Errorf("invalid HLS time base")
+			}
+		}
+		configure := func(seg *downloader.HLSMediaSegment) error {
+			stamp, err := decodeTimestamp(input.pending)
+			if err != nil {
+				return err
+			}
+			if packedHLSAudio(seg) && input.stream.Type == media.MediaAudio {
+				origin := seed
+				if ticks, ok := hlsID3Timestamp(seg.Data); ok {
+					var valid bool
+					origin, valid = (media.Rational{Num: 1, Den: 90000}).Rescale(ticks, input.stream.TimeBase)
+					if !valid {
+						return fmt.Errorf("invalid packed audio timestamp")
+					}
+				} else if end != 0 {
+					origin = end
+				}
+				offset, ok := subtractTimestamp(origin, stamp)
+				if !ok {
+					return fmt.Errorf("HLS timestamp overflow")
+				}
+				input.offset = offset
+			} else if seg.Discontinuity && end != 0 {
+				offset, ok := subtractTimestamp(end, stamp)
+				if !ok {
+					return fmt.Errorf("HLS timestamp overflow")
+				}
+				input.offset = offset
+			}
+			return nil
+		}
+		if err := configure(segments[i]); err != nil {
+			return err
+		}
+		input.observe = func(packet *media.Packet) {
+			stamp, err := decodeTimestamp(packet)
+			if err != nil {
+				return
+			}
+			value, ok := addTimestampOffset(stamp, input.offset)
+			if !ok {
+				return
+			}
+			if packet.Duration.Valid {
+				value, ok = addTimestampOffset(value, packet.Duration.Value)
+				if !ok {
+					return
+				}
+			}
+			if value > end {
+				end = value
+			}
+		}
+		input.observe(input.pending)
+		index := i
+		input.advance = func(ctx context.Context) error {
+			seg, err := next[index](ctx)
+			if err != nil {
+				return err
+			}
+			fresh, err := openHLSMediaSegment(ctx, seg, input.stream.Type)
+			if err != nil {
+				return err
+			}
+			if fresh.stream.Codec != input.stream.Codec {
+				fresh.demuxer.Close()
+				return fmt.Errorf("HLS codec changed")
+			}
+			packet, err := readSelectedPacket(ctx, fresh)
+			if err != nil {
+				fresh.demuxer.Close()
+				return err
+			}
+			converted, ok := input.stream.TimeBase.Rescale(end, fresh.stream.TimeBase)
+			if !ok {
+				packet.Release()
+				fresh.demuxer.Close()
+				return fmt.Errorf("invalid HLS time base")
+			}
+			end = converted
+			offset, ok := input.stream.TimeBase.Rescale(input.offset, fresh.stream.TimeBase)
+			if !ok {
+				packet.Release()
+				fresh.demuxer.Close()
+				return fmt.Errorf("invalid HLS offset time base")
+			}
+			input.offset = offset
+			old := input.demuxer
+			input.demuxer = fresh.demuxer
+			input.stream = fresh.stream
+			input.h264, input.hevc, input.aac = fresh.h264, fresh.hevc, fresh.aac
+			input.pending = packet
+			_ = old.Close()
+			if err := configure(seg); err != nil {
+				return err
+			}
+			input.observe(packet)
+			return nil
+		}
+	}
+	// The native playback path may omit unsupported track labels/disposition.
+	// Requested metadata embedding uses the configured fallback; codec/timing
+	// incompatibilities remain errors even with AllowMetadataLoss.
+	mux, err := media.NewMuxer(dst, media.MuxOptions{Format: media.FormatMPEGTS, AllowMetadataLoss: true})
 	if err != nil {
-		_ = baseMux.Close()
-		return fmt.Errorf("live HLS mux: create live muxer: %w", err)
+		return err
 	}
-
-	var (
-		videoSegment  *downloader.HLSMediaSegment
-		audioSegment  *downloader.HLSMediaSegment
-		trackIDs      [2]int
-		trackCodecs   [2]media.CodecID
-		trackTimeBase [2]media.Rational
-		started       bool
-	)
-	finish := func(runErr error) error {
-		closeErr := liveMux.Close()
-		if runErr != nil {
-			return runErr
-		}
-		if closeErr != nil {
-			return fmt.Errorf("live HLS mux: finalize: %w", closeErr)
-		}
-		return nil
+	live, err := media.NewLiveMuxer(mux, media.DefaultLiveIngestOptions())
+	if err != nil {
+		mux.Close()
+		return err
 	}
-
-	for {
-		if videoSegment == nil {
-			videoSegment, err = videoReader.Next(ctx)
-			if err != nil {
-				if errors.Is(err, io.EOF) && started {
-					return finish(nil)
-				}
-				return finish(fmt.Errorf("live HLS mux: read video segment: %w", err))
-			}
+	for _, input := range inputs {
+		id, err := live.AddStream(input.stream)
+		if err != nil {
+			live.Close()
+			return err
 		}
-		if audioSegment == nil {
-			audioSegment, err = audioReader.Next(ctx)
-			if err != nil {
-				if errors.Is(err, io.EOF) && started {
-					return finish(nil)
-				}
-				return finish(fmt.Errorf("live HLS mux: read audio segment: %w", err))
-			}
-		}
-
-		// Independently refreshed renditions may expose slightly different live
-		// windows. Discard only the older side until both sequence numbers meet.
-		if videoSegment.Sequence < audioSegment.Sequence {
-			videoSegment = nil
-			continue
-		}
-		if audioSegment.Sequence < videoSegment.Sequence {
-			audioSegment = nil
-			continue
-		}
-
-		inputs := make([]*mediaRemuxInput, 0, 2)
-		videoInput, openErr := openHLSMediaSegment(ctx, videoSegment, media.MediaVideo)
-		if openErr != nil {
-			return finish(fmt.Errorf("live HLS mux: demux video sequence %d: %w", videoSegment.Sequence, openErr))
-		}
-		inputs = append(inputs, videoInput)
-		audioInput, openErr := openHLSMediaSegment(ctx, audioSegment, media.MediaAudio)
-		if openErr != nil {
-			_ = videoInput.demuxer.Close()
-			return finish(fmt.Errorf("live HLS mux: demux audio sequence %d: %w", audioSegment.Sequence, openErr))
-		}
-		inputs = append(inputs, audioInput)
-		if primeErr := alignHLSInputs(ctx, inputs); primeErr != nil {
-			closeInputs(inputs)
-			return finish(fmt.Errorf("live HLS mux: align sequence %d: %w", videoSegment.Sequence, primeErr))
-		}
-
-		if !started {
-			for i, input := range inputs {
-				trackID, trackErr := liveMux.AddStream(input.stream)
-				if trackErr != nil {
-					closeInputs(inputs)
-					return finish(fmt.Errorf("live HLS mux: add %s track: %w", mediaTypeName(input.stream.Type), trackErr))
-				}
-				trackIDs[i], trackCodecs[i], trackTimeBase[i] = trackID, input.stream.Codec, input.stream.TimeBase
-			}
-			started = true
-		} else {
-			for i, input := range inputs {
-				if input.stream.Codec != trackCodecs[i] {
-					closeInputs(inputs)
-					return finish(fmt.Errorf("live HLS mux: %s codec changed from %s to %s", mediaTypeName(input.stream.Type), trackCodecs[i], input.stream.Codec))
-				}
-			}
-		}
-		for i := range inputs {
-			inputs[i].trackID = trackIDs[i]
-			inputs[i].outputTimeBase = trackTimeBase[i]
-		}
-		remuxErr := remuxMediaPackets(ctx, liveMux, inputs)
-		closeInputs(inputs)
-		if remuxErr != nil {
-			return finish(remuxErr)
-		}
-
-		videoSegment, audioSegment = nil, nil
+		input.trackID = id
+		input.outputTimeBase = input.stream.TimeBase
 	}
+	err = remuxMediaPackets(ctx, live, inputs)
+	closeErr := live.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+func packedHLSAudio(seg *downloader.HLSMediaSegment) bool {
+	if len(seg.Init) > 0 {
+		return false
+	}
+	data, err := stripLeadingID3(seg.Data)
+	return err == nil && len(data) > 1 && data[0] == 0xff && data[1]&0xf6 == 0xf0
+}
+func hlsID3Timestamp(data []byte) (int64, bool) {
+	// Restrict lookup to an ID3 tag, never to compressed audio bytes.
+	if len(data) < 10 || string(data[:3]) != "ID3" {
+		return 0, false
+	}
+	for _, b := range data[6:10] {
+		if b&0x80 != 0 {
+			return 0, false
+		}
+	}
+	size := int(data[6])<<21 | int(data[7])<<14 | int(data[8])<<7 | int(data[9])
+	if size > len(data)-10 {
+		return 0, false
+	}
+	tag := data[10 : 10+size]
+	owner := []byte("com.apple.streaming.transportStreamTimestamp\x00")
+	i := bytes.Index(tag, owner)
+	if i < 0 || i+len(owner)+8 > len(tag) {
+		return 0, false
+	}
+	return int64(binary.BigEndian.Uint64(tag[i+len(owner):]) & ((1 << 33) - 1)), true
 }
 
 func openHLSMediaSegment(ctx context.Context, segment *downloader.HLSMediaSegment, kind media.MediaType) (*mediaRemuxInput, error) {
@@ -183,37 +302,6 @@ func openHLSMediaSegment(ctx context.Context, segment *downloader.HLSMediaSegmen
 		return nil, err
 	}
 	return input, nil
-}
-
-func alignHLSInputs(ctx context.Context, inputs []*mediaRemuxInput) error {
-	if len(inputs) != 2 {
-		return errors.New("expected video and audio inputs")
-	}
-	for _, input := range inputs {
-		packet, err := readSelectedPacket(ctx, input)
-		if err != nil {
-			return err
-		}
-		input.pending = packet
-	}
-	videoStamp, err := decodeTimestamp(inputs[0].pending)
-	if err != nil {
-		return err
-	}
-	audioStamp, err := decodeTimestamp(inputs[1].pending)
-	if err != nil {
-		return err
-	}
-	videoInAudioBase, ok := inputs[0].stream.TimeBase.Rescale(videoStamp, inputs[1].stream.TimeBase)
-	if !ok {
-		return errors.New("cannot align HLS stream time bases")
-	}
-	offset, ok := subtractTimestamp(videoInAudioBase, audioStamp)
-	if !ok {
-		return errors.New("HLS stream timestamp offset overflow")
-	}
-	inputs[1].offset = offset
-	return nil
 }
 
 func decodeTimestamp(packet *media.Packet) (int64, error) {

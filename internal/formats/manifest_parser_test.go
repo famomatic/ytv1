@@ -29,8 +29,8 @@ func TestParseDASHManifest_BasicRepresentations(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("len(out)=%d, want 2", len(out))
 	}
-	if out[0].Protocol != "dash" || out[1].Protocol != "dash" {
-		t.Fatalf("expected dash protocol for all formats: %+v", out)
+	if out[0].Protocol != "https" || out[1].Protocol != "https" {
+		t.Fatalf("expected direct HTTPS protocol for file BaseURLs: %+v", out)
 	}
 	if !out[0].HasAudio || out[0].HasVideo {
 		t.Fatalf("audio representation flags mismatch: %+v", out[0])

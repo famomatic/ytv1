@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -460,39 +462,79 @@ func fetchTranscriptXML(ctx context.Context, httpClient *http.Client, headers ht
 }
 
 func parseTranscriptXML(raw []byte) ([]TranscriptEntry, error) {
-	type textNode struct {
+	type cue struct {
 		Start string `xml:"start,attr"`
 		Dur   string `xml:"dur,attr"`
-		Text  string `xml:",chardata"`
+		T     string `xml:"t,attr"`
+		D     string `xml:"d,attr"`
+		Inner string `xml:",innerxml"`
 	}
-	type transcriptDoc struct {
-		Texts []textNode `xml:"text"`
+	var doc struct {
+		XMLName    xml.Name
+		Texts      []cue `xml:"text"`
+		Paragraphs []cue `xml:"body>p"`
 	}
-	var doc transcriptDoc
 	if err := xml.Unmarshal(raw, &doc); err != nil {
 		return nil, err
 	}
-	out := make([]TranscriptEntry, 0, len(doc.Texts))
-	for _, n := range doc.Texts {
-		start, err := parseFloatString(n.Start)
-		if err != nil {
-			continue
+	nodes := doc.Texts
+	scale := 1.0
+	switch doc.XMLName.Local {
+	case "transcript":
+	case "timedtext":
+		nodes = doc.Paragraphs
+		scale = 1000
+	default:
+		return nil, fmt.Errorf("unsupported transcript root %q", doc.XMLName.Local)
+	}
+	out := make([]TranscriptEntry, 0, len(nodes))
+	for _, n := range nodes {
+		start, dur := n.Start, n.Dur
+		if scale == 1000 {
+			start, dur = n.T, n.D
 		}
-		dur, _ := parseFloatString(n.Dur)
-		text := strings.TrimSpace(html.UnescapeString(strings.ReplaceAll(n.Text, "\n", " ")))
-		out = append(out, TranscriptEntry{
-			StartSec: start,
-			DurSec:   dur,
-			Text:     text,
-		})
+		st, err := parseFloatString(start)
+		if err != nil || st < 0 {
+			return nil, fmt.Errorf("invalid caption start %q", start)
+		}
+		dt := 0.0
+		if dur != "" {
+			dt, err = parseFloatString(dur)
+			if err != nil || dt < 0 {
+				return nil, fmt.Errorf("invalid caption duration %q", dur)
+			}
+		}
+		decoder := xml.NewDecoder(strings.NewReader("<cue>" + n.Inner + "</cue>"))
+		var text strings.Builder
+		for {
+			token, err := decoder.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			switch v := token.(type) {
+			case xml.CharData:
+				text.Write(v)
+			case xml.StartElement:
+				if v.Name.Local == "br" {
+					text.WriteByte('\n')
+				}
+			}
+		}
+		value := strings.TrimSpace(html.UnescapeString(text.String()))
+		if value != "" {
+			out = append(out, TranscriptEntry{StartSec: st / scale, DurSec: dt / scale, Text: value})
+		}
 	}
 	return out, nil
 }
 
 func parseFloatString(s string) (float64, error) {
-	var v float64
-	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%f", &v); err != nil {
-		return 0, err
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("invalid timestamp %q", s)
 	}
 	return v, nil
 }

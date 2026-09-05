@@ -24,6 +24,7 @@ import (
 
 // Client is the high-level YouTube client.
 type Client struct {
+	lastSessionSweep time.Time
 	config           Config
 	engine           *orchestrator.Engine
 	playerJSResolver playerjs.Resolver
@@ -56,10 +57,13 @@ func (c *Client) fetchLock() *keyLock {
 }
 
 type videoSession struct {
-	Response  *innertube.PlayerResponse
-	PlayerURL string
-	Info      *VideoInfo
-	CachedAt  time.Time
+	Response      *innertube.PlayerResponse
+	PlayerURL     string
+	Info          *VideoInfo
+	CachedAt      time.Time
+	ExpiresAt     time.Time
+	expiryChecked bool
+	valid         func() bool
 	// MediaHeaders are extra HTTP headers a non-YouTube source requires on
 	// manifest/segment requests (e.g. SOOP's Referer/Origin). Nil for YouTube.
 	MediaHeaders http.Header
@@ -108,41 +112,63 @@ func effectiveSessionCacheTTL(ttl time.Duration) time.Duration {
 // URL expiry is always honored. Returns false when no URL carries an
 // expire param (e.g. ciphered-only or manifest sessions).
 func sessionURLsExpired(resp *innertube.PlayerResponse, now time.Time) bool {
-	if resp == nil {
-		return false
-	}
-	earliest := int64(0)
-	checkURL := func(raw string) {
-		if raw == "" {
-			return
-		}
+	expiry := sessionURLExpiry(videoSession{Response: resp})
+	return !expiry.IsZero() && !now.Before(expiry)
+}
+func sessionURLExpiry(s videoSession) time.Time {
+	var earliest time.Time
+	check := func(raw string) {
 		u, err := url.Parse(raw)
 		if err != nil {
 			return
 		}
-		expireStr := u.Query().Get("expire")
-		if expireStr == "" {
-			return
+		for _, key := range []string{"expire", "expires"} {
+			n, err := strconv.ParseInt(u.Query().Get(key), 10, 64)
+			if err != nil || n <= 0 {
+				continue
+			}
+			t := time.Unix(n, 0).Add(-urlExpirySafetyMargin)
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+			}
 		}
-		expire, err := strconv.ParseInt(expireStr, 10, 64)
-		if err != nil || expire <= 0 {
-			return
+	}
+	if s.Response != nil {
+		data := s.Response.StreamingData
+		check(data.DashManifestURL)
+		check(data.HlsManifestURL)
+		for _, list := range [][]innertube.Format{data.Formats, data.AdaptiveFormats} {
+			for _, f := range list {
+				check(f.URL)
+				for _, cipher := range []string{f.SignatureCipher, f.Cipher} {
+					q, _ := url.ParseQuery(cipher)
+					check(q.Get("url"))
+				}
+			}
 		}
-		if earliest == 0 || expire < earliest {
-			earliest = expire
+	}
+	if s.Info != nil {
+		check(s.Info.DashManifestURL)
+		check(s.Info.HLSManifestURL)
+		for _, f := range s.Info.Formats {
+			check(f.URL)
+			check(f.ManifestURL)
+			for _, part := range f.Parts {
+				check(part)
+			}
 		}
 	}
-	for _, f := range resp.StreamingData.Formats {
-		checkURL(f.URL)
+	return earliest
+}
+func sessionExpired(s videoSession, now time.Time) bool {
+	if s.valid != nil && !s.valid() {
+		return true
 	}
-	for _, f := range resp.StreamingData.AdaptiveFormats {
-		checkURL(f.URL)
+	expiry := s.ExpiresAt
+	if !s.expiryChecked {
+		expiry = sessionURLExpiry(s)
 	}
-	if earliest == 0 {
-		return false
-	}
-	expiryTime := time.Unix(earliest, 0).Add(-urlExpirySafetyMargin)
-	return now.After(expiryTime)
+	return !expiry.IsZero() && !now.Before(expiry)
 }
 
 // New creates a new YouTube client.
@@ -166,7 +192,7 @@ func NewClient(config Config) *Client {
 		config.HTTPClient.Jar = config.CookieJar
 	}
 	if config.PoTokenProvider != nil {
-		config.PoTokenProvider = challenge.NewCachedPoTokenProvider(config.PoTokenProvider)
+		config.PoTokenProvider = challenge.NewCachedPoTokenProviderWithTTL(config.PoTokenProvider, config.PoTokenCacheTTL)
 	}
 
 	registry := innertube.NewRegistry()
@@ -229,13 +255,21 @@ func (c *Client) GetVideo(ctx context.Context, input string) (*VideoInfo, error)
 		return nil, err
 	}
 
+	if cached, ok := c.getSession(videoID); ok && cached.Info != nil {
+		return cloneVideoInfo(cached.Info), nil
+	}
 	// Serialize per-video-id extraction so concurrent callers share one
 	// fetch and cache write instead of racing duplicate network calls.
 	lock, release := c.fetchLock().acquire(videoID)
 	defer release()
-	lock.Lock()
+	if err := lock.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	defer lock.Unlock()
 
+	if cached, ok := c.getSession(videoID); ok && cached.Info != nil {
+		return cloneVideoInfo(cached.Info), nil
+	}
 	return c.fetchVideoOnce(ctx, videoID)
 }
 
@@ -289,6 +323,10 @@ func (c *Client) fetchVideoOnce(ctx context.Context, videoID string) (*VideoInfo
 	info.HLSManifestURL = c.resolveManifestURL(ctx, info.HLSManifestURL, playerURL, resp.SourceClient, innertube.StreamingProtocolHLS)
 
 	manifestFormats := c.loadManifestFormats(ctx, info.DashManifestURL, info.HLSManifestURL)
+	for i := range manifestFormats {
+		manifestFormats[i].SourceClient = resp.SourceClient
+		manifestFormats[i].ThisIsLive = info.IsLive
+	}
 	if len(manifestFormats) > 0 {
 		info.Formats = appendUniqueFormats(info.Formats, manifestFormats)
 	}
@@ -310,6 +348,19 @@ func (c *Client) matchSource(input string) source.Source {
 // caches the result as a session keyed by "<source>:<id>", so a subsequent
 // download reuses it and can attach the source's required media headers.
 func (c *Client) getVideoViaSource(ctx context.Context, src source.Source, input string) (*VideoInfo, error) {
+	key := sourceInputKey(src.Name(), input)
+	if cached, ok := c.getSession(key); ok && cached.Info != nil {
+		return cloneVideoInfo(cached.Info), nil
+	}
+	lock, release := c.fetchLock().acquire(key)
+	defer release()
+	if err := lock.LockContext(ctx); err != nil {
+		return nil, err
+	}
+	defer lock.Unlock()
+	if cached, ok := c.getSession(key); ok && cached.Info != nil {
+		return cloneVideoInfo(cached.Info), nil
+	}
 	media, err := src.Extract(ctx, input)
 	if err != nil {
 		return nil, err
@@ -318,6 +369,8 @@ func (c *Client) getVideoViaSource(ctx context.Context, src source.Source, input
 		return nil, ErrNoPlayableFormats
 	}
 	info := mediaToVideoInfo(media)
+	info.SourceName = src.Name()
+	info.WebpageURL = firstNonEmptyString(media.WebpageURL, input)
 	c.cacheSourceSession(src.Name(), input, info, media.MediaHeaders)
 	return info, nil
 }
@@ -329,8 +382,27 @@ func (c *Client) getVideoViaSource(ctx context.Context, src source.Source, input
 func (c *Client) cacheSourceSession(name, input string, info *VideoInfo, headers http.Header) {
 	sess := videoSession{
 		Info:         cloneVideoInfo(info),
-		MediaHeaders: headers,
+		MediaHeaders: cloneHeader(headers),
 		SourceName:   name,
+	}
+	for _, src := range c.sources {
+		if src.Name() != name {
+			continue
+		}
+		if validator, ok := src.(interface{ MediaURLValid(string) bool }); ok {
+			urls := make([]string, len(info.Formats))
+			for i, f := range info.Formats {
+				urls[i] = f.URL
+			}
+			sess.valid = func() bool {
+				for _, u := range urls {
+					if !validator.MediaURLValid(u) {
+						return false
+					}
+				}
+				return true
+			}
+		}
 	}
 	c.putSession(sourceSessionKey(name, info.ID), sess)
 	c.putSession(sourceInputKey(name, input), sess)
@@ -350,7 +422,7 @@ func sourceInputKey(name, input string) string {
 
 // mediaToVideoInfo maps a site-neutral source.Media to the public VideoInfo.
 func mediaToVideoInfo(m *source.Media) *VideoInfo {
-	return &VideoInfo{
+	return cloneVideoInfo(&VideoInfo{
 		ID:           m.ID,
 		Title:        m.Title,
 		Author:       m.Author,
@@ -360,7 +432,7 @@ func mediaToVideoInfo(m *source.Media) *VideoInfo {
 		UploadDate:   m.UploadDate,
 		ThumbnailURL: m.ThumbnailURL,
 		Formats:      append([]FormatInfo(nil), m.Formats...),
-	}
+	})
 }
 
 // sessionMediaHeaders returns any extra media request headers cached for the
@@ -406,7 +478,7 @@ func (c *Client) FetchDASHManifest(ctx context.Context, input string) (string, e
 	if manifestURL == "" {
 		return "", fmt.Errorf("%w: dash manifest unavailable for video=%s", ErrNoPlayableFormats, videoID)
 	}
-	manifest, err := formats.FetchDASHManifest(ctx, c.config.HTTPClient, manifestURL)
+	manifest, err := formats.FetchDASHManifest(ctx, c.config.HTTPClient, manifestURL, c.config.RequestHeaders)
 	if err != nil {
 		return "", err
 	}
@@ -432,7 +504,7 @@ func (c *Client) FetchHLSManifest(ctx context.Context, input string) (string, er
 	if manifestURL == "" {
 		return "", fmt.Errorf("%w: hls manifest unavailable for video=%s", ErrNoPlayableFormats, videoID)
 	}
-	manifest, err := formats.FetchHLSManifest(ctx, c.config.HTTPClient, manifestURL)
+	manifest, err := formats.FetchHLSManifest(ctx, c.config.HTTPClient, manifestURL, c.config.RequestHeaders)
 	if err != nil {
 		return "", err
 	}
@@ -481,7 +553,9 @@ func (c *Client) ResolveStreamURL(ctx context.Context, videoID string, itag int)
 
 	lock, release := c.fetchLock().acquire(videoID)
 	defer release()
-	lock.Lock()
+	if err := lock.LockContext(ctx); err != nil {
+		return "", err
+	}
 	defer lock.Unlock()
 
 	return c.resolveStreamURLLocked(ctx, videoID, itag)
@@ -502,6 +576,16 @@ func (c *Client) resolveStreamURLLocked(ctx context.Context, videoID string, ita
 	}
 
 	raw, found := findRawFormat(session.Response, itag)
+	if !found && session.Info != nil {
+		for _, f := range session.Info.Formats {
+			if f.Itag == itag && f.URL != "" {
+				if f.ManifestURL != "" && session.Info != nil && f.URL == session.Info.DashManifestURL {
+					return f.URL, nil
+				}
+				return c.resolveDirectURL(ctx, f.URL, session.PlayerURL, f.SourceClient, protocolFromFormat(f))
+			}
+		}
+	}
 	if !found {
 		return "", fmt.Errorf("%w: itag=%d", ErrNoPlayableFormats, itag)
 	}
@@ -518,7 +602,7 @@ func (c *Client) resolveStreamURLLocked(ctx context.Context, videoID string, ita
 			ctx,
 			raw.URL,
 			session.PlayerURL,
-			session.Response.SourceClient,
+			firstNonEmptyString(raw.SourceClient, session.Response.SourceClient),
 			protocolFromRawFormat(raw),
 		)
 		if err != nil {
@@ -580,7 +664,7 @@ func (c *Client) resolveStreamURLLocked(ctx context.Context, videoID string, ita
 		}
 	}
 
-	rewritten, err := c.applyPoTokenPolicyToURL(ctx, u.String(), session.Response.SourceClient, protocolFromRawFormat(raw))
+	rewritten, err := c.applyPoTokenPolicyToURL(ctx, u.String(), firstNonEmptyString(raw.SourceClient, session.Response.SourceClient), protocolFromRawFormat(raw))
 	if err != nil {
 		return "", err
 	}
@@ -602,11 +686,14 @@ func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f
 
 	lock, release := c.fetchLock().acquire(videoID)
 	defer release()
-	lock.Lock()
+	if err := lock.LockContext(ctx); err != nil {
+		return "", err
+	}
 	defer lock.Unlock()
 
 	if strings.TrimSpace(f.URL) != "" {
 		session, ok := c.getSession(videoID)
+		refreshed := !ok
 		if !ok {
 			if _, err := c.fetchVideoOnce(ctx, videoID); err != nil {
 				return "", err
@@ -616,12 +703,31 @@ func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f
 				return "", ErrChallengeNotSolved
 			}
 		}
+		if refreshed && session.Info != nil {
+			found := false
+			for _, fresh := range session.Info.Formats {
+				if fresh.Itag == f.Itag {
+					f = fresh
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", ErrNoPlayableFormats
+			}
+			if f.Ciphered || f.URL == "" {
+				return c.resolveStreamURLLocked(ctx, videoID, f.Itag)
+			}
+		}
 		if hasQueryParam(f.URL, "n") && strings.TrimSpace(session.PlayerURL) == "" {
 			updated, fetchErr := c.ensureSessionPlayerURL(ctx, videoID, session)
 			if fetchErr != nil {
 				return "", ErrChallengeNotSolved
 			}
 			session = updated
+		}
+		if f.ManifestURL != "" && session.Info != nil && f.URL == session.Info.DashManifestURL {
+			return f.URL, nil
 		}
 		return c.resolveDirectURL(ctx, f.URL, session.PlayerURL, f.SourceClient, protocolFromFormat(f))
 	}
@@ -636,6 +742,8 @@ func toFormatInfo(f formats.Format) FormatInfo {
 	hasAudio := f.HasAudio
 	return FormatInfo{
 		Itag:              f.Itag,
+		ManifestURL:       f.ManifestURL,
+		RepresentationID:  f.RepresentationID,
 		URL:               f.URL,
 		MimeType:          f.MimeType,
 		Protocol:          f.Protocol,
@@ -802,7 +910,7 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 		}
 		// URL-expire validation runs regardless of TTL so server-side URL
 		// expiry is always honored even when the local TTL is disabled.
-		if !expired && sessionURLsExpired(s.Response, time.Now()) {
+		if !expired && sessionExpired(s, time.Now()) {
 			expired = true
 		}
 		if !expired {
@@ -831,7 +939,7 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 		return videoSession{}, false
 	}
 	ttlExpired := effectiveSessionCacheTTL(c.config.SessionCacheTTL) > 0 && !cur.CachedAt.IsZero() && time.Since(cur.CachedAt) > effectiveSessionCacheTTL(c.config.SessionCacheTTL)
-	if ttlExpired || sessionURLsExpired(cur.Response, time.Now()) {
+	if ttlExpired || sessionExpired(cur, time.Now()) {
 		delete(c.sessions, videoID)
 		return videoSession{}, false
 	}
@@ -843,6 +951,8 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 
 func (c *Client) putSession(videoID string, session videoSession) {
 	now := time.Now()
+	session.ExpiresAt = sessionURLExpiry(session)
+	session.expiryChecked = true
 	if session.CachedAt.IsZero() {
 		session.CachedAt = now
 	}
@@ -857,7 +967,10 @@ func (c *Client) putSession(videoID string, session videoSession) {
 	if c.sessions == nil {
 		c.sessions = make(map[string]videoSession)
 	}
-	c.evictExpiredLocked(now)
+	if now.Sub(c.lastSessionSweep) >= time.Minute {
+		c.evictExpiredLocked(now)
+		c.lastSessionSweep = now
+	}
 	c.sessions[videoID] = session
 	c.evictLRULocked()
 }
@@ -876,7 +989,7 @@ func (c *Client) evictExpiredLocked(now time.Time) {
 			delete(c.sessions, id)
 			continue
 		}
-		if sessionURLsExpired(session.Response, now) {
+		if sessionExpired(session, now) {
 			delete(c.sessions, id)
 		}
 	}
@@ -884,7 +997,10 @@ func (c *Client) evictExpiredLocked(now time.Time) {
 
 func (c *Client) evictLRULocked() {
 	maxEntries := c.config.SessionCacheMaxEntries
-	if maxEntries <= 0 {
+	if maxEntries == 0 {
+		maxEntries = 256
+	}
+	if maxEntries < 0 {
 		return
 	}
 	for len(c.sessions) > maxEntries {
@@ -926,7 +1042,9 @@ func (c *Client) ensureSession(ctx context.Context, input string) (videoSession,
 
 	lock, release := c.fetchLock().acquire(videoID)
 	defer release()
-	lock.Lock()
+	if err := lock.LockContext(ctx); err != nil {
+		return videoSession{}, "", err
+	}
 	defer lock.Unlock()
 
 	// Re-check once inside the lock: another caller may have populated it.
@@ -1065,7 +1183,7 @@ func (c *Client) loadManifestFormats(ctx context.Context, dashURL, hlsURL string
 	out := make([]FormatInfo, 0, 16)
 	if dashURL != "" {
 		c.emitExtractionEvent("manifest", "start", "dash", dashURL)
-		if dash, err := formats.FetchDASHManifest(ctx, c.httpClient(), dashURL); err == nil {
+		if dash, err := formats.FetchDASHManifest(ctx, c.httpClient(), dashURL, c.config.RequestHeaders); err == nil {
 			c.emitExtractionEvent("manifest", "success", "dash", dashURL)
 			for _, f := range dash.Formats {
 				out = append(out, toFormatInfo(f))
@@ -1076,7 +1194,7 @@ func (c *Client) loadManifestFormats(ctx context.Context, dashURL, hlsURL string
 	}
 	if hlsURL != "" {
 		c.emitExtractionEvent("manifest", "start", "hls", hlsURL)
-		if hls, err := formats.FetchHLSManifest(ctx, c.httpClient(), hlsURL); err == nil {
+		if hls, err := formats.FetchHLSManifest(ctx, c.httpClient(), hlsURL, c.config.RequestHeaders); err == nil {
 			c.emitExtractionEvent("manifest", "success", "hls", hlsURL)
 			for _, f := range hls.Formats {
 				out = append(out, toFormatInfo(f))
@@ -1210,6 +1328,9 @@ func cloneVideoInfo(v *VideoInfo) *VideoInfo {
 	}
 	if len(v.Formats) > 0 {
 		clone.Formats = append([]FormatInfo(nil), v.Formats...)
+		for i := range clone.Formats {
+			clone.Formats[i].Parts = append([]string(nil), v.Formats[i].Parts...)
+		}
 	}
 	return &clone
 }
@@ -1224,4 +1345,15 @@ func (c *Client) emitExtractionEvent(stage, phase, source, detail string) {
 		Client: source,
 		Detail: detail,
 	})
+}
+
+// Close releases source-owned streaming servers. Caller-supplied transports remain owned by the caller.
+func (c *Client) Close() error {
+	var result error
+	for _, src := range c.sources {
+		if closer, ok := src.(interface{ Close() error }); ok {
+			result = errors.Join(result, closer.Close())
+		}
+	}
+	return result
 }

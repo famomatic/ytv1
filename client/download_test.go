@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -996,6 +997,8 @@ func TestDownloadRequiresMuxerForSeparateBestVideoAudio(t *testing.T) {
 }
 
 func TestDownloadAndMerge_DefaultCleansIntermediateFiles(t *testing.T) {
+	var eventMu sync.Mutex
+
 	videoID := "jNQXAC9IVRw"
 	var events []DownloadEvent
 	mediaBase := "https://media.example"
@@ -1028,7 +1031,7 @@ func TestDownloadAndMerge_DefaultCleansIntermediateFiles(t *testing.T) {
 		HTTPClient:      httpClient,
 		ClientOverrides: []string{"mweb"},
 		Muxer:           testMuxer{},
-		OnDownloadEvent: func(evt DownloadEvent) { events = append(events, evt) },
+		OnDownloadEvent: func(evt DownloadEvent) { eventMu.Lock(); defer eventMu.Unlock(); events = append(events, evt) },
 	})
 	out := filepath.Join(t.TempDir(), "merged.webm")
 	res, err := c.Download(context.Background(), videoID, DownloadOptions{
@@ -1159,6 +1162,8 @@ func TestDownloadAndMerge_MergeOutputFormat(t *testing.T) {
 }
 
 func TestDownloadAndMerge_KeepIntermediateFiles(t *testing.T) {
+	var eventMu sync.Mutex
+
 	videoID := "jNQXAC9IVRw"
 	var events []DownloadEvent
 	mediaBase := "https://media.example"
@@ -1191,7 +1196,7 @@ func TestDownloadAndMerge_KeepIntermediateFiles(t *testing.T) {
 		HTTPClient:      httpClient,
 		ClientOverrides: []string{"mweb"},
 		Muxer:           testMuxer{},
-		OnDownloadEvent: func(evt DownloadEvent) { events = append(events, evt) },
+		OnDownloadEvent: func(evt DownloadEvent) { eventMu.Lock(); defer eventMu.Unlock(); events = append(events, evt) },
 	})
 	out := filepath.Join(t.TempDir(), "merged.webm")
 	_, err := c.Download(context.Background(), videoID, DownloadOptions{
@@ -1527,9 +1532,9 @@ func TestDownloadStream_RejectsTruncatedFile(t *testing.T) {
 	c := New(Config{HTTPClient: srv.Client()})
 	out := filepath.Join(t.TempDir(), "truncated.bin")
 	f := types.FormatInfo{
-		Itag:           999,
-		Protocol:       "https",
-		ContentLength:  1000,
+		Itag:          999,
+		Protocol:      "https",
+		ContentLength: 1000,
 	}
 	err := c.downloadStream(context.Background(), "test", srv.URL, out, f, false, false)
 	if err == nil {
@@ -1554,9 +1559,9 @@ func TestDownloadStream_AcceptsCompleteFile(t *testing.T) {
 	c := New(Config{HTTPClient: srv.Client()})
 	out := filepath.Join(t.TempDir(), "complete.bin")
 	f := types.FormatInfo{
-		Itag:           999,
-		Protocol:       "https",
-		ContentLength:  1000,
+		Itag:          999,
+		Protocol:      "https",
+		ContentLength: 1000,
 	}
 	if err := c.downloadStream(context.Background(), "test", srv.URL, out, f, false, false); err != nil {
 		t.Fatalf("downloadStream() unexpected error = %v", err)

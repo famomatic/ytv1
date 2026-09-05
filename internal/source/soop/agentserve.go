@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,7 +76,7 @@ func (st *agentServeState) touch() {
 //
 // st (may be nil) tracks the connection lifecycle for auto-shutdown.
 func (s *Source) agentHandler(p agentStreamParams, st *agentServeState, playerMode bool) http.HandlerFunc {
-	var once sync.Once
+	var claimed atomic.Bool
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Accept-Ranges", "none")
 		w.Header().Set("Content-Type", "video/mp2t")
@@ -90,9 +91,11 @@ func (s *Source) agentHandler(p agentStreamParams, st *agentServeState, playerMo
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		streamed := false
-		once.Do(func() {
-			streamed = true
+		if !claimed.CompareAndSwap(false, true) {
+			http.Error(w, "stream already in progress", http.StatusConflict)
+			return
+		}
+		{
 			if st != nil {
 				st.enter()
 				defer st.leave()
@@ -103,9 +106,6 @@ func (s *Source) agentHandler(p agentStreamParams, st *agentServeState, playerMo
 			if err := s.streamAgentMedia(r.Context(), p, fw); err != nil {
 				fmt.Fprintf(os.Stderr, "soop: agent stream ended: %v\n", err)
 			}
-		})
-		if !streamed {
-			http.Error(w, "stream already in progress", http.StatusConflict)
 		}
 	}
 }
@@ -144,6 +144,10 @@ func RunAgentServe(encodedParams string) error {
 		handler = s.agentHandler(p, st, true) // the detached daemon serves a player
 	}
 	srv := &http.Server{Handler: handler}
+	defer srv.Close()
+	if ds, ok := handler.(*dvrServer); ok {
+		defer ds.Close()
+	}
 	go func() { _ = srv.Serve(ln) }()
 
 	// The URL line on stdout is the daemon's only stdout output; the parent reads

@@ -2,7 +2,9 @@ package timeshift
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ type Config struct {
 	// TargetSegmentDuration is the nominal length of each HLS segment; the real
 	// cut lands on the first keyframe at or after this. Default 3s.
 	TargetSegmentDuration time.Duration
+	MaxSegmentBytes       int64 // caps unfinished segments; default 64 MiB
 	// Window is how much past media to retain (and expose for seeking). Older
 	// segments are evicted. Default 2 minutes.
 	Window time.Duration
@@ -35,11 +38,12 @@ type Config struct {
 // storedSeg is one retained segment: its bytes live in memory (data) or on disk
 // (path), never both.
 type storedSeg struct {
-	seq   int
-	dur   time.Duration
-	bytes int
-	data  []byte
-	path  string
+	discontinuity bool
+	seq           int
+	dur           time.Duration
+	bytes         int
+	data          []byte
+	path          string
 }
 
 // DVR consumes a continuous MPEG-TS stream (it is an io.Writer) and exposes a
@@ -48,9 +52,14 @@ type storedSeg struct {
 // stream. Recording (Write, from one goroutine) and serving (Handler, many
 // concurrent requests) are decoupled.
 type DVR struct {
-	cfg Config
-	seg *TSSegmenter
-	dir string // the created spill subdirectory (empty for in-memory)
+	writeMu          sync.Mutex
+	finished, closed bool
+	ready            chan struct{}
+	readyOnce        sync.Once
+	handler          http.Handler
+	cfg              Config
+	seg              *TSSegmenter
+	dir              string // the created spill subdirectory (empty for in-memory)
 
 	mu         sync.RWMutex
 	segs       []storedSeg // sliding window, ordered by seq ascending
@@ -67,30 +76,78 @@ func NewDVR(cfg Config) *DVR {
 	if cfg.Window <= 0 {
 		cfg.Window = 2 * time.Minute
 	}
-	d := &DVR{cfg: cfg}
+	d := &DVR{cfg: cfg, ready: make(chan struct{})}
 	if cfg.Dir != "" {
 		if dir, err := os.MkdirTemp(cfg.Dir, "ytv1-dvr-"); err == nil {
 			d.dir = dir
 		}
 	}
 	d.seg = NewTSSegmenter(cfg.TargetSegmentDuration, d.addSegment)
+	limit := cfg.MaxSegmentBytes
+	if limit <= 0 {
+		limit = 64 << 20
+	}
+	if cfg.MaxBytes > 0 && cfg.MaxBytes < limit {
+		limit = cfg.MaxBytes
+	}
+	d.seg.MaxSegmentBytes = limit
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.m3u8", d.servePlaylist)
+	mux.HandleFunc("/", d.serveSegment)
+	d.handler = mux
 	return d
 }
 
 // Write feeds MPEG-TS bytes into the segmenter. Safe for arbitrary chunk sizes.
-func (d *DVR) Write(p []byte) (int, error) { return d.seg.Write(p) }
+func (d *DVR) Write(p []byte) (int, error) {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	if d.finished || d.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return d.seg.Write(p)
+}
 
-// Close flushes the final segment and removes any on-disk spill directory.
-func (d *DVR) Close() error {
+// Finish stops recording, retaining the final playlist and spill files for playback.
+func (d *DVR) Finish() {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	if d.finished {
+		return
+	}
 	d.seg.Close()
+	d.mu.Lock()
+	d.finished = true
+	d.mu.Unlock()
+	d.readyOnce.Do(func() { close(d.ready) })
+}
+
+// Close releases retained media after HTTP serving has stopped.
+func (d *DVR) Close() error {
+	d.Finish()
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.closed = true
+	d.segs = nil
 	if d.dir != "" {
-		_ = os.RemoveAll(d.dir)
+		return os.RemoveAll(d.dir)
 	}
 	return nil
 }
 
+func (d *DVR) WaitReady(ctx context.Context) error {
+	select {
+	case <-d.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (d *DVR) addSegment(s Segment) {
-	ss := storedSeg{seq: s.Seq, dur: s.Duration, bytes: len(s.Data)}
+	ss := storedSeg{discontinuity: s.Discontinuity, seq: s.Seq, dur: s.Duration, bytes: len(s.Data)}
 	if d.dir != "" {
 		p := filepath.Join(d.dir, fmt.Sprintf("seg%d.ts", s.Seq))
 		if err := os.WriteFile(p, s.Data, 0o644); err == nil {
@@ -105,6 +162,7 @@ func (d *DVR) addSegment(s Segment) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.segs = append(d.segs, ss)
+	d.readyOnce.Do(func() { close(d.ready) })
 	d.total += ss.dur
 	d.totalBytes += int64(ss.bytes)
 	// Evict oldest while over EITHER the duration window or the byte cap (keeping
@@ -128,18 +186,18 @@ func (d *DVR) SegmentCount() int {
 }
 
 // Handler serves the HLS playlist at /index.m3u8 and segments at /seg{seq}.ts.
-func (d *DVR) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/index.m3u8", d.servePlaylist)
-	mux.HandleFunc("/", d.serveSegment)
-	return mux
-}
+func (d *DVR) Handler() http.Handler { return d.handler }
 
 func (d *DVR) servePlaylist(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
 	segs := append([]storedSeg(nil), d.segs...)
+	finished, closed := d.finished, d.closed
 	d.mu.RUnlock()
 
+	if closed {
+		http.Error(w, "DVR closed", http.StatusGone)
+		return
+	}
 	var maxDur time.Duration
 	for _, s := range segs {
 		if s.dur > maxDur {
@@ -160,10 +218,15 @@ func (d *DVR) servePlaylist(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", target)
 	fmt.Fprintf(&b, "#EXT-X-MEDIA-SEQUENCE:%d\n", mediaSeq)
 	for _, s := range segs {
+		if s.discontinuity {
+			b.WriteString("#EXT-X-DISCONTINUITY\n")
+		}
 		fmt.Fprintf(&b, "#EXTINF:%.3f,\nseg%d.ts\n", s.dur.Seconds(), s.seq)
 	}
-	// No #EXT-X-ENDLIST: this is a live playlist; the player refetches for new
-	// segments and may seek within the ones listed.
+	if finished {
+		b.WriteString("#EXT-X-ENDLIST\n")
+	}
+	// A finished DVR keeps the final playlist until Close releases its storage.
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -187,7 +250,19 @@ func (d *DVR) serveSegment(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	var file *os.File
+	var openErr error
+	if ok2 && found.path != "" {
+		file, openErr = os.Open(found.path)
+	}
 	d.mu.RUnlock()
+	if openErr != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if file != nil {
+		defer file.Close()
+	}
 	if !ok2 {
 		http.NotFound(w, r) // evicted or not yet produced
 		return
@@ -196,7 +271,7 @@ func (d *DVR) serveSegment(w http.ResponseWriter, r *http.Request) {
 	// ServeContent/ServeFile add Accept-Ranges and honour Range, so a player can
 	// seek within a segment as well as across them.
 	if found.path != "" {
-		http.ServeFile(w, r, found.path)
+		http.ServeContent(w, r, "", time.Time{}, file)
 		return
 	}
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(found.data))

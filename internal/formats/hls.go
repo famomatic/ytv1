@@ -19,12 +19,17 @@ type HLSManifest struct {
 	Formats    []Format
 }
 
-func FetchHLSManifest(ctx context.Context, client *http.Client, url string) (*HLSManifest, error) {
+func FetchHLSManifest(ctx context.Context, client *http.Client, url string, headers ...http.Header) (*HLSManifest, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	for _, h := range headers {
+		for key, values := range h {
+			req.Header[key] = append([]string(nil), values...)
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch HLS manifest: %w", err)
@@ -41,7 +46,10 @@ func FetchHLSManifest(ctx context.Context, client *http.Client, url string) (*HL
 	}
 
 	raw := string(body)
-	parsedFormats, _ := ParseHLSManifest(raw, url)
+	parsedFormats, parseErr := ParseHLSManifest(raw, url)
+	if parseErr != nil {
+		return nil, parseErr
+	}
 
 	return &HLSManifest{
 		RawContent: raw,
@@ -51,8 +59,8 @@ func FetchHLSManifest(ctx context.Context, client *http.Client, url string) (*HL
 
 // ParseHLSManifest parses an HLS master playlist into normalized formats.
 func ParseHLSManifest(raw, manifestURL string) ([]Format, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
+	if !strings.HasPrefix(strings.TrimSpace(raw), "#EXTM3U") {
+		return nil, fmt.Errorf("invalid HLS manifest header")
 	}
 
 	// EXT-X-STREAM-INF may precede or follow the EXT-X-MEDIA declaration it
