@@ -127,11 +127,23 @@ func (r *APIKeyResolver) ResolveSignatureTimestamp(ctx context.Context, profile 
 	if cacheKey == "" {
 		return 0
 	}
-	data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID)
-	if err != nil {
-		return 0
+	if data, err := r.resolveWatchDataCached(ctx, cacheKey, profile, videoID); err == nil && data.SignatureTimestamp != 0 {
+		return data.SignatureTimestamp
 	}
-	return data.SignatureTimestamp
+	// TV pages (/tv) expose no usable signatureTimestamp, but tv_* player
+	// requests still need the main web player's STS (yt-dlp resolves STS from
+	// the web player URL for every client). Without it YouTube answers
+	// UNPLAYABLE "The page needs to be reloaded."
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(profile.ID)), "tv") {
+		webKey := profileCacheKey(WebClient)
+		if webKey == "" {
+			return 0
+		}
+		if data, err := r.resolveWatchDataCached(ctx, webKey, WebClient, videoID); err == nil {
+			return data.SignatureTimestamp
+		}
+	}
+	return 0
 }
 
 // resolveWatchDataCached returns the cached resolved data for the given
