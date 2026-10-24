@@ -45,7 +45,7 @@ func (d *Decipherer) DecipherSignature(s string) (string, error) {
 	if runtimeErr == nil {
 		return decoded, nil
 	}
-	return "", err
+	return "", fmt.Errorf("%w; runtime fallback: %v", err, runtimeErr)
 }
 
 // DecipherN deciphers the 'n' parameter.
@@ -347,20 +347,62 @@ type runtimeDecipherer struct {
 	vm       *goja.Runtime
 	sigFunc  goja.Callable
 	nURLFunc goja.Callable
+	// alrFunc/solver mirror yt-dlp's EJS solver (yt.solver.core.js): newer
+	// players expose a single URL-builder function (the one calling
+	// `.set("alr","yes")`) that deciphers both `s` and `n`.
+	alrFunc goja.Callable
+	alrVal  goja.Value
+	solver  goja.Callable
 }
 
 var (
 	signatureRuntimeNameRegexp = regexp.MustCompile(`const\s+[A-Za-z0-9_$]+=([A-Za-z0-9_$]+)\(16,decodeURIComponent\([^\)]*\.s\)\)`)
 	nURLRuntimeNameRegexp      = regexp.MustCompile(`([A-Za-z0-9_$]+)=function\([A-Za-z0-9_$]+\)\{try\{(?:const|let|var)\s+[A-Za-z0-9_$]+=\(new\s+g\.[A-Za-z0-9_$]+\([A-Za-z0-9_$]+,!0\)\)\.get\("n"\)`)
 	nPathExtractRegexp         = regexp.MustCompile(`/n/([^/?]+)`)
+	// alrRuntimeNameRegexp finds `NAME=function(a,b,c){...a.set("alr","yes")...}`.
+	alrRuntimeNameRegexp = regexp.MustCompile(`(?:^|[;{}\n,])\s*([A-Za-z0-9_$]+(?:\.[A-Za-z0-9_$]+)*)=function\([A-Za-z0-9_$]+(?:=""|=\x27\x27)?,[A-Za-z0-9_$]+(?:=""|=\x27\x27)?,[A-Za-z0-9_$]+(?:=""|=\x27\x27)?\)\{[^{}]{0,200}?\.set\("alr","yes"\)`)
 )
+
+// ejsSolverJS is the createSolver() template from yt-dlp's yt.solver.core.js.
+const ejsSolverJS = `(function(fn, sig, n) {
+  var url = fn("https://youtube.com/watch?v=yt-dlp-wins", "s", sig ? encodeURIComponent(sig) : undefined);
+  url.set("n", n);
+  var proto = Object.getPrototypeOf(url);
+  var keys = Object.keys(proto).concat(Object.getOwnPropertyNames(proto));
+  for (var i = 0; i < keys.length; i++) {
+    if (["constructor", "set", "get", "clone"].indexOf(keys[i]) < 0) {
+      url[keys[i]]();
+      break;
+    }
+  }
+  var s = url.get("s");
+  var nn = url.get("n");
+  return {
+    sig: s ? decodeURIComponent(s) : null,
+    n: nn === undefined ? null : nn
+  };
+})`
 
 func (d *Decipherer) decipherSignatureWithRuntime(s string) (string, error) {
 	rt, err := d.loadRuntimeDecipherer()
 	if err != nil {
 		return "", err
 	}
+	var solverErr error
+	if rt.solver != nil && rt.alrFunc != nil {
+		res, err := rt.solve(s, "")
+		if err == nil && res.sig != "" && res.sig != s {
+			return res.sig, nil
+		}
+		if err == nil {
+			err = errors.New("runtime signature solver produced no output")
+		}
+		solverErr = err
+	}
 	if rt.sigFunc == nil {
+		if solverErr != nil {
+			return "", solverErr
+		}
 		return "", errors.New("runtime signature decipher function unavailable")
 	}
 
@@ -383,7 +425,21 @@ func (d *Decipherer) decipherNWithRuntime(n string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var solverErr error
+	if rt.solver != nil && rt.alrFunc != nil {
+		res, err := rt.solve("", n)
+		if err == nil && res.n != "" && res.n != n {
+			return res.n, nil
+		}
+		if err == nil {
+			err = errors.New("runtime n solver produced no output")
+		}
+		solverErr = err
+	}
 	if rt.nURLFunc == nil {
+		if solverErr != nil {
+			return "", solverErr
+		}
 		return "", errors.New("runtime n decipher function unavailable")
 	}
 
@@ -413,6 +469,40 @@ func (d *Decipherer) decipherNWithRuntime(n string) (string, error) {
 	return decoded, nil
 }
 
+type solveResult struct {
+	sig string
+	n   string
+}
+
+func (rt *runtimeDecipherer) solve(sig, n string) (solveResult, error) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var out goja.Value
+	if err := runJSWithTimeout(rt.vm, func() error {
+		var err error
+		args := []goja.Value{rt.alrVal, goja.Undefined(), goja.Undefined()}
+		if sig != "" {
+			args[1] = rt.vm.ToValue(sig)
+		}
+		if n != "" {
+			args[2] = rt.vm.ToValue(n)
+		}
+		out, err = rt.solver(goja.Undefined(), args...)
+		return err
+	}); err != nil {
+		return solveResult{}, err
+	}
+	obj := out.ToObject(rt.vm)
+	var res solveResult
+	if v := obj.Get("sig"); v != nil && !goja.IsNull(v) && !goja.IsUndefined(v) {
+		res.sig = v.String()
+	}
+	if v := obj.Get("n"); v != nil && !goja.IsNull(v) && !goja.IsUndefined(v) {
+		res.n = v.String()
+	}
+	return res, nil
+}
+
 func (d *Decipherer) loadRuntimeDecipherer() (*runtimeDecipherer, error) {
 	d.runtimeOnce.Do(func() {
 		d.runtime, d.runtimeErr = d.buildRuntimeDecipherer()
@@ -431,7 +521,11 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 	if m := nURLRuntimeNameRegexp.FindStringSubmatch(jsBody); len(m) > 1 {
 		nURLName = m[1]
 	}
-	if sigName == "" && nURLName == "" {
+	alrName := ""
+	if m := alrRuntimeNameRegexp.FindStringSubmatch(jsBody); len(m) > 1 {
+		alrName = m[1]
+	}
+	if sigName == "" && nURLName == "" && alrName == "" {
 		return nil, errors.New("runtime decipher export points not found")
 	}
 
@@ -441,6 +535,9 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 	}
 	if nURLName != "" {
 		inject += "g.__ytv1_nurl=" + nURLName + ";"
+	}
+	if alrName != "" {
+		inject += "g.__ytv1_alr=" + alrName + ";"
 	}
 
 	const marker = "})(_yt_player);"
@@ -456,6 +553,15 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 
 	if err := runJSWithTimeout(vm, func() error {
 		_, err := vm.RunString(runtimePreludeJS)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	// The player references the global Function (e.g. Function.prototype)
+	// while loading, so hardenVM's deletion breaks it. Keep Function.prototype
+	// reachable but make every Function constructor path throw.
+	if err := runJSWithTimeout(vm, func() error {
+		_, err := vm.RunString(safeFunctionJS)
 		return err
 	}); err != nil {
 		return nil, err
@@ -484,11 +590,30 @@ func (d *Decipherer) buildRuntimeDecipherer() (*runtimeDecipherer, error) {
 			rt.nURLFunc = fn
 		}
 	}
-	if rt.sigFunc == nil && rt.nURLFunc == nil {
+	if alrVal := rootObj.Get("__ytv1_alr"); alrVal != nil && !goja.IsUndefined(alrVal) && !goja.IsNull(alrVal) {
+		if fn, ok := goja.AssertFunction(alrVal); ok {
+			rt.alrFunc = fn
+			rt.alrVal = alrVal
+			if solverVal, err := vm.RunString(ejsSolverJS); err == nil {
+				if solver, ok := goja.AssertFunction(solverVal); ok {
+					rt.solver = solver
+				}
+			}
+		}
+	}
+	if rt.sigFunc == nil && rt.nURLFunc == nil && rt.solver == nil {
 		return nil, errors.New("runtime decipher exports are not callable")
 	}
 	return rt, nil
 }
+
+const safeFunctionJS = `(function(){
+	var FP = Object.getPrototypeOf(function(){});
+	var T = function Function() { throw new Error("Function constructor is disabled"); };
+	T.prototype = FP;
+	Object.defineProperty(FP, "constructor", {value: T, writable: true, configurable: true});
+	this.Function = T;
+})()`
 
 const runtimePreludeJS = `
 var globalThis = this;

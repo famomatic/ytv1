@@ -156,6 +156,10 @@ func (c *Client) Download(ctx context.Context, input string, options DownloadOpt
 		return nil, fmt.Errorf("%w: selected formats require merge; configure a muxer or choose a single progressive format", ErrMuxerUnavailable)
 	}
 
+	if err := c.waitUntilAvailable(ctx, selected); err != nil {
+		return nil, err
+	}
+
 	if len(selected) == 1 {
 		res, err := c.downloadSingle(ctx, videoID, info.Title, info.Author, selected[0], options.OutputPath, options)
 		if shouldRetryDefaultWithFallbackSingle(err, options) {

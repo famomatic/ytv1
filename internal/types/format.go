@@ -21,6 +21,9 @@ type FormatInfo struct {
 	Quality          string
 	QualityLabel     string
 	SourceClient     string
+	// AvailableAt is the unix time before which the URL is refused (pre-roll
+	// ad on TV clients); 0 means usable immediately.
+	AvailableAt int64
 	// TargetDurationSec > 0 marks a live adaptive format delivered as sq=<n>
 	// fragments. When the video is no longer live, the complete media must be
 	// downloaded fragment-by-fragment (the bare URL serves no data blocks).

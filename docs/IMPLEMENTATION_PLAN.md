@@ -411,6 +411,7 @@
 172. `[x]` B174. 2026-09-06 audit improvements O01-O08: bounded HTTPS workers, DVR memory/storage/indexing, bounded challenge/runtime/key caches, shared transport contracts, and cross-feature validation; measure before/after performance after correctness fixes.
 173. `[-]` B175. User-requested native SOOP P2P completion: recover relay login/frame-pull details, finish validated protocol/authentication components and streaming integration, and run deterministic, race, and opt-in live verification.
 174. `[x]` B176. yt-dlp reference at `fa9886678` (2026.10.21+): `tv_samsung` client + default-chain change, `tv_downgraded` removed from defaults/auto-fallback, `web_embedded` Safari UA, interstitial playability error text, `<script id="yt-initial-data">` parsing.
+175. `[x]` B177. tv_samsung follow-ups: STS from web player for TV clients, metadata merge from later responses, EJS-style runtime solver (`.set("alr","yes")` entry) for sig/n on 2026.10 players.
 
 ---
 
@@ -3246,3 +3247,12 @@ Cycle B is complete only when all are true:
 **Not ported (reason).** web_embedded HLS `source_preference -1` (ytv1 has no equivalent web_safari HLS deprioritization to extend); Python-only cleanups; urllib redirect/BytesIO and SOCKS/websocket fixes (Go net/http unaffected).
 
 **Verification.** `go build ./...`, `go vet` on touched packages, `go test ./...` green. Live YouTube check not run.
+
+### B177. tv_samsung Follow-ups and EJS-style Solver `[x]`
+
+**Changes.**
+- `ResolveSignatureTimestamp`: TV profiles fall back to the web watch page STS (the `/tv` page has none; missing STS => `UNPLAYABLE The page needs to be reloaded.`).
+- `mergePlayerResponses`: videoDetails/microformat/captions are filled from later responses when the first (tv_*) lacks them.
+- `internal/playerjs`: player `cbcfbf2f` (web_20261020) defeated the legacy regex sig parser and the `(16,decodeURIComponent(..s))` runtime exports. Ported the yt-dlp EJS solver idea: export the function containing `.set("alr","yes")` (also with default-valued params), call it with `("https://youtube.com/watch?v=yt-dlp-wins","s",enc(sig))`, `set("n")`, invoke the first non-get/set/clone prototype method, read `s`/`n`. Legacy exports remain as fallback. Global `Function` is replaced by a throwing stand-in (player needs `Function.prototype`).
+
+**Verification.** `go test ./...` green; real player ias/es6 give identical sig output; `-clients tv_samsung` downloads ciphered formats. TV pre-roll ads: ported yt-dlp `_get_available_at_timestamp` (adPlacements START + adSlots BEFORE_CONTENT, skip offset preferred) into `Format.AvailableAt`; `Download`/`OpenStream` sleep until then (googlevideo answers 403 earlier; `cOuuL1MY6s4` tv-only now downloads). Watch-page `ytInitialPlayerResponse` metadata is merged when responses lack a title (yt-dlp `initial_pr`), so tv-only runs get title/microformat/captions.

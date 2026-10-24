@@ -55,6 +55,9 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	if err != nil {
 		return fail(err)
 	}
+	if err := c.waitUntilAvailable(streamCtx, selected); err != nil {
+		return fail(err)
+	}
 	if video, audio, ok := hlsMergeFormats(selected); ok {
 		pr, pw := io.Pipe()
 		go func() {

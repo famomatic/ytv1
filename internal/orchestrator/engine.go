@@ -10,6 +10,7 @@ import (
 	neturl "net/url"
 	"regexp"
 	"strconv"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -172,6 +173,7 @@ func (e *Engine) tryPhase(ctx context.Context, videoID string, clients []innertu
 
 			if current.err == nil {
 				current.resp.SourceClient = current.client
+				current.resp.AvailableAt = innertube.AvailableAtTimestamp(current.resp, time.Now())
 				tagStreamingDataSourceClient(current.resp, current.client)
 				e.emitExtractionEvent("player_api_json", "success", current.client, "")
 				successes = append(successes, current.resp)
@@ -196,9 +198,11 @@ func tagStreamingDataSourceClient(resp *innertube.PlayerResponse, client string)
 	}
 	for i := range resp.StreamingData.Formats {
 		resp.StreamingData.Formats[i].SourceClient = client
+		resp.StreamingData.Formats[i].AvailableAt = resp.AvailableAt
 	}
 	for i := range resp.StreamingData.AdaptiveFormats {
 		resp.StreamingData.AdaptiveFormats[i].SourceClient = client
+		resp.StreamingData.AdaptiveFormats[i].AvailableAt = resp.AvailableAt
 	}
 }
 
@@ -247,6 +251,17 @@ func mergePlayerResponses(responses []*innertube.PlayerResponse) *innertube.Play
 		}
 		if merged.StreamingData.HlsManifestURL == "" {
 			merged.StreamingData.HlsManifestURL = resp.StreamingData.HlsManifestURL
+		}
+		// Metadata comes from the highest-priority response that has it:
+		// tv_* responses carry no title/microformat/captions.
+		if strings.TrimSpace(merged.VideoDetails.Title) == "" && strings.TrimSpace(resp.VideoDetails.Title) != "" {
+			merged.VideoDetails = resp.VideoDetails
+		}
+		if reflect.ValueOf(merged.Microformat).IsZero() {
+			merged.Microformat = resp.Microformat
+		}
+		if reflect.ValueOf(merged.Captions).IsZero() {
+			merged.Captions = resp.Captions
 		}
 	}
 	return merged

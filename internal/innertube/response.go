@@ -7,7 +7,12 @@ type PlayerResponse struct {
 	VideoDetails      VideoDetails      `json:"videoDetails"`
 	Microformat       Microformat       `json:"microformat"`
 	Captions          Captions          `json:"captions"`
+	AdPlacements      []AdPlacement     `json:"adPlacements"`
+	AdSlots           []AdSlot          `json:"adSlots"`
 	SourceClient      string            `json:"-"`
+	// AvailableAt is the unix time before which googlevideo URLs from this
+	// response are refused because of a pre-roll ad (0 = immediately).
+	AvailableAt int64 `json:"-"`
 }
 
 type BrowseResponse struct {
@@ -152,6 +157,7 @@ type StreamingData struct {
 
 type Format struct {
 	SourceClient     string `json:"-"`
+	AvailableAt      int64  `json:"-"`
 	Itag             int    `json:"itag"`
 	URL              string `json:"url"`
 	MimeType         string `json:"mimeType"`

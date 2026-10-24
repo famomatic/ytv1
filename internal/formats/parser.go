@@ -52,6 +52,7 @@ type Format struct {
 	SignatureCipher string
 	Cipher          string
 	SourceClient    string
+	AvailableAt     int64
 }
 
 type Range struct {
@@ -95,6 +96,7 @@ func Parse(resp *innertube.PlayerResponse) []Format {
 				Cipher:            f.Cipher,
 				IsDRM:             len(f.DRMFamilies) > 0,
 				SourceClient:      firstNonEmpty(f.SourceClient, resp.SourceClient),
+				AvailableAt:       firstNonZeroInt64(f.AvailableAt, resp.AvailableAt),
 				AudioSampleRate:   parseInt(f.AudioSampleRate),
 				ApproxDurationMs:  parseInt64(f.ApproxDurationMs),
 				ContentLength:     parseInt64(f.ContentLength),

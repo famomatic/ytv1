@@ -282,6 +282,8 @@ func (c *Client) fetchVideoOnce(ctx context.Context, videoID string) (*VideoInfo
 		return nil, mapError(err)
 	}
 
+	c.fillMetadataFromWatchPage(ctx, videoID, resp)
+
 	parsedFormats := formats.Parse(resp)
 
 	outFormats := make([]FormatInfo, 0, len(parsedFormats))
@@ -326,6 +328,7 @@ func (c *Client) fetchVideoOnce(ctx context.Context, videoID string) (*VideoInfo
 	manifestFormats := c.loadManifestFormats(ctx, info.DashManifestURL, info.HLSManifestURL)
 	for i := range manifestFormats {
 		manifestFormats[i].SourceClient = resp.SourceClient
+		manifestFormats[i].AvailableAt = resp.AvailableAt
 		manifestFormats[i].ThisIsLive = info.IsLive
 	}
 	if len(manifestFormats) > 0 {
@@ -763,6 +766,7 @@ func toFormatInfo(f formats.Format) FormatInfo {
 		Quality:           f.Quality,
 		QualityLabel:      f.QualityLabel,
 		SourceClient:      f.SourceClient,
+		AvailableAt:       f.AvailableAt,
 		ContentLength:     f.ContentLength,
 		TargetDurationSec: f.TargetDurationSec,
 		Incomplete:        f.Incomplete,
