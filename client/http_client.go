@@ -51,6 +51,9 @@ func defaultHTTPClient(proxyURL, sourceAddress string, insecureSkipVerify bool) 
 	// and any other code sharing the default transport.
 	baseTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
+		if proxyURL != "" || sourceAddress != "" || insecureSkipVerify {
+			return &http.Client{Transport: configurationErrorTransport{err: fmt.Errorf("custom default HTTP transport cannot apply proxy/source-address/TLS options")}}
+		}
 		// Non-standard default transport (e.g. test stubs): wrap a dedicated
 		// client around it but still avoid returning http.DefaultClient so
 		// Jar assignment stays local.
@@ -95,4 +98,10 @@ func defaultHTTPClient(proxyURL, sourceAddress string, insecureSkipVerify bool) 
 		transport.TLSClientConfig = tlsConfig
 	}
 	return &http.Client{Transport: transport}
+}
+
+type configurationErrorTransport struct{ err error }
+
+func (t configurationErrorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
 }

@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -81,6 +82,10 @@ func (c *Client) GetTranscript(ctx context.Context, input string, languageCode s
 		}
 	}
 
+	return c.transcriptForTrack(ctx, videoID, track)
+}
+
+func (c *Client) transcriptForTrack(ctx context.Context, videoID string, track SubtitleTrack) (*Transcript, error) {
 	raw, err := fetchTranscriptXML(ctx, c.httpClient(), c.config.RequestHeaders, track.BaseURL)
 	if err != nil {
 		if errors.Is(err, ErrUnavailable) {
@@ -196,6 +201,9 @@ func (c *Client) GetPlaylist(ctx context.Context, input string) (*PlaylistInfo, 
 			info.ContinuationStats.Failed++
 			warn := continuationWarningFromError(continuation, err)
 			info.ContinuationWarnings = append(info.ContinuationWarnings, warn)
+			if ctx.Err() != nil {
+				return info, ctx.Err()
+			}
 			c.warnf("failed to fetch continuation: %v", err)
 			continue
 		}
@@ -539,7 +547,19 @@ func parseFloatString(s string) (float64, error) {
 	return v, nil
 }
 
+var ytInitialDataScriptRE = regexp.MustCompile(`<script\b[^>]*\bid=["']yt-initial-data["'][^>]*>`)
+
 func extractYTInitialData(htmlBody []byte) ([]byte, error) {
+	// yt-dlp #17703: newer pages ship initial data in a dedicated
+	// <script id="yt-initial-data"> element; prefer it over the JS assignment.
+	if loc := ytInitialDataScriptRE.FindIndex(htmlBody); loc != nil {
+		rest := string(htmlBody[loc[1]:])
+		if end := strings.Index(rest, "</script>"); end >= 0 {
+			if blob := strings.TrimSpace(rest[:end]); strings.HasPrefix(blob, "{") && json.Valid([]byte(blob)) {
+				return []byte(blob), nil
+			}
+		}
+	}
 	markers := []string{
 		"var ytInitialData = ",
 		"window[\"ytInitialData\"] = ",

@@ -4,6 +4,7 @@ import "github.com/famomatic/ytv1/internal/types"
 
 // VideoInfo is the package-level metadata result.
 type VideoInfo struct {
+	sourceHeaders   map[string][]string
 	ID              string
 	SourceName      string
 	WebpageURL      string

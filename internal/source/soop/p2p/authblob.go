@@ -19,8 +19,10 @@ package p2p
 // a fixed interleaved order (the puVar1[0..15] assignments).
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 )
@@ -144,23 +146,45 @@ func SessionInput(guid string) []byte {
 	return in
 }
 
-// OpenAuthBlob reverses BuildAuthBlob: it returns the recovered input plaintext
-// (header stripped) so the wire format can be inspected/validated. Mainly for tests
-// and diagnostics.
+// OpenAuthBlob reverses BuildAuthBlob, validating both envelope layers, the
+// embedded length, padding, digest, and checksum. input excludes zero padding.
+// These keyless checks validate the wire format, not the sender's identity.
 func OpenAuthBlob(blob []byte) (header, input []byte, ok bool) {
-	if len(blob) < 16+80 {
+	if len(blob) < 80 || len(blob)%aes.BlockSize != 0 {
 		return nil, nil, false
 	}
 	l2 := authCTR(blob[0:16], authIV, blob[16:])
-	if len(l2) < 98 {
+	if subtle.ConstantTimeCompare(authHash(l2), blob[:16]) != 1 {
 		return nil, nil, false
 	}
-	if s2 := authUnscramble(l2[0:18]); string(s2) != string(authSalt2) {
+	if !bytes.Equal(authUnscramble(l2[:18]), authSalt2) {
 		return nil, nil, false
 	}
-	l1 := authCTR(authKey, authIV, l2[18:98])
-	if s1 := authUnscramble(l1[16:28]); string(s1) != string(authSalt1) {
+	l1 := authCTR(authKey, authIV, l2[18:])
+	if !bytes.Equal(authUnscramble(l1[16:28]), authSalt1) {
 		return nil, nil, false
 	}
-	return l1[0:16], l1[28:], true
+	// The header interleaves four little-endian words. Bound the decoded
+	// length before converting it to int (including on 32-bit platforms).
+	length := uint64(l1[7]) | uint64(l1[3])<<8 | uint64(l1[15])<<16 | uint64(l1[11])<<24
+	innerLen := (28 + length + 15) &^ uint64(15)
+	outerLen := (18 + innerLen + 15) &^ uint64(15)
+	if outerLen != uint64(len(l2)) || innerLen > uint64(len(l1)) {
+		return nil, nil, false
+	}
+	input = l1[28 : 28+int(length)]
+	checksum := uint32(l1[13]) | uint32(l1[5])<<8 | uint32(l1[9])<<16 | uint32(l1[1])<<24
+	if authChecksum(input) != checksum || !allZero(l1[28+int(length):int(innerLen)]) || !allZero(l2[18+int(innerLen):]) {
+		return nil, nil, false
+	}
+	return l1[:16], input, true
+}
+
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }

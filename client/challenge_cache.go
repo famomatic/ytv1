@@ -13,10 +13,50 @@ import (
 	"github.com/famomatic/ytv1/internal/playerjs"
 )
 
+type cachedDecipherer struct {
+	value   *playerjs.Decipherer
+	created time.Time
+}
+
 type challengeSolutions struct {
 	n       map[string]string
 	sig     map[string]string
 	created time.Time
+}
+
+func (c *Client) boundChallengeMap(values map[string]string, key string) {
+	limit := c.config.ChallengeCacheMaxEntriesPerPlayer
+	if limit == 0 {
+		limit = 1024
+	}
+	if _, ok := values[key]; ok || limit < 0 {
+		return
+	}
+	if len(values) >= limit {
+		for old := range values {
+			delete(values, old)
+			break
+		}
+	}
+}
+
+func (c *Client) boundChallengePlayers(keep string) {
+	limit := c.config.SessionCacheMaxEntries
+	if limit == 0 {
+		limit = 256
+	}
+	if limit < 0 || len(c.challenges) <= limit {
+		return
+	}
+	var oldest string
+	var at time.Time
+	for key, value := range c.challenges {
+		if key != keep && (at.IsZero() || value.created.Before(at)) {
+			oldest = key
+			at = value.created
+		}
+	}
+	delete(c.challenges, oldest)
 }
 
 var playerLocalePathPattern = regexp.MustCompile(`(?i)(/s/player/[A-Za-z0-9_-]+/player(?:_[a-z0-9]+)?\.vflset)/[a-z]{2,3}_[a-z]{2,3}(/base\.js)$`)
@@ -150,6 +190,22 @@ func (c *Client) decodeSignatureWithCache(ctx context.Context, playerURL, challe
 }
 
 func (c *Client) loadDecipherer(ctx context.Context, playerURL string) (*playerjs.Decipherer, error) {
+	lock, release := c.fetchLock().acquire("decipherer:" + playerURL)
+	defer release()
+	if err := lock.LockContext(ctx); err != nil {
+		return nil, err
+	}
+	defer lock.Unlock()
+	ttl := c.config.DeciphererCacheTTL
+	if ttl <= 0 {
+		ttl = defaultChallengeTTL
+	}
+	c.challengesMu.RLock()
+	cached, ok := c.decipherers[playerURL]
+	c.challengesMu.RUnlock()
+	if ok && time.Since(cached.created) < ttl {
+		return cached.value, nil
+	}
 	c.emitExtractionEvent("player_js", "start", "web", playerURL)
 	jsBody, err := c.playerJSResolver.GetPlayerJS(ctx, playerURL)
 	if err != nil {
@@ -157,7 +213,31 @@ func (c *Client) loadDecipherer(ctx context.Context, playerURL string) (*playerj
 		return nil, err
 	}
 	c.emitExtractionEvent("player_js", "success", "web", playerURL)
-	return playerjs.NewDecipherer(jsBody), nil
+	value := playerjs.NewDecipherer(jsBody)
+	limit := c.config.DeciphererCacheMaxEntries
+	if limit == 0 {
+		limit = 8
+	}
+	if limit > 0 {
+		c.challengesMu.Lock()
+		defer c.challengesMu.Unlock()
+		if c.decipherers == nil {
+			c.decipherers = make(map[string]cachedDecipherer)
+		}
+		if len(c.decipherers) >= limit {
+			var oldest string
+			var at time.Time
+			for k, v := range c.decipherers {
+				if at.IsZero() || v.created.Before(at) {
+					oldest = k
+					at = v.created
+				}
+			}
+			delete(c.decipherers, oldest)
+		}
+		c.decipherers[playerURL] = cachedDecipherer{value: value, created: time.Now()}
+	}
+	return value, nil
 }
 
 func (c *Client) getChallengeN(playerURL, challenge string) (string, bool) {
@@ -205,8 +285,11 @@ func (c *Client) setChallengeN(playerURL, challenge, decoded string) {
 	if s.created.IsZero() {
 		s.created = time.Now()
 	}
+	c.boundChallengeMap(s.n, challenge)
 	s.n[challenge] = decoded
+	c.boundChallengeBytes(&s)
 	c.challenges[key] = s
+	c.boundChallengePlayers(key)
 }
 
 func (c *Client) setChallengeSig(playerURL, challenge, decoded string) {
@@ -224,8 +307,36 @@ func (c *Client) setChallengeSig(playerURL, challenge, decoded string) {
 	if s.created.IsZero() {
 		s.created = time.Now()
 	}
+	c.boundChallengeMap(s.sig, challenge)
 	s.sig[challenge] = decoded
+	c.boundChallengeBytes(&s)
 	c.challenges[key] = s
+	c.boundChallengePlayers(key)
+}
+
+func (c *Client) boundChallengeBytes(s *challengeSolutions) {
+	limit := c.config.ChallengeCacheMaxBytesPerPlayer
+	if limit == 0 {
+		limit = 1 << 20
+	}
+	if limit < 0 {
+		return
+	}
+	var size int64
+	for _, values := range []map[string]string{s.n, s.sig} {
+		for k, v := range values {
+			size += int64(len(k) + len(v))
+		}
+	}
+	for _, values := range []map[string]string{s.n, s.sig} {
+		for k, v := range values {
+			if size <= limit {
+				return
+			}
+			delete(values, k)
+			size -= int64(len(k) + len(v))
+		}
+	}
 }
 
 func collectStreamChallenges(resp *innertube.PlayerResponse, dashManifestURL, hlsManifestURL string) (map[string]struct{}, map[string]struct{}) {

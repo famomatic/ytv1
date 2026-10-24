@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"testing"
 )
 
@@ -50,10 +51,97 @@ func TestOpenAuthBlobRoundTrip(t *testing.T) {
 	}
 	// input = [2][8][0] + GUID + NUL
 	want := SessionInput(capturedGUID)
-	if !bytes.HasPrefix(input, want) && !bytes.Equal(input[:len(want)], want) {
+	if !bytes.Equal(input, want) {
 		t.Fatalf("recovered input mismatch:\n got %x\nwant %x", input, want)
 	}
 	if !bytes.Contains(input, []byte(capturedGUID)) {
 		t.Fatalf("recovered input missing GUID: %x", input)
 	}
+}
+
+func TestAuthBlobVariableInput(t *testing.T) {
+	for _, size := range []int{0, 1, 3, 4, 19, 20, 21, 35, 36, 37, 45, 52, 53, 63, 64, 65, 255, 256, 1024, 65536} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			want := make([]byte, size)
+			for i := range want {
+				want[i] = byte(i*17 + 3)
+			}
+			blob := BuildAuthBlob(want, 0x12345678, 0xabcdef01)
+			header, got, ok := OpenAuthBlob(blob)
+			if !ok || !bytes.Equal(got, want) || !bytes.Equal(header, authHeader(want, 0x12345678, 0xabcdef01)) {
+				t.Fatalf("round trip: ok=%v input length=%d, want=%d", ok, len(got), size)
+			}
+		})
+	}
+}
+
+func TestAuthBlobRejectsCorruption(t *testing.T) {
+	blob, _ := hex.DecodeString(capturedOp2aBlob)
+	for i := range blob {
+		bad := bytes.Clone(blob)
+		bad[i] ^= 1
+		if header, input, ok := OpenAuthBlob(bad); ok {
+			// The native hash reuses the first partial block, and its rolling
+			// checksum has collisions. Some input changes are undetectable;
+			// require a canonical envelope, not cryptographic authentication.
+			ts := uint32(header[0]) | uint32(header[12])<<8 | uint32(header[4])<<16 | uint32(header[8])<<24
+			counter := uint32(header[6]) | uint32(header[10])<<8 | uint32(header[2])<<16 | uint32(header[14])<<24
+			if !bytes.Equal(BuildAuthBlob(input, ts, counter), bad) {
+				t.Fatalf("accepted noncanonical changed byte %d", i)
+			}
+		}
+		if _, _, ok := OpenAuthBlob(blob[:i]); ok {
+			t.Fatalf("accepted truncated length %d", i)
+		}
+	}
+	if _, _, ok := OpenAuthBlob(append(bytes.Clone(blob), make([]byte, 16)...)); ok {
+		t.Fatal("accepted trailing block")
+	}
+}
+
+func TestAuthBlobRejectsInvalidEnvelopeWithMatchingDigest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func([]byte, []byte)
+	}{
+		{"outer salt", func(outer, inner []byte) { outer[0] ^= 1 }},
+		{"inner salt", func(outer, inner []byte) { inner[16] ^= 1 }},
+		{"checksum", func(outer, inner []byte) { inner[13] ^= 1 }},
+		{"huge length", func(outer, inner []byte) {
+			inner[7], inner[3], inner[15], inner[11] = 255, 255, 255, 255
+		}},
+		{"inner padding", func(outer, inner []byte) { inner[79] = 1 }},
+		{"outer padding", func(outer, inner []byte) { outer[len(outer)-1] = 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, _ := hex.DecodeString(capturedOp2aBlob)
+			outer := authCTR(blob[:16], authIV, blob[16:])
+			inner := authCTR(authKey, authIV, outer[18:98])
+			tc.mutate(outer, inner)
+			copy(outer[18:98], authCTR(authKey, authIV, inner))
+			digest := authHash(outer)
+			bad := append(bytes.Clone(digest), authCTR(digest, authIV, outer)...)
+			if _, _, ok := OpenAuthBlob(bad); ok {
+				t.Fatal("accepted invalid envelope with a recomputed digest")
+			}
+		})
+	}
+}
+
+func FuzzOpenAuthBlob(f *testing.F) {
+	captured, _ := hex.DecodeString(capturedOp2aBlob)
+	f.Add(captured)
+	f.Add(BuildAuthBlob(nil, 0, 0))
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, blob []byte) {
+		header, input, ok := OpenAuthBlob(blob)
+		if !ok {
+			return
+		}
+		ts := uint32(header[0]) | uint32(header[12])<<8 | uint32(header[4])<<16 | uint32(header[8])<<24
+		counter := uint32(header[6]) | uint32(header[10])<<8 | uint32(header[2])<<16 | uint32(header[14])<<24
+		if rebuilt := BuildAuthBlob(input, ts, counter); !bytes.Equal(rebuilt, blob) {
+			t.Fatal("accepted a noncanonical blob")
+		}
+	})
 }

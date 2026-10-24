@@ -45,6 +45,9 @@ func FetchDASHManifest(ctx context.Context, client *http.Client, url string, hea
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
+	if resp.Request != nil && resp.Request.URL != nil {
+		url = resp.Request.URL.String()
+	}
 	raw := string(body)
 	parsedFormats, parseErr := ParseDASHManifest(raw, url)
 	if parseErr != nil {
@@ -64,30 +67,39 @@ type dashMPD struct {
 }
 
 type dashPeriod struct {
-	BaseURL         string              `xml:"BaseURL"`
-	SegmentTemplate *struct{}           `xml:"SegmentTemplate"`
-	AdaptationSets  []dashAdaptationSet `xml:"AdaptationSet"`
+	SegmentList       *struct{}           `xml:"SegmentList"`
+	SegmentBase       *struct{}           `xml:"SegmentBase"`
+	ContentProtection []struct{}          `xml:"ContentProtection"`
+	BaseURL           string              `xml:"BaseURL"`
+	SegmentTemplate   *struct{}           `xml:"SegmentTemplate"`
+	AdaptationSets    []dashAdaptationSet `xml:"AdaptationSet"`
 }
 
 type dashAdaptationSet struct {
-	BaseURL         string               `xml:"BaseURL"`
-	SegmentTemplate *struct{}            `xml:"SegmentTemplate"`
-	MimeType        string               `xml:"mimeType,attr"`
-	Codecs          string               `xml:"codecs,attr"`
-	Rep             []dashRepresentation `xml:"Representation"`
+	SegmentList       *struct{}            `xml:"SegmentList"`
+	SegmentBase       *struct{}            `xml:"SegmentBase"`
+	ContentProtection []struct{}           `xml:"ContentProtection"`
+	BaseURL           string               `xml:"BaseURL"`
+	SegmentTemplate   *struct{}            `xml:"SegmentTemplate"`
+	MimeType          string               `xml:"mimeType,attr"`
+	Codecs            string               `xml:"codecs,attr"`
+	Rep               []dashRepresentation `xml:"Representation"`
 }
 
 type dashRepresentation struct {
-	SegmentTemplate   *struct{} `xml:"SegmentTemplate"`
-	ID                string    `xml:"id,attr"`
-	Bandwidth         int       `xml:"bandwidth,attr"`
-	Width             int       `xml:"width,attr"`
-	Height            int       `xml:"height,attr"`
-	FrameRate         string    `xml:"frameRate,attr"`
-	MimeType          string    `xml:"mimeType,attr"`
-	Codecs            string    `xml:"codecs,attr"`
-	AudioSamplingRate string    `xml:"audioSamplingRate,attr"`
-	BaseURL           string    `xml:"BaseURL"`
+	SegmentList       *struct{}  `xml:"SegmentList"`
+	SegmentBase       *struct{}  `xml:"SegmentBase"`
+	ContentProtection []struct{} `xml:"ContentProtection"`
+	SegmentTemplate   *struct{}  `xml:"SegmentTemplate"`
+	ID                string     `xml:"id,attr"`
+	Bandwidth         int        `xml:"bandwidth,attr"`
+	Width             int        `xml:"width,attr"`
+	Height            int        `xml:"height,attr"`
+	FrameRate         string     `xml:"frameRate,attr"`
+	MimeType          string     `xml:"mimeType,attr"`
+	Codecs            string     `xml:"codecs,attr"`
+	AudioSamplingRate string     `xml:"audioSamplingRate,attr"`
+	BaseURL           string     `xml:"BaseURL"`
 }
 
 // ParseDASHManifest parses DASH MPD into normalized formats.
@@ -105,6 +117,9 @@ func ParseDASHManifest(raw, manifestURL string) ([]Format, error) {
 	for _, period := range mpd.Periods {
 		for _, adp := range period.AdaptationSets {
 			for _, rep := range adp.Rep {
+				if period.SegmentList != nil || adp.SegmentList != nil || rep.SegmentList != nil || period.SegmentBase != nil || adp.SegmentBase != nil || rep.SegmentBase != nil {
+					return nil, fmt.Errorf("unsupported DASH SegmentList/SegmentBase addressing for representation %s", rep.ID)
+				}
 				segmented := len(mpd.Periods) > 1 || period.SegmentTemplate != nil || adp.SegmentTemplate != nil || rep.SegmentTemplate != nil
 				absURL := base
 				for _, part := range []string{period.BaseURL, adp.BaseURL, rep.BaseURL} {
@@ -128,6 +143,7 @@ func ParseDASHManifest(raw, manifestURL string) ([]Format, error) {
 				container, codecs := parseMimeDetails(mimeType)
 
 				f := Format{
+					IsDRM:            len(period.ContentProtection)+len(adp.ContentProtection)+len(rep.ContentProtection) > 0,
 					Itag:             parseInt(rep.ID),
 					URL:              absURL,
 					MimeType:         mimeType,

@@ -52,7 +52,7 @@ func (c *Client) openFormatMedia(ctx context.Context, videoID string, f FormatIn
 		cancel()
 		return nil, err
 	}
-	applyRequestHeaders(req, c.applySourceMediaHeaders(videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient)))
+	applyRequestHeaders(req, c.applySourceMediaHeadersContext(ctx, videoID, buildMediaRequestHeadersForSourceClient(c.config.RequestHeaders, videoID, f.SourceClient)))
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		cancel()

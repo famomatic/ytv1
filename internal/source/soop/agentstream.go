@@ -198,7 +198,7 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = ws.conn.SetReadDeadline(time.Now())
+			_ = ws.conn.Close()
 		case <-stop:
 		}
 	}()
@@ -213,6 +213,9 @@ func (s *Source) streamAgentMedia(ctx context.Context, p agentStreamParams, out 
 		_ = ws.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		op, payload, err := ws.readAny()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			select {
 			case hbErr := <-heartbeatErr:
 				return fmt.Errorf("soop: heartbeat: %w", hbErr)

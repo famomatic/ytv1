@@ -183,6 +183,13 @@ func applyClientContextDefaults(client *ClientInfo, profile ClientProfile) {
 	// Mirrors yt-dlp's INNERTUBE_CLIENTS context tables: only clients whose
 	// upstream table defines device/OS context get defaults here. Web-style
 	// clients intentionally send clientName/clientVersion/userAgent only.
+	if strings.EqualFold(strings.TrimSpace(profile.ID), "tv_samsung") {
+		client.DeviceMake = "Samsung"
+		client.DeviceModel = "UKS9800"
+		client.OsName = "Tizen"
+		client.OsVersion = "2.4.0"
+		return
+	}
 	switch strings.ToUpper(strings.TrimSpace(profile.Name)) {
 	case "ANDROID":
 		client.OsName = "Android"

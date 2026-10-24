@@ -73,3 +73,21 @@ func TestRegistryIncludesNewUpstreamClients(t *testing.T) {
 		t.Fatalf("tv_downgraded must map to its own profile, got %+v", tvDowngraded)
 	}
 }
+
+func TestTVSamsungProfileMatchesUpstream(t *testing.T) {
+	p, ok := NewRegistry().Get("tv_samsung")
+	if !ok {
+		t.Fatalf("registry missing tv_samsung")
+	}
+	if p.Name != "TVHTML5" || p.Version != "5.20260707" || p.ContextNameID != 7 || !p.SupportsCookies {
+		t.Fatalf("tv_samsung profile drift: %+v", p)
+	}
+	req := NewPlayerRequest(p, "jNQXAC9IVRw")
+	c := req.Context.Client
+	if c.DeviceMake != "Samsung" || c.DeviceModel != "UKS9800" || c.OsName != "Tizen" || c.OsVersion != "2.4.0" {
+		t.Fatalf("tv_samsung context drift: %+v", c)
+	}
+	if WebEmbeddedClient.UserAgent != WebSafariClient.UserAgent {
+		t.Fatalf("web_embedded must use the Safari UA")
+	}
+}

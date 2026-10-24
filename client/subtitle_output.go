@@ -35,15 +35,36 @@ func ResolveSubtitleOutputFormat(raw string) SubtitleOutputFormat {
 
 // WriteTranscript serializes transcript entries to the selected subtitle format.
 func WriteTranscript(path string, transcript *Transcript, format SubtitleOutputFormat) error {
-	switch format {
-	case SubtitleOutputFormatVTT:
-		return writeTranscriptAsVTT(path, transcript)
-	default:
-		return writeTranscriptAsSRT(path, transcript)
+	if transcript == nil {
+		return fmt.Errorf("transcript is nil")
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".ytv1-subtitle-*")
+	if err != nil {
+		return err
+	}
+	target := tmp.Name()
+	defer os.Remove(target)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if format == SubtitleOutputFormatVTT {
+		err = writeTranscriptAsVTT(target, transcript)
+	} else {
+		err = writeTranscriptAsSRT(target, transcript)
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(target, path)
 }
 
 func writeTranscriptAsSRT(path string, transcript *Transcript) error {
+	if transcript == nil {
+		return fmt.Errorf("transcript is nil")
+	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
@@ -62,10 +83,16 @@ func writeTranscriptAsSRT(path string, transcript *Transcript) error {
 			return err
 		}
 	}
-	return nil
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func writeTranscriptAsVTT(path string, transcript *Transcript) error {
+	if transcript == nil {
+		return fmt.Errorf("transcript is nil")
+	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
@@ -90,7 +117,10 @@ func writeTranscriptAsVTT(path string, transcript *Transcript) error {
 			return err
 		}
 	}
-	return nil
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func formatSRTTimestamp(sec float64) string {

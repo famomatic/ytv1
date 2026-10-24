@@ -25,6 +25,7 @@ func NewRegistry() Registry {
 			"tv":                  TVClient,
 			"tvhtml5":             TVClient,
 			"tv_downgraded":       TVDowngradedClient,
+			"tv_samsung":          TVSamsungClient,
 			"tv_simply":           TVSimplyClient,
 		},
 	}

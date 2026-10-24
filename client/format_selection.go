@@ -49,6 +49,19 @@ func SelectFormatsForDownloadOptions(formats []FormatInfo, options DownloadOptio
 		}
 	}
 
+	if options.Mode == SelectionModeMP3 && len(selected) > 1 {
+		for _, f := range selected {
+			if f.HasAudio && !f.HasVideo {
+				return []FormatInfo{f}, nil
+			}
+		}
+		for _, f := range selected {
+			if f.HasAudio {
+				return []FormatInfo{f}, nil
+			}
+		}
+		return nil, ErrNoPlayableFormats
+	}
 	return selected, nil
 }
 

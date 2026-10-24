@@ -123,6 +123,18 @@ type LiveStreamabilityRenderer struct {
 
 type ErrorScreen struct {
 	PlayerErrorMessageRenderer *PlayerErrorMessageRenderer `json:"playerErrorMessageRenderer"`
+	PlayerInterstitialRenderer *PlayerInterstitialRenderer `json:"playerInterstitialRenderer"`
+}
+
+// PlayerInterstitialRenderer carries the newer interstitial error layout
+// (yt-dlp #17884): title/description live under content.interstitialViewModel.
+type PlayerInterstitialRenderer struct {
+	Content struct {
+		InterstitialViewModel struct {
+			Title       struct{ Content string `json:"content"` } `json:"title"`
+			Description struct{ Content string `json:"content"` } `json:"description"`
+		} `json:"interstitialViewModel"`
+	} `json:"content"`
 }
 
 type PlayerErrorMessageRenderer struct {

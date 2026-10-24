@@ -33,6 +33,7 @@
 ## 1. Current Snapshot (Update Every Session)
 
 ### 1.1 Session Date
+- `2026-09-15` (B175 user-requested native SOOP P2P completion, in progress)
 - `2026-06-30`
 - `2026-07-12` (B144 silent truncation prevention)
 - `2026-07-12` (B145 concurrency/resource-safety/edge-case hardening)
@@ -51,6 +52,9 @@
 - `2026-09-05` (B162-B166 completed: audit remediation, tests/vet/race, before/after benchmarks)
 
 - `2026-09-05` (B167-B168 puremux v0.2.2 compatibility and ytv1 v0.2.9 release)
+- `2026-09-06` (B169 post-remediation audit: 35 findings, 28 local reproducers, 8 improvement opportunities; production code unchanged)
+- `2026-10-25` (B176 yt-dlp 2026.10.21+ upstream sync: tv_samsung, web_embedded UA, interstitial errors, yt-initial-data)
+- `2026-09-06` (B170-B174 completed: 35 findings and 8 improvements remediated; regression, real FFmpeg, vet/race and benchmark validation)
 
 ### 1.2 Completed Baseline (Cycle A Closed)
 - Previous migration cycle `R0-R11` is fully completed.
@@ -59,6 +63,8 @@
 - Core parity blocks are in place: Innertube policy, JS challenge, POT policy/injection, format materialization, retryable downloader transport, CLI diagnostics.
 
 ### 1.3 Current Gap Theme (Audit Follow-up)
+- B175 is active: finish `internal/source/soop/p2p` using the captured protocol evidence, validate authentication/framing and live receive behavior, and preserve the existing agent/CDN routes. Native relay login and frame-pull details must be verified before claiming agentless playback.
+- B170-B174 completed the [2026-09-06 audit](AUDIT_2026-09-06.md) remediation: 35 findings and 8 improvements addressed; all 28 local reproducers converted to regression tests. See [results and validation limits](REMEDIATION_2026-09-06.md). Tests, vet, and race checks passed; no release/commit was requested.
 - B162-B166 address F01-F43 and O01-O08; [remediation report](AUDIT_FIXES_2026-09-05.md) records behavior, validation, and the API/source/protocol/output matrix.
 - Unsupported encryption, unbounded dynamic DASH repetition, and absent representations in a Period fail explicitly.
 - Local fixtures and race checks cover the changed paths. Real YouTube/SOOP long-running broadcasts and external encoder binaries remain separate environment-dependent verification.
@@ -397,6 +403,14 @@
 164. `[x]` B166. Audit performance and validation improvements with measurements (O01-O08); follow correctness fixes.
 165. `[x]` B167. User-requested puremux v0.2.2 dependency bump and compatibility verification.
 166. `[x]` B168. Commit audit remediation and dependency update; release ytv1 v0.2.9 with annotated tag and push main/tag to origin.
+167. `[x]` B169. User-requested post-remediation whole-repository audit (2026-09-06): edge cases, concurrency, missing behavior, and optimization; report and 28 local reproducers, no production fixes.
+168. `[x]` B170. 2026-09-06 audit safety: HTTP range/neighbor integrity and transactional part installation (F01-F04), agent failure propagation/live recording preservation/n-decipher errors/FFmpeg output preservation (F24-F27), and output ownership/no-overwrites (F29).
+169. `[x]` B171. 2026-09-06 audit media contracts: redirected manifests, fragment skip policies, DASH availability/addressing/DRM (F14-F19), explicit-format MP3 and merged preview/audio selection (F21-F22, F28), and protocol-independent rate limits (F35).
+170. `[x]` B172. 2026-09-06 audit session/source lifecycle: paired cache keys (F05), archive visibility (F23), endpoint generation/cancellation/VOD completeness/playlist cancellation and custom transport policy (F30-F34).
+171. `[x]` B173. 2026-09-06 audit metadata/output edges: subtitle policies and nil validation, stdout/path/device-name/archive/cancellation accounting (F06-F13), and single-pass final filenames (F20).
+172. `[x]` B174. 2026-09-06 audit improvements O01-O08: bounded HTTPS workers, DVR memory/storage/indexing, bounded challenge/runtime/key caches, shared transport contracts, and cross-feature validation; measure before/after performance after correctness fixes.
+173. `[-]` B175. User-requested native SOOP P2P completion: recover relay login/frame-pull details, finish validated protocol/authentication components and streaming integration, and run deterministic, race, and opt-in live verification.
+174. `[x]` B176. yt-dlp reference at `fa9886678` (2026.10.21+): `tv_samsung` client + default-chain change, `tv_downgraded` removed from defaults/auto-fallback, `web_embedded` Safari UA, interstitial playability error text, `<script id="yt-initial-data">` parsing.
 
 ---
 
@@ -3185,3 +3199,50 @@ Cycle B is complete only when all are true:
 - Includes B162-B166 audit remediation and the B167 puremux v0.2.2 upgrade.
 - Follows the repository release convention: main.currentVersion build injection and annotated Git tag v0.2.9 on main, pushed together to origin.
 - Version check: ytv1 v0.2.9. The verification binary is stored outside the repository at F:/cache/ytv1-v0.2.9.exe.
+
+### B169. Post-Remediation Whole-Repository Audit `[x]`
+- User-requested audit of v0.2.9 at commit `064e589bcc12724ce9f5be2aa0d2241c838e7a3b`; production code unchanged.
+- [Report](AUDIT_2026-09-06.md): 35 findings (10 P1, 25 P2), of which 28 were reproduced locally and 7 were established by static paths; 8 additional optimization/validation opportunities.
+- Baseline `go test ./...`, `go vet ./...`, and `go test -race ./...` passed. The new reproducers were also run with `-race`; they assert observed defects, so PASS is reproduction evidence, not corrected behavior. No new memory data race was detected; logical file/lifecycle races remain documented.
+- Go overlay sources and logs are retained in `F:/cache/ytv1-audit-20260906`. Real service/long broadcast/FFmpeg binary integration remains a separate verification boundary.
+- B170-B174 record follow-up work in order. No fixes were started by this audit.
+
+### B170 safety remediation (2026-09-06)
+- Fixed F01-F04, F24-F27 and F29. F28 stream mapping and F20 literal output-path handoff were pulled forward because they share output paths.
+- Invalid/incomplete ranges fail before installing output; chunk writes are bounded. Cancellation preserves tracks. Agent errors yield 502 before output or abort after output. FFmpeg installs successful nonempty temporary results. Output ownership excludes concurrent ytv1 writers; stale crash locks require manual removal after the owner stops.
+- Seven audit reproducers converted to regression tests; full go test ./... passed and gopls found no build errors. Added ownership and FFmpeg failure tests.
+
+### B171 media contracts (2026-09-06)
+- Corrected redirects, fragment-reader skip limits, post-live empty success, DASH window generation, DRM flags, explicit-format MP3 and merge preview. Unsupported DASH SegmentList/SegmentBase now fails explicitly rather than downloading a directory.
+- Rate budgets are shared through operation contexts by direct/HLS/DASH downloads and parallel workers; MP3 avoids charging segmented input twice. Converted eight more reproducers. Full go test ./... passed.
+
+### B172 session/source remediation (2026-09-06)
+- Source inputs occupy one cache entry; operation contexts retain source identity and headers across eviction. Old SOOP endpoints cannot expire replacement endpoints. Cancellation closes the agent socket. Missing VOD parts fail explicitly; playlist continuation cancellation propagates. Unsupported custom-transport overrides fail closed.
+- Archive readers observe newly appended records and drain corrupt long records with bounded memory (F11 pulled forward with F23). Four more regression tests added; full go test ./... passed. gopls lacked package metadata for the newly added source_operation.go; compiler verification passed.
+
+### B173 metadata/output remediation (2026-09-06)
+- Subtitle writes select eligible concrete tracks, preserve empty exclusions, reject nil input, and install serialized files transactionally. Stdout survives output-directory composition and reports actual bytes; reserved device basenames use the first dot. Playlist item cancellation and single-pass filename rendering corrected.
+- All 28 original local reproductions are now permanent regression tests with corrected assertions. Full go test ./... passed. Optimization baseline measured in F:/cache/ytv1-audit-20260906/optimization-before.log.
+
+### B174 improvements and final validation (2026-09-06)
+- Fixed worker count for HTTPS chunks; cleared retired DVR slots, bounded/retried failed file deletes and indexed segment search; bounded challenge entries and bytes; reused bounded player runtimes and one HLS manifest/key snapshot.
+- Shared fragment options, skip budget enforcement and operation rate budget. Added cross-feature regression matrix, cache/key/DVR checks and actual FFmpeg audio-selection/failure preservation test.
+- Three-run benchmark medians: 1,000 direct chunks 66.22 ms to 45.39 ms; cached Decipherer load 1,062 ns to 437.1 ns.
+- go test ./..., go vet ./..., go test -race ./... passed. Final agent abort lifecycle received an additional targeted race check. gopls did not load newly created files into its workspace snapshot; compiler/vet/race verification used as fallback.
+- [Remediation report](REMEDIATION_2026-09-06.md) records all IDs, measurements and external-environment gates. Remote SOOP long reconnect/CDN tests were not claimed as performed. No commit, tag or push performed.
+
+### B176. yt-dlp 2026.10.21+ Upstream Sync `[x]`
+
+**Goal.** Port YouTube-relevant yt-dlp drift from `3a08beaf0` (2026.08.19) to
+`fa9886678` (47 upstream commits; local `D:\yt-dlp` checkout already current).
+
+**Changes.**
+- `tv_samsung` profile (TVHTML5 5.20260707, Tizen UA, Samsung/UKS9800/Tizen 2.4.0 context) added to registry and `applyClientContextDefaults` (#17723).
+- Default chains (#17805): unauthenticated `tv_samsung, visionos, web` (+ package `ios` fallback); authenticated `web_embedded, tv_samsung, web`. `tv_downgraded` stays in the registry but is no longer a default or auto-appended fallback. `tv_samsung` is classified primary, not fallback.
+- `web_embedded` now uses the Safari UA (#17684).
+- Playability errors read `errorScreen.playerInterstitialRenderer` title/description (#17884).
+- `extractYTInitialData` prefers `<script id="yt-initial-data">` (#17703).
+
+**Not ported (reason).** web_embedded HLS `source_preference -1` (ytv1 has no equivalent web_safari HLS deprioritization to extend); Python-only cleanups; urllib redirect/BytesIO and SOCKS/websocket fixes (Go net/http unaffected).
+
+**Verification.** `go build ./...`, `go vet` on touched packages, `go test ./...` green. Live YouTube check not run.

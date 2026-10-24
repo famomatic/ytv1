@@ -239,22 +239,26 @@ func (s *Source) serveInProcess(p agentStreamParams, useTimeshift, playerMode bo
 		handler = s.newDVRServer(recordCtx, p, st)
 		streamPath = "index.m3u8"
 	}
+	endpointURL := fmt.Sprintf("http://%s/%s", ln.Addr().String(), streamPath)
 	inner := handler
 	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		inner.ServeHTTP(w, r)
-		if !useTimeshift {
-			st.mu.Lock()
-			ended := st.everConnected && st.active == 0
-			st.mu.Unlock()
-			if ended {
-				s.agentMu.Lock()
-				if e, ok := s.streams[p.BNO]; ok {
-					e.expires = time.Now()
-					s.streams[p.BNO] = e
+		// Expire the consumed endpoint even when HTTP aborts a partial stream.
+		defer func() {
+			if !useTimeshift {
+				st.mu.Lock()
+				ended := st.everConnected && st.active == 0
+				st.mu.Unlock()
+				if ended {
+					s.agentMu.Lock()
+					if e, ok := s.streams[p.BNO]; ok && e.url == endpointURL {
+						e.expires = time.Now()
+						s.streams[p.BNO] = e
+					}
+					s.agentMu.Unlock()
 				}
-				s.agentMu.Unlock()
 			}
-		}
+		}()
+		inner.ServeHTTP(w, r)
 	})
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	url := fmt.Sprintf("http://%s/%s", ln.Addr().String(), streamPath)

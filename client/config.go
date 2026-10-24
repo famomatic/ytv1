@@ -154,6 +154,16 @@ type Config struct {
 	// SessionCacheMaxEntries bounds in-memory video session count (LRU eviction).
 	// Zero uses 256 entries; negative means unbounded.
 	SessionCacheMaxEntries int
+	// ChallengeCacheMaxEntriesPerPlayer bounds each n/signature map (default 1024).
+	// Negative disables this limit; player buckets use SessionCacheMaxEntries.
+	ChallengeCacheMaxEntriesPerPlayer int
+	// ChallengeCacheMaxBytesPerPlayer caps retained key/value bytes across both
+	// challenge maps (default 1 MiB). Negative disables the byte cap.
+	ChallengeCacheMaxBytesPerPlayer int64
+	// DeciphererCacheMaxEntries bounds reusable player runtimes (default 8).
+	// Negative disables reuse. DeciphererCacheTTL defaults to two hours.
+	DeciphererCacheMaxEntries int
+	DeciphererCacheTTL        time.Duration
 
 	// SubtitlePolicy controls default subtitle track selection behavior.
 	SubtitlePolicy SubtitlePolicy

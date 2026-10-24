@@ -1074,8 +1074,8 @@ func TestBuildDownloadOptions_ExtractAudio(t *testing.T) {
 		t.Fatalf("AudioQuality = %q, want 192K", got.AudioQuality)
 	}
 	got = buildDownloadOptions(cli.Options{ExtractAudio: true, AudioFormat: "mp3", FormatSelector: "18"})
-	if got.Itag != 18 || got.Mode != client.SelectionModeBest {
-		t.Fatalf("explicit format should win, got Itag=%d Mode=%q", got.Itag, got.Mode)
+	if got.Itag != 18 || got.Mode != client.SelectionModeMP3 {
+		t.Fatalf("explicit input format should retain MP3 conversion, got Itag=%d Mode=%q", got.Itag, got.Mode)
 	}
 }
 

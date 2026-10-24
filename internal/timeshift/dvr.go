@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,8 @@ import (
 
 // Config tunes the DVR window and storage.
 type Config struct {
+	// MaxPendingDeletes bounds deferred file deletions (default 128). When full, new segments use memory until deletions recover.
+	MaxPendingDeletes int
 	// TargetSegmentDuration is the nominal length of each HLS segment; the real
 	// cut lands on the first keyframe at or after this. Default 3s.
 	TargetSegmentDuration time.Duration
@@ -61,10 +64,25 @@ type DVR struct {
 	seg              *TSSegmenter
 	dir              string // the created spill subdirectory (empty for in-memory)
 
-	mu         sync.RWMutex
-	segs       []storedSeg // sliding window, ordered by seq ascending
-	total      time.Duration
-	totalBytes int64
+	mu             sync.RWMutex
+	pendingDeletes map[string]struct{}
+	segs           []storedSeg // sliding window, ordered by seq ascending
+	total          time.Duration
+	totalBytes     int64
+}
+
+func (d *DVR) retirePathLocked(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) && len(d.pendingDeletes) < d.cfg.MaxPendingDeletes {
+		d.pendingDeletes[path] = struct{}{}
+	}
+}
+
+func (d *DVR) retryDeletesLocked() {
+	for path := range d.pendingDeletes {
+		if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+			delete(d.pendingDeletes, path)
+		}
+	}
 }
 
 // NewDVR returns a DVR ready to be written to. If cfg.Dir is set but a spill
@@ -76,7 +94,10 @@ func NewDVR(cfg Config) *DVR {
 	if cfg.Window <= 0 {
 		cfg.Window = 2 * time.Minute
 	}
-	d := &DVR{cfg: cfg, ready: make(chan struct{})}
+	if cfg.MaxPendingDeletes <= 0 {
+		cfg.MaxPendingDeletes = 128
+	}
+	d := &DVR{cfg: cfg, ready: make(chan struct{}), pendingDeletes: make(map[string]struct{})}
 	if cfg.Dir != "" {
 		if dir, err := os.MkdirTemp(cfg.Dir, "ytv1-dvr-"); err == nil {
 			d.dir = dir
@@ -148,7 +169,10 @@ func (d *DVR) WaitReady(ctx context.Context) error {
 
 func (d *DVR) addSegment(s Segment) {
 	ss := storedSeg{discontinuity: s.Discontinuity, seq: s.Seq, dur: s.Duration, bytes: len(s.Data)}
-	if d.dir != "" {
+	d.mu.RLock()
+	spill := len(d.pendingDeletes) < d.cfg.MaxPendingDeletes
+	d.mu.RUnlock()
+	if d.dir != "" && spill {
 		p := filepath.Join(d.dir, fmt.Sprintf("seg%d.ts", s.Seq))
 		if err := os.WriteFile(p, s.Data, 0o644); err == nil {
 			ss.path = p
@@ -161,6 +185,7 @@ func (d *DVR) addSegment(s Segment) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.retryDeletesLocked()
 	d.segs = append(d.segs, ss)
 	d.readyOnce.Do(func() { close(d.ready) })
 	d.total += ss.dur
@@ -171,9 +196,10 @@ func (d *DVR) addSegment(s Segment) {
 		old := d.segs[0]
 		d.total -= old.dur
 		d.totalBytes -= int64(old.bytes)
+		d.segs[0] = storedSeg{}
 		d.segs = d.segs[1:]
 		if old.path != "" {
-			_ = os.Remove(old.path) // best-effort; Close sweeps any that linger
+			d.retirePathLocked(old.path)
 		}
 	}
 }
@@ -243,12 +269,10 @@ func (d *DVR) serveSegment(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
 	var found storedSeg
 	var ok2 bool
-	for i := range d.segs {
-		if d.segs[i].seq == seq {
-			found = d.segs[i]
-			ok2 = true
-			break
-		}
+	i := sort.Search(len(d.segs), func(i int) bool { return d.segs[i].seq >= seq })
+	if i < len(d.segs) && d.segs[i].seq == seq {
+		found = d.segs[i]
+		ok2 = true
 	}
 	var file *os.File
 	var openErr error
@@ -261,7 +285,7 @@ func (d *DVR) serveSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if file != nil {
-		defer file.Close()
+		defer func() { file.Close(); d.mu.Lock(); d.retryDeletesLocked(); d.mu.Unlock() }()
 	}
 	if !ok2 {
 		http.NotFound(w, r) // evicted or not yet produced

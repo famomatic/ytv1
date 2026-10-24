@@ -37,7 +37,10 @@ type HLSDownloader struct {
 	// already been written to the output, so a changed EXT-X-MAP (e.g. during
 	// a live rotation) triggers a rewrite of the new init, and the same URI is
 	// not written twice across playlist refreshes.
-	writtenInitURI string
+	writtenInitURI             string
+	parsedManifest, parsedBase string
+	parsedSegments             []hlsSegment
+	parsedTarget               float64
 }
 
 type hlsSegment struct {
@@ -163,9 +166,8 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 
 			if err := h.downloadSegment(ctx, seg, w); err != nil {
 				if isLive && shouldSkipFragmentError(err, h.Transport) {
-					h.skippedFragments++
-					if limit := h.Transport.MaxSkippedFragments; limit > 0 && h.skippedFragments > limit {
-						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
+					if skipErr := recordSkippedFragment(err, h.Transport, &h.skippedFragments); skipErr != nil {
+						return skipErr
 					}
 					h.lastSeq = seg.Seq
 					h.seenSegments = trackSeen(h.seenSegments, hlsSegmentKey(seg))
@@ -203,7 +205,7 @@ func (h *HLSDownloader) Download(ctx context.Context, w io.Writer) error {
 }
 
 func (h *HLSDownloader) fetchManifest(ctx context.Context, url string) (string, error) {
-	body, err := doGETBytesWithRetry(ctx, h.Client, url, h.Headers, h.Transport)
+	body, err := doGETBytesWithRetryAt(ctx, h.Client, url, h.Headers, h.Transport, &h.PlaylistURL)
 	if err != nil {
 		return "", err
 	}
@@ -211,6 +213,11 @@ func (h *HLSDownloader) fetchManifest(ctx context.Context, url string) (string, 
 }
 
 func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL string) ([]hlsSegment, float64, error) {
+	// Only an identical snapshot reuses keys. Changed playlists refetch them,
+	// including rotations at the same key URI; retain just one snapshot.
+	if h.parsedManifest == manifest && h.parsedBase == manifestURL && manifest != "" {
+		return h.parsedSegments, h.parsedTarget, nil
+	}
 	if !strings.HasPrefix(strings.TrimSpace(manifest), "#EXTM3U") {
 		return nil, 0, fmt.Errorf("invalid HLS playlist header")
 	}
@@ -321,6 +328,10 @@ func (h *HLSDownloader) parseSegments(ctx context.Context, manifest, manifestURL
 	if pending {
 		return nil, 0, fmt.Errorf("HLS segment URI missing")
 	}
+	h.parsedManifest = manifest
+	h.parsedBase = manifestURL
+	h.parsedSegments = segments
+	h.parsedTarget = target
 	return segments, target, nil
 }
 

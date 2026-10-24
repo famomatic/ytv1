@@ -26,6 +26,9 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 	if src := c.matchSource(input); src != nil {
 		if sess, ok := c.getSession(sourceInputKey(src.Name(), input)); ok {
 			info = cloneVideoInfo(sess.Info)
+			if info != nil {
+				info.sourceHeaders = cloneHeader(sess.MediaHeaders)
+			}
 		}
 		if info == nil {
 			info, err = c.getVideoViaSource(metaCtx, src, input)
@@ -34,6 +37,9 @@ func (c *Client) OpenStream(ctx context.Context, input string, options StreamOpt
 			return fail(err)
 		}
 		id = sourceSessionKey(src.Name(), info.ID)
+		op := sourceOperation{id: id, headers: cloneHeader(info.sourceHeaders)}
+		metaCtx = context.WithValue(metaCtx, sourceOperationKey{}, op)
+		streamCtx = context.WithValue(streamCtx, sourceOperationKey{}, op)
 	} else {
 		info, err = c.GetVideo(metaCtx, input)
 		if err != nil {

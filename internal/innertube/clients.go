@@ -40,7 +40,7 @@ var (
 		Name:            "WEB_EMBEDDED_PLAYER",
 		Version:         "2.20260708.00.00",
 		ContextNameID:   56,
-		UserAgent:       WebClient.UserAgent,
+		UserAgent:       WebSafariClient.UserAgent,
 		APIKey:          defaultInnertubeAPIKey,
 		SupportsCookies: true,
 		Host:            "www.youtube.com",
@@ -234,6 +234,20 @@ var (
 		Version:         "5.20260707",
 		ContextNameID:   7,
 		UserAgent:       "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+		APIKey:          defaultInnertubeAPIKey,
+		SupportsCookies: true,
+		Host:            "www.youtube.com",
+	}
+
+	// TVSamsungClient mirrors yt-dlp's "tv_samsung" profile (TVHTML5 5.20260707
+	// on a Samsung Tizen TV). Added upstream 2026-10-11 and made a default
+	// client on 2026-10-10 (#17723, #17805).
+	TVSamsungClient = ClientProfile{
+		ID:              "tv_samsung",
+		Name:            "TVHTML5",
+		Version:         "5.20260707",
+		ContextNameID:   7,
+		UserAgent:       "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1",
 		APIKey:          defaultInnertubeAPIKey,
 		SupportsCookies: true,
 		Host:            "www.youtube.com",

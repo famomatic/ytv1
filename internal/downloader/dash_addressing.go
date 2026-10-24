@@ -69,6 +69,12 @@ func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Dura
 				if rep.ID != d.RepresentationID {
 					continue
 				}
+				if p.SegmentList != nil || a.SegmentList != nil || rep.SegmentList != nil || p.SegmentBase != nil || a.SegmentBase != nil || rep.SegmentBase != nil {
+					return nil, 0, fmt.Errorf("unsupported DASH SegmentList/SegmentBase addressing")
+				}
+				if len(p.ContentProtection)+len(a.ContentProtection)+len(rep.ContentProtection) > 0 {
+					return nil, 0, fmt.Errorf("DRM-protected DASH representation is unsupported")
+				}
 				found = true
 				periodMatched = true
 				base := d.ManifestURL
@@ -136,6 +142,17 @@ func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Dura
 						boundary = liveEnd
 					}
 				}
+				liveStart := int64(0)
+				if mpd.Type == "dynamic" && mpd.TimeShiftBufferDepth != "" {
+					depth, err := parseDuration(mpd.TimeShiftBufferDepth)
+					if err != nil || depth <= 0 {
+						return nil, 0, fmt.Errorf("invalid DASH timeShiftBufferDepth")
+					}
+					depthTicks := depth.Seconds() * float64(scale)
+					if depthTicks < float64(liveEnd) {
+						liveStart = liveEnd - int64(depthTicks)
+					}
+				}
 				timeline := tmpl.SegmentTimeline
 				if timeline == nil {
 					if tmpl.Duration <= 0 || boundary <= 0 {
@@ -169,6 +186,16 @@ func (d *DASHDownloader) extractSegments(mpd *dashMPD) ([]dashSegment, time.Dura
 						if mpd.Type == "dynamic" && liveEnd > 0 && end == liveEnd {
 							count = span / entry.D
 						}
+					}
+					// Skip expired repeats before allocating or applying the cap.
+					if liveStart > stamp {
+						skip := min(count, (liveStart-stamp)/entry.D)
+						if skip > math.MaxInt64-number {
+							return nil, 0, fmt.Errorf("DASH sequence overflow")
+						}
+						stamp += skip * entry.D
+						number += skip
+						count -= skip
 					}
 					const maxManifestSegments = 100000
 					if count > maxManifestSegments || int64(len(segments))+count > maxManifestSegments {

@@ -100,11 +100,16 @@ func (s *Source) agentHandler(p agentStreamParams, st *agentServeState, playerMo
 				st.enter()
 				defer st.leave()
 			}
-			w.WriteHeader(http.StatusOK)
-			fw := flushWriter{w: w}
+			tw := &agentResponseWriter{ResponseWriter: w}
+			fw := flushWriter{w: tw}
 			fw.f, _ = w.(http.Flusher)
 			if err := s.streamAgentMedia(r.Context(), p, fw); err != nil {
 				fmt.Fprintf(os.Stderr, "soop: agent stream ended: %v\n", err)
+				if !tw.started {
+					http.Error(w, "agent stream unavailable", http.StatusBadGateway)
+					return
+				}
+				panic(http.ErrAbortHandler)
 			}
 		}
 	}
@@ -213,4 +218,17 @@ func spawnDetachedServe(p agentStreamParams) (string, error) {
 		return "", fmt.Errorf("soop: soopserve returned no url")
 	}
 	return url, nil
+}
+
+// Track actual media writes so failures cannot look like a clean HTTP EOF.
+type agentResponseWriter struct {
+	http.ResponseWriter
+	started bool
+}
+
+func (w *agentResponseWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		w.started = true
+	}
+	return w.ResponseWriter.Write(p)
 }

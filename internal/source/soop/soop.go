@@ -162,14 +162,14 @@ func (s *Source) extractVOD(ctx context.Context, input, titleNo string, mediaHea
 	var snapshot string
 	for i, file := range res.Data.Files {
 		if strings.TrimSpace(file.File) == "" {
-			continue
+			return nil, fmt.Errorf("soop: vod part %d has no media URL", i)
 		}
 		vs, err := s.hlsVariants(ctx, file.File, mediaHeaders)
 		if err != nil {
 			return nil, fmt.Errorf("soop: vod part %d: %w", i, err)
 		}
 		if len(vs) == 0 {
-			continue
+			return nil, fmt.Errorf("soop: vod part %d has no playable variants", i)
 		}
 		partVariants = append(partVariants, vs)
 		totalDurationMs += file.Duration

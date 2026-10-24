@@ -12,10 +12,12 @@ import (
 
 // DownloadArchive stores completed video IDs for idempotent reruns.
 type DownloadArchive struct {
-	path string
-	file *os.File
-	mu   sync.Mutex
-	ids  map[string]struct{}
+	discardPartial bool
+	readOffset     int64
+	path           string
+	file           *os.File
+	mu             sync.Mutex
+	ids            map[string]struct{}
 }
 
 // OpenDownloadArchive opens or creates a download archive file.
@@ -42,26 +44,11 @@ func OpenDownloadArchive(path string) (*DownloadArchive, error) {
 		file: f,
 		ids:  make(map[string]struct{}),
 	}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		key, err := archiveKey(line)
-		if err != nil {
-			continue
-		}
-		archive.ids[key] = struct{}{}
-	}
-	if err := scanner.Err(); err != nil {
+	if err := archive.refreshLocked(true); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
+
 	return archive, nil
 }
 
@@ -80,6 +67,7 @@ func (a *DownloadArchive) Has(videoID string) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	_ = a.refreshLocked(false)
 	key, err := archiveKey(videoID)
 	if err != nil {
 		return false
@@ -100,6 +88,9 @@ func (a *DownloadArchive) Add(videoID string) error {
 	videoID = key
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if err := a.refreshLocked(false); err != nil {
+		return err
+	}
 	if _, exists := a.ids[videoID]; exists {
 		return nil
 	}
@@ -146,4 +137,61 @@ func archiveKey(input string) (string, error) {
 		}
 	}
 	return ExtractVideoID(input)
+}
+
+// Read only newly appended records. Oversized corrupt records are drained in
+// bounded slices so a bad line cannot disable the complete archive.
+func (a *DownloadArchive) refreshLocked(acceptFinal bool) error {
+	f, err := os.Open(a.path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if stat.Size() < a.readOffset {
+		a.readOffset = 0
+		a.discardPartial = false
+		a.ids = make(map[string]struct{})
+	}
+	if _, err = f.Seek(a.readOffset, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReader(f)
+	var line []byte
+	oversized := a.discardPartial
+	for {
+		part, err := r.ReadSlice('\n')
+		a.readOffset += int64(len(part))
+		if len(line)+len(part) > 64*1024 {
+			oversized = true
+			line = nil
+		}
+		if !oversized {
+			line = append(line, part...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err == io.EOF && len(line) > 0 && !acceptFinal {
+			a.readOffset -= int64(len(line))
+			return nil
+		}
+		if !oversized {
+			if key, e := archiveKey(strings.TrimSpace(string(line))); e == nil {
+				a.ids[key] = struct{}{}
+			}
+		}
+		if err == io.EOF {
+			a.discardPartial = oversized
+			return nil
+		}
+		line = nil
+		oversized = false
+		if err != nil {
+			return err
+		}
+	}
 }

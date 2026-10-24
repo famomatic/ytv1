@@ -48,13 +48,24 @@ func (d *LiveAdaptiveDownloader) Download(ctx context.Context, w io.Writer) erro
 	// Upstream post-live math: last_seq = header + 1, then -2, and fragments
 	// run over range(0, last_seq). The final two segments are excluded.
 	end := lastSeq - 1
+	skipped, delivered := 0, 0
 	for seq := 0; seq < end; seq++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := d.downloadFragment(ctx, seq, w); err != nil {
+			if shouldSkipFragmentError(err, d.Transport) {
+				if skipErr := recordSkippedFragment(err, d.Transport, &skipped); skipErr != nil {
+					return skipErr
+				}
+				continue
+			}
 			return fmt.Errorf("live adaptive fragment sq=%d: %w", seq, err)
 		}
+		delivered++
+	}
+	if delivered == 0 {
+		return fmt.Errorf("live adaptive has no available fragments")
 	}
 	return nil
 }
@@ -98,9 +109,6 @@ func (d *LiveAdaptiveDownloader) downloadFragment(ctx context.Context, seq int, 
 	}
 	body, err := doGETBytesWithRetry(ctx, d.Client, fragURL, d.Headers, d.Transport)
 	if err != nil {
-		if shouldSkipFragmentError(err, d.Transport) {
-			return nil
-		}
 		return err
 	}
 	_, err = w.Write(body)

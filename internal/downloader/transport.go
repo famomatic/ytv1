@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/famomatic/ytv1/internal/httpx"
 	"github.com/famomatic/ytv1/internal/iox"
 )
 
@@ -48,6 +49,18 @@ type downloadHTTPStatusError struct {
 
 func (e *downloadHTTPStatusError) Error() string {
 	return fmt.Sprintf("download failed: status=%d", e.StatusCode)
+}
+
+func (e *downloadHTTPStatusError) HTTPStatusCode() int { return e.StatusCode }
+
+// recordSkippedFragment is shared by every path that permits unavailable
+// fragments. Callers retain protocol-specific sequence/dedup bookkeeping.
+func recordSkippedFragment(err error, cfg TransportConfig, skipped *int) error {
+	*skipped++
+	if cfg.MaxSkippedFragments > 0 && *skipped > cfg.MaxSkippedFragments {
+		return fmt.Errorf("fragment skip limit exceeded: %w", err)
+	}
+	return nil
 }
 
 var errThrottledDownload = errors.New("download speed below throttled-rate threshold")
@@ -166,6 +179,9 @@ func doGETBytesWithRetry(
 	headers http.Header,
 	cfg TransportConfig,
 ) ([]byte, error) {
+	return doGETBytesWithRetryAt(ctx, client, rawURL, headers, cfg, nil)
+}
+func doGETBytesWithRetryAt(ctx context.Context, client *http.Client, rawURL string, headers http.Header, cfg TransportConfig, finalURL *string) ([]byte, error) {
 	effectiveCfg := normalizeTransportConfig(cfg)
 	var lastErr error
 	for attempt := 0; attempt <= effectiveCfg.MaxRetries; attempt++ {
@@ -198,6 +214,9 @@ func doGETBytesWithRetry(
 				return readAllWithTransportConfig(ctx, resp.Body, effectiveCfg)
 			}()
 			if readErr == nil {
+				if finalURL != nil && resp.Request != nil && resp.Request.URL != nil {
+					*finalURL = resp.Request.URL.String()
+				}
 				return body, nil
 			}
 			lastErr = readErr
@@ -224,7 +243,7 @@ func readAllWithTransportConfig(ctx context.Context, r io.Reader, cfg effectiveT
 	if cfg.ThrottledRateBytesPerSecond > 0 {
 		r = throttledRateReader(ctx, r, cfg.ThrottledRateBytesPerSecond, cfg.ThrottledRateMinDuration)
 	}
-	return iox.ReadAllLimit(r, cfg.MaxSegmentBytes) // 100 MB segment limit
+	return iox.ReadAllLimit(httpx.RateReader(ctx, r), cfg.MaxSegmentBytes) // 100 MB segment limit
 }
 
 func throttledRateReader(ctx context.Context, src io.Reader, bytesPerSecond int64, minDuration time.Duration) io.Reader {

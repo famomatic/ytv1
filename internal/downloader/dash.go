@@ -52,6 +52,7 @@ func (d *DASHDownloader) WithTransportConfig(cfg TransportConfig) *DASHDownloade
 
 // ... helper structs (dashMPD, dashPeriod, etc. as defined before) ...
 type dashMPD struct {
+	TimeShiftBufferDepth      string       `xml:"timeShiftBufferDepth,attr"`
 	XMLName                   xml.Name     `xml:"MPD"`
 	Type                      string       `xml:"type,attr"`
 	MinimumUpdatePeriod       string       `xml:"minimumUpdatePeriod,attr"`
@@ -63,26 +64,35 @@ type dashMPD struct {
 }
 
 type dashPeriod struct {
-	ID              string               `xml:"id,attr"`
-	Start           string               `xml:"start,attr"`
-	Duration        string               `xml:"duration,attr"`
-	BaseURL         string               `xml:"BaseURL"`
-	SegmentTemplate *dashSegmentTemplate `xml:"SegmentTemplate"`
-	AdaptationSet   []dashAdaptationSet  `xml:"AdaptationSet"`
+	SegmentList       *struct{}            `xml:"SegmentList"`
+	SegmentBase       *struct{}            `xml:"SegmentBase"`
+	ContentProtection []struct{}           `xml:"ContentProtection"`
+	ID                string               `xml:"id,attr"`
+	Start             string               `xml:"start,attr"`
+	Duration          string               `xml:"duration,attr"`
+	BaseURL           string               `xml:"BaseURL"`
+	SegmentTemplate   *dashSegmentTemplate `xml:"SegmentTemplate"`
+	AdaptationSet     []dashAdaptationSet  `xml:"AdaptationSet"`
 }
 
 type dashAdaptationSet struct {
-	BaseURL         string               `xml:"BaseURL"`
-	MimeType        string               `xml:"mimeType,attr"`
-	Representation  []dashRepresentation `xml:"Representation"`
-	SegmentTemplate *dashSegmentTemplate `xml:"SegmentTemplate"`
+	SegmentList       *struct{}            `xml:"SegmentList"`
+	SegmentBase       *struct{}            `xml:"SegmentBase"`
+	ContentProtection []struct{}           `xml:"ContentProtection"`
+	BaseURL           string               `xml:"BaseURL"`
+	MimeType          string               `xml:"mimeType,attr"`
+	Representation    []dashRepresentation `xml:"Representation"`
+	SegmentTemplate   *dashSegmentTemplate `xml:"SegmentTemplate"`
 }
 
 type dashRepresentation struct {
-	ID              string               `xml:"id,attr"`
-	Bandwidth       int                  `xml:"bandwidth,attr"`
-	BaseURL         string               `xml:"BaseURL"`
-	SegmentTemplate *dashSegmentTemplate `xml:"SegmentTemplate"`
+	SegmentList       *struct{}            `xml:"SegmentList"`
+	SegmentBase       *struct{}            `xml:"SegmentBase"`
+	ContentProtection []struct{}           `xml:"ContentProtection"`
+	ID                string               `xml:"id,attr"`
+	Bandwidth         int                  `xml:"bandwidth,attr"`
+	BaseURL           string               `xml:"BaseURL"`
+	SegmentTemplate   *dashSegmentTemplate `xml:"SegmentTemplate"`
 }
 
 type dashSegmentTemplate struct {
@@ -188,9 +198,8 @@ func (d *DASHDownloader) Download(ctx context.Context, w io.Writer) error {
 
 			if err := d.downloadSegment(ctx, seg, w); err != nil {
 				if isDynamic && shouldSkipFragmentError(err, d.Transport) {
-					d.skippedFragments++
-					if limit := d.Transport.MaxSkippedFragments; limit > 0 && d.skippedFragments > limit {
-						return fmt.Errorf("failed to download segment seq=%d (skip limit exceeded): %w", seg.Seq, err)
+					if skipErr := recordSkippedFragment(err, d.Transport, &d.skippedFragments); skipErr != nil {
+						return skipErr
 					}
 					d.lastSeq = seg.Seq
 					d.seenSegments[dashSegmentKey(seg)] = true
@@ -239,7 +248,7 @@ func (d *DASHDownloader) downloadSegmentsConcurrent(ctx context.Context, segment
 }
 
 func (d *DASHDownloader) fetchManifest(ctx context.Context) ([]byte, error) {
-	return doGETBytesWithRetry(ctx, d.Client, d.ManifestURL, d.Headers, d.Transport)
+	return doGETBytesWithRetryAt(ctx, d.Client, d.ManifestURL, d.Headers, d.Transport, &d.ManifestURL)
 }
 
 func parseDASH(data []byte) (*dashMPD, error) {

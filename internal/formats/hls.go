@@ -45,6 +45,9 @@ func FetchHLSManifest(ctx context.Context, client *http.Client, url string, head
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
+	if resp.Request != nil && resp.Request.URL != nil {
+		url = resp.Request.URL.String()
+	}
 	raw := string(body)
 	parsedFormats, parseErr := ParseHLSManifest(raw, url)
 	if parseErr != nil {

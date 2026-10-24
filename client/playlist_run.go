@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -71,6 +72,15 @@ func RunPlaylistItems(ctx context.Context, items []PlaylistItem, opts PlaylistRu
 			}
 			summary.Failed++
 			failures = append(failures, PlaylistItemFailure{VideoID: item.VideoID, Err: err})
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				summary.Aborted = true
+				summary.AbortErr = err
+				if ctx.Err() != nil {
+					summary.AbortErr = ctx.Err()
+				}
+				summary.Skipped = len(items) - i - 1
+				break
+			}
 			if opts.AbortOnError || ReachedPlaylistFailureThreshold(summary.Failed, opts.SkipAfterErrors) {
 				summary.Aborted = true
 				summary.Skipped = len(items) - i - 1
@@ -119,10 +129,11 @@ func ApplyPlaylistTemplateContext(outputTemplate string, item PlaylistItem, auto
 		"%(playlist_channel)s":     SanitizeOutputTemplateToken(playlistCtx.Channel),
 		"%(playlist_channel_id)s":  SanitizeOutputTemplateToken(playlistCtx.ChannelID),
 	}
+	pairs := make([]string, 0, len(replacements)*2)
 	for token, value := range replacements {
-		outputTemplate = strings.ReplaceAll(outputTemplate, token, value)
+		pairs = append(pairs, token, value)
 	}
-	return outputTemplate
+	return strings.NewReplacer(pairs...).Replace(outputTemplate)
 }
 
 func formatPaddedInt(v int) string {

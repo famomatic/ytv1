@@ -20,6 +20,9 @@ type OutputTemplateOptions struct {
 // directory composition.
 func EffectiveOutputTemplate(opts OutputTemplateOptions) string {
 	outputTemplate := strings.TrimSpace(opts.OutputTemplate)
+	if outputTemplate == "-" {
+		return "-"
+	}
 	if opts.OutputUseID {
 		outputTemplate = "%(id)s.%(ext)s"
 	}
@@ -45,6 +48,7 @@ type DownloadOptionsRequest struct {
 	OutputPathDir         string
 	ExtractAudio          bool
 	AudioFormat           string
+	NoOverwrites          bool
 	KeepIntermediateFiles bool
 	Resume                bool
 	UsePartFiles          bool
@@ -56,9 +60,15 @@ type DownloadOptionsRequest struct {
 
 // BuildDownloadOptions maps common yt-dlp-style selection aliases into package
 // download options.
-func BuildDownloadOptions(req DownloadOptionsRequest) DownloadOptions {
-	downloadOpts := DownloadOptions{
+func BuildDownloadOptions(req DownloadOptionsRequest) (downloadOpts DownloadOptions) {
+	defer func() {
+		if req.ExtractAudio && strings.EqualFold(strings.TrimSpace(req.AudioFormat), "mp3") {
+			downloadOpts.Mode = SelectionModeMP3
+		}
+	}()
+	downloadOpts = DownloadOptions{
 		Mode:                  SelectionModeBest,
+		NoOverwrites:          req.NoOverwrites,
 		OutputPath:            EffectiveOutputTemplate(OutputTemplateOptions{OutputTemplate: req.OutputTemplate, OutputUseID: req.OutputUseID, OutputPathDir: req.OutputPathDir}),
 		MergeOutput:           true,
 		KeepIntermediateFiles: req.KeepIntermediateFiles,
@@ -69,6 +79,9 @@ func BuildDownloadOptions(req DownloadOptionsRequest) DownloadOptions {
 		MergeOutputFormat:     EffectiveMergeOutputExt(req.MergeOutputFormat, req.RemuxVideo),
 	}
 
+	if req.ExtractAudio && strings.EqualFold(strings.TrimSpace(req.AudioFormat), "mp3") {
+		downloadOpts.Mode = SelectionModeMP3
+	}
 	raw := strings.TrimSpace(req.FormatSelector)
 	if req.ExtractAudio && (raw == "" || strings.EqualFold(raw, "best")) {
 		switch strings.ToLower(strings.TrimSpace(req.AudioFormat)) {
@@ -86,7 +99,9 @@ func BuildDownloadOptions(req DownloadOptionsRequest) DownloadOptions {
 		downloadOpts.FormatSelector = "bestvideo+bestaudio/best"
 		return downloadOpts
 	case "bestaudio", "audioonly":
-		downloadOpts.Mode = SelectionModeAudioOnly
+		if downloadOpts.Mode != SelectionModeMP3 {
+			downloadOpts.Mode = SelectionModeAudioOnly
+		}
 		return downloadOpts
 	case "bestvideo", "videoonly":
 		downloadOpts.Mode = SelectionModeVideoOnly

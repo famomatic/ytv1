@@ -2,6 +2,7 @@ package downloader
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -32,6 +33,7 @@ type HLSMediaSegmentReader struct {
 	liveEdge    int
 	initURI     string
 	initData    []byte
+	delivered   int
 }
 
 func NewHLSMediaSegmentReader(client *http.Client, playlistURL string) *HLSMediaSegmentReader {
@@ -67,6 +69,14 @@ func (r *HLSMediaSegmentReader) Next(ctx context.Context) (*HLSMediaSegment, err
 			r.pending = r.pending[1:]
 			body, err := r.dl.fetchSegmentBody(ctx, seg)
 			if err != nil {
+				if shouldSkipFragmentError(err, r.dl.Transport) {
+					if skipErr := recordSkippedFragment(err, r.dl.Transport, &r.dl.skippedFragments); skipErr != nil {
+						return nil, skipErr
+					}
+					r.dl.lastSeq = seg.Seq
+					r.dl.seenSegments = trackSeen(r.dl.seenSegments, hlsSegmentKey(seg))
+					continue
+				}
 				return nil, err
 			}
 			if seg.Map == nil {
@@ -89,6 +99,7 @@ func (r *HLSMediaSegmentReader) Next(ctx context.Context) (*HLSMediaSegment, err
 			if len(r.pending) == 0 && !r.endList {
 				r.nextRefresh = time.Now().Add(refreshDelay(r.target))
 			}
+			r.delivered++
 			return &HLSMediaSegment{
 				Sequence:      seg.Seq,
 				Duration:      time.Duration(seg.Duration * float64(time.Second)),
@@ -98,6 +109,9 @@ func (r *HLSMediaSegmentReader) Next(ctx context.Context) (*HLSMediaSegment, err
 			}, nil
 		}
 		if r.endList && r.dl.lastSeq >= 0 {
+			if r.delivered == 0 && r.dl.skippedFragments > 0 {
+				return nil, fmt.Errorf("all HLS fragments unavailable")
+			}
 			return nil, io.EOF
 		}
 		if wait := time.Until(r.nextRefresh); wait > 0 {

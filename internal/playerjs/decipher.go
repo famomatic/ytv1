@@ -65,6 +65,9 @@ func (d *Decipherer) DecipherN(n string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if runtimeErr == nil {
+		runtimeErr = errors.New("n decipher produced invalid output")
+	}
 	return "", runtimeErr
 }
 

@@ -1,23 +1,14 @@
-// Package p2p reimplements SOOP's native P2P grid client (the NetControl.dll
-// "SOOP Live P2P MultiStream Engine") so ytv1 can pull the ORIGINAL/1080p live
-// stream directly from a KR IP with no VPN, no login, and no local SOOP agent.
-//
-// It joins as an ISS leaf (ISS_JOIN → ISS_STREAM_DATA), i.e. it pulls the stream
-// from the source/relay and serves no peers, so upload contribution is minimal.
-//
-// Wire stack (per the decompiled NetControl.dll):
-//
-//	TCP  ─►  outer length frame  ─►  AES-CBC body  ─►  [opcode u32][flag u32][len u32]…[payload]
-//
-// The AES key/IV are static constants baked into NetControl.dll (.rdata), so the
-// transport is fully reproducible. This file carries those constants and the
-// block cipher; framing/opcodes/handshake live in protocol.go / client.go.
+// Package p2p contains the recovered SOOP native grid protocol components.
+// Gateway and relay framing are plaintext; the session-auth envelope uses
+// AES-CTR (authblob.go). The CBC helpers here are retained for the historical
+// item-service investigation and are not a whole-packet transport cipher.
 package p2p
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
+	"fmt"
 )
 
 // Static AES-128 key + IV, extracted from NetControl.dll .rdata:
@@ -50,17 +41,23 @@ func decryptCBC(key, iv, src []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(iv) != block.BlockSize() || len(src)%block.BlockSize() != 0 {
+		return nil, fmt.Errorf("p2p: CBC requires a %d-byte IV and block-aligned input", block.BlockSize())
+	}
 	out := make([]byte, len(src))
 	cipher.NewCBCDecrypter(block, iv).CryptBlocks(out, src)
 	return out, nil
 }
 
 // encryptCBC AES-128-CBC-encrypts src (a fresh slice). src must be block-aligned;
-// callers pad to 16 bytes first (see padPKCS-free padding in protocol.go).
+// callers supply any protocol-specific padding.
 func encryptCBC(key, iv, src []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
+	}
+	if len(iv) != block.BlockSize() || len(src)%block.BlockSize() != 0 {
+		return nil, fmt.Errorf("p2p: CBC requires a %d-byte IV and block-aligned input", block.BlockSize())
 	}
 	out := make([]byte, len(src))
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(out, src)

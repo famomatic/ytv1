@@ -394,6 +394,7 @@ func TestDownloadURLToPath_FullRewriteRetryTruncatesPartialAttempt(t *testing.T)
 		if got := strings.TrimSpace(r.Header.Get("Range")); got != "bytes=0-" {
 			t.Fatalf("range header=%q, want bytes=0-", got)
 		}
+		w.Header().Set("Content-Range", "bytes 0-19/20")
 		w.WriteHeader(http.StatusPartialContent)
 		if atomic.AddInt32(&calls, 1) == 1 {
 			flusher, _ := w.(http.Flusher)

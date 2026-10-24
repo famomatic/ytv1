@@ -140,31 +140,25 @@ func defaultOutputFilenameFromTemplate(info *VideoInfo, ext string, itag string,
 
 // IsMergedSelection reports whether selected formats represent video+audio merge output.
 func IsMergedSelection(formats []FormatInfo) bool {
-	if len(formats) < 2 {
-		return false
-	}
-	hasVideo := false
-	hasAudio := false
-	for _, format := range formats {
-		hasVideo = hasVideo || (format.HasVideo && !format.HasAudio)
-		hasAudio = hasAudio || (format.HasAudio && !format.HasVideo)
-	}
-	return hasVideo && hasAudio
+	v, a := MergedItags(formats)
+	return v != 0 && a != 0 && v != a
 }
 
-// MergedItags returns the first selected video and audio itags.
+// MergedItags returns the distinct video and audio tracks used by the downloader.
 func MergedItags(formats []FormatInfo) (int, int) {
-	videoItag := 0
-	audioItag := 0
-	for _, format := range formats {
-		if videoItag == 0 && format.HasVideo {
-			videoItag = format.Itag
-		}
-		if audioItag == 0 && format.HasAudio {
-			audioItag = format.Itag
+	v := 0
+	for _, f := range formats {
+		if f.HasVideo {
+			v = f.Itag
+			break
 		}
 	}
-	return videoItag, audioItag
+	for _, f := range formats {
+		if f.HasAudio && f.Itag != v {
+			return v, f.Itag
+		}
+	}
+	return v, 0
 }
 
 // DefaultOutputPath returns the package default output filename.

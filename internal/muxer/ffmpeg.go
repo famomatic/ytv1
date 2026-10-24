@@ -3,6 +3,7 @@ package muxer
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,16 @@ func (f *FFmpegMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPat
 		return err
 	}
 
-	args := f.mergeArgs(videoPath, audioPath, outputPath, meta)
+	tmp, err := os.CreateTemp(filepath.Dir(outputPath), ".ytv1-merge-*"+filepath.Ext(outputPath))
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	args := f.mergeArgs(videoPath, audioPath, tmpPath, meta)
 	cmd := exec.CommandContext(ctx, f.Path, args...)
 	cmd.Stdout = nil
 	// Capture stderr (bounded) so a merge failure carries ffmpeg's actual
@@ -64,15 +74,38 @@ func (f *FFmpegMuxer) Merge(ctx context.Context, videoPath, audioPath, outputPat
 	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if tail := strings.TrimSpace(stderr.String()); tail != "" {
 			return fmt.Errorf("ffmpeg merge failed: %w: %s", err, tail)
 		}
 		return fmt.Errorf("ffmpeg merge failed: %w", err)
 	}
 
-	// Clean up input files
-
-	return nil
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(tmpPath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	stat, statErr := file.Stat()
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if statErr != nil {
+		return statErr
+	}
+	if stat.Size() == 0 {
+		return fmt.Errorf("ffmpeg produced empty output")
+	}
+	if syncErr != nil {
+		return syncErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return installPureMuxOutput(tmpPath, outputPath)
 }
 
 func (f *FFmpegMuxer) mergeArgs(videoPath, audioPath, outputPath string, meta types.Metadata) []string {
@@ -82,6 +115,8 @@ func (f *FFmpegMuxer) mergeArgs(videoPath, audioPath, outputPath string, meta ty
 		"-protocol_whitelist", "file",
 		"-i", videoPath,
 		"-i", audioPath,
+		"-map", "0:v:0",
+		"-map", "1:a:0",
 		"-c:v", "copy",
 		"-c:a", "copy",
 	}

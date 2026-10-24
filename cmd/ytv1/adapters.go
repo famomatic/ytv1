@@ -74,6 +74,7 @@ func sleepWithContext(ctx context.Context, d time.Duration, sleepFn func(time.Du
 func buildDownloadOptions(opts cli.Options) client.DownloadOptions {
 	return client.BuildDownloadOptions(client.DownloadOptionsRequest{
 		FormatSelector:        opts.FormatSelector,
+		NoOverwrites: opts.NoOverwrites,
 		OutputTemplate:        opts.OutputTemplate,
 		OutputUseID:           opts.OutputUseID,
 		OutputPathDir:         opts.OutputPathDir,
@@ -99,6 +100,7 @@ func buildDownloadOptionsForVideo(info *client.VideoInfo, opts cli.Options) (cli
 		return client.DownloadOptions{}, err
 	}
 	downloadOpts.OutputPath = outputPath
+	downloadOpts.OutputPathResolved = true
 	return downloadOpts, nil
 }
 

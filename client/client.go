@@ -37,6 +37,7 @@ type Client struct {
 	sessions     map[string]videoSession
 	challengesMu sync.RWMutex
 	challenges   map[string]challengeSolutions
+	decipherers  map[string]cachedDecipherer
 	// fetchLocks serializes per-video-id fetch paths (session build,
 	// player URL resolution, challenge solve) to avoid thundering-herd
 	// duplicate network requests and lost cache updates.
@@ -370,15 +371,16 @@ func (c *Client) getVideoViaSource(ctx context.Context, src source.Source, input
 	}
 	info := mediaToVideoInfo(media)
 	info.SourceName = src.Name()
+	info.sourceHeaders = cloneHeader(media.MediaHeaders)
 	info.WebpageURL = firstNonEmptyString(media.WebpageURL, input)
 	c.cacheSourceSession(src.Name(), input, info, media.MediaHeaders)
 	return info, nil
 }
 
-// cacheSourceSession stores an extracted source result under two keys: the
-// media-id key (used by the download pipeline to resolve URLs and attach the
-// source's media headers) and the input key (so a following download reuses the
-// extraction instead of re-running it — see downloadViaSource).
+// cacheSourceSession stores one entry per extracted input. getSession resolves
+// its media-id alias without consuming another cache slot. Active operations
+// carry source identity and headers separately, so eviction cannot invalidate
+// a download already in progress.
 func (c *Client) cacheSourceSession(name, input string, info *VideoInfo, headers http.Header) {
 	sess := videoSession{
 		Info:         cloneVideoInfo(info),
@@ -404,7 +406,6 @@ func (c *Client) cacheSourceSession(name, input string, info *VideoInfo, headers
 			}
 		}
 	}
-	c.putSession(sourceSessionKey(name, info.ID), sess)
 	c.putSession(sourceInputKey(name, input), sess)
 }
 
@@ -672,6 +673,9 @@ func (c *Client) resolveStreamURLLocked(ctx context.Context, videoID string, ita
 }
 
 func (c *Client) resolveSelectedFormatURL(ctx context.Context, videoID string, f FormatInfo) (string, error) {
+	if op, ok := ctx.Value(sourceOperationKey{}).(sourceOperation); ok && op.id == videoID {
+		return f.URL, nil
+	}
 	// Source-backed sessions (e.g. SOOP) carry final, already-resolved media
 	// URLs — the YouTube signature/n-sig/PO-token rewriting below does not apply
 	// and normalizeVideoID would reject the "<source>:<id>" key.
@@ -903,6 +907,16 @@ func (c *Client) getSession(videoID string) (videoSession, bool) {
 	// lock.
 	c.sessionsMu.RLock()
 	s, ok := c.sessions[videoID]
+	if !ok {
+		for key, candidate := range c.sessions {
+			if candidate.SourceName != "" && candidate.Info != nil && sourceSessionKey(candidate.SourceName, candidate.Info.ID) == videoID {
+				videoID = key
+				s = candidate
+				ok = true
+				break
+			}
+		}
+	}
 	if ok {
 		expired := false
 		if ttl := effectiveSessionCacheTTL(c.config.SessionCacheTTL); ttl > 0 && !s.CachedAt.IsZero() && time.Since(s.CachedAt) > ttl {
@@ -1323,6 +1337,7 @@ func cloneVideoInfo(v *VideoInfo) *VideoInfo {
 		return nil
 	}
 	clone := *v
+	clone.sourceHeaders = cloneHeader(v.sourceHeaders)
 	if len(v.Keywords) > 0 {
 		clone.Keywords = append([]string(nil), v.Keywords...)
 	}

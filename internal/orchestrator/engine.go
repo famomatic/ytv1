@@ -284,7 +284,6 @@ func (e *Engine) withFallbackClients(clients []innertube.ClientProfile) []innert
 		seenFallback[key] = struct{}{}
 	}
 	appendIfMissing("web_embedded")
-	appendIfMissing("tv_downgraded")
 	appendIfMissing("tv")
 	return out
 }
@@ -459,6 +458,10 @@ func splitClientPhases(clients []innertube.ClientProfile) ([]innertube.ClientPro
 
 func isFallbackClient(c innertube.ClientProfile) bool {
 	id := strings.ToLower(strings.TrimSpace(c.ID))
+	if id == "tv_samsung" {
+		// Default primary client upstream (2026.10), not a last-resort fallback.
+		return false
+	}
 	if id == "web_embedded" || id == "web_embedded_player" || id == "tv" || id == "tvhtml5" || id == "tv_downgraded" {
 		return true
 	}
@@ -701,17 +704,33 @@ func firstNonEmpty(values ...string) string {
 }
 
 func errorScreenReason(es *innertube.ErrorScreen) string {
-	if es == nil || es.PlayerErrorMessageRenderer == nil {
+	if es == nil {
 		return ""
 	}
-	return langTextToString(es.PlayerErrorMessageRenderer.Reason)
+	if es.PlayerErrorMessageRenderer != nil {
+		if s := langTextToString(es.PlayerErrorMessageRenderer.Reason); s != "" {
+			return s
+		}
+	}
+	if es.PlayerInterstitialRenderer != nil {
+		return strings.TrimSpace(es.PlayerInterstitialRenderer.Content.InterstitialViewModel.Title.Content)
+	}
+	return ""
 }
 
 func errorScreenSubreason(es *innertube.ErrorScreen) string {
-	if es == nil || es.PlayerErrorMessageRenderer == nil {
+	if es == nil {
 		return ""
 	}
-	return langTextToString(es.PlayerErrorMessageRenderer.Subreason)
+	if es.PlayerErrorMessageRenderer != nil {
+		if s := langTextToString(es.PlayerErrorMessageRenderer.Subreason); s != "" {
+			return s
+		}
+	}
+	if es.PlayerInterstitialRenderer != nil {
+		return strings.TrimSpace(es.PlayerInterstitialRenderer.Content.InterstitialViewModel.Description.Content)
+	}
+	return ""
 }
 
 func langTextToString(v innertube.LangText) string {
